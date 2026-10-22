@@ -64,7 +64,7 @@ async def run():
             routes = {path: handler for path, handler, _, _ in native.registered_web_apis}
             paths = [role["life_api"] for target in controller.web_api.target_inventory() for role in target["roles"]]
             assert len(paths) == 4 and all(path in routes and path + "/command" in routes for path in paths)
-            weather_path = "/astrbot_plugin_private_companion_v2/host-options/weather"
+            weather_path = "/astrbot_plugin_private_companion/host-options/weather"
             weather_routes = [item for item in native.registered_web_apis if item[0] == weather_path]
             assert len(weather_routes) == 2 and {method for item in weather_routes for method in item[2]} == {"GET", "POST"}
 

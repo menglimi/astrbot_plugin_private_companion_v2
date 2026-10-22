@@ -10,7 +10,7 @@
    工作台两种形状都认，所以不需要为它改接口。 */
 "use strict";
 window.CompanionExpressionLearningPage = (() => {
-  const PREFIX = "/astrbot_plugin_private_companion_v2/";
+  const PREFIX = "/astrbot_plugin_private_companion/";
   const SPECS = {
     private: {group:"expression.learning.private", title:"私聊学习开关",
       labels:{private_learning_enabled:"允许从此用户的私聊中学习"},

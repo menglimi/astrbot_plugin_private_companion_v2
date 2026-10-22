@@ -7,7 +7,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const source = fs.readFileSync(path.resolve(__dirname, "../pages/陪伴小屋/screen-access.js"), "utf8");
-const prefix = "/astrbot_plugin_private_companion_v2";
+const prefix = "/astrbot_plugin_private_companion";
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const settle = async () => { for (let i = 0; i < 10; i += 1) await flush(); };
 

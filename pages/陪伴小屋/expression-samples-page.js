@@ -1,6 +1,6 @@
 "use strict";
 window.CompanionExpressionSamplesPage = (() => {
-  const PREFIX = "/astrbot_plugin_private_companion_v2/";
+  const PREFIX = "/astrbot_plugin_private_companion/";
   const FILTERS = [["all", "全部"], ["pending", "待审"], ["approved", "已允许"], ["rejected", "已排除"]];
   const STATES = {pending: "待审", approved: "已允许", rejected: "已排除"};
   const ERRORS = {

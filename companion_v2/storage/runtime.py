@@ -13,6 +13,8 @@ import time
 from typing import Iterator
 
 from .schema import (
+    SCHEMA_VERSION_V65, MIGRATION_V64_TO_V65_ID, MIGRATION_V64_TO_V65_FINGERPRINT,
+    V65_MIGRATION_STATEMENTS, V65_REQUIRED_TABLES, V65_SCHEMA_STATEMENTS,
     SCHEMA_VERSION_V64, MIGRATION_V63_TO_V64_ID, MIGRATION_V63_TO_V64_FINGERPRINT,
     V64_MIGRATION_STATEMENTS, V64_REQUIRED_TABLES, V64_SCHEMA_STATEMENTS,
     SCHEMA_VERSION_V63, MIGRATION_V62_TO_V63_ID, MIGRATION_V62_TO_V63_FINGERPRINT,
@@ -591,6 +593,7 @@ class StorageRuntime:
                 self._migrate_v61_to_v62(connection)
                 self._migrate_v62_to_v63(connection)
                 self._migrate_v63_to_v64(connection)
+                self._migrate_v64_to_v65(connection)
                 return
             if "runtime_metadata" not in existing_tables:
                 raise StorageOpenError("V2 data root is partially initialized")
@@ -1319,12 +1322,20 @@ class StorageRuntime:
                 self._migrate_v63_to_v64(connection)
                 version = SCHEMA_VERSION_V64
                 existing_tables = _existing_tables(connection)
+            if version == SCHEMA_VERSION_V64:
+                _validate_table_shapes(connection, V64_SCHEMA_STATEMENTS, V64_REQUIRED_TABLES)
+                _validate_integrity(connection)
+                for previous in range(2, 65):
+                    getattr(self, f"_validate_v{previous}_migration_record")(connection)
+                self._migrate_v64_to_v65(connection)
+                version = SCHEMA_VERSION_V65
+                existing_tables = _existing_tables(connection)
             if version != SCHEMA_VERSION:
                 raise StorageOpenError("V2 data root has an incompatible schema version")
-            missing = V64_REQUIRED_TABLES.difference(existing_tables)
+            missing = V65_REQUIRED_TABLES.difference(existing_tables)
             if missing:
                 raise StorageOpenError("V2 data root is missing required schema objects")
-            _validate_table_shapes(connection, V64_SCHEMA_STATEMENTS, V64_REQUIRED_TABLES)
+            _validate_table_shapes(connection, V65_SCHEMA_STATEMENTS, V65_REQUIRED_TABLES)
             # Each schema migration runs a full integrity check at its boundary.
             # Rechecking every page and foreign key on every normal startup makes
             # open time grow with the data store, even when the schema is current.
@@ -1393,6 +1404,7 @@ class StorageRuntime:
             self._validate_v61_migration_record(connection)
             self._validate_v62_migration_record(connection)
             self._validate_v64_migration_record(connection)
+            self._validate_v65_migration_record(connection)
 
     def _migrate_v53_to_v54(self, connection):
         for statement in V54_MIGRATION_STATEMENTS:
@@ -1624,6 +1636,27 @@ class StorageRuntime:
         if row is None or (row["from_version"] != SCHEMA_VERSION_V63 or row["to_version"] != SCHEMA_VERSION_V64
                            or row["fingerprint"] != MIGRATION_V63_TO_V64_FINGERPRINT):
             raise StorageOpenError("V2 data root has an untrusted v64 migration record")
+
+    def _migrate_v64_to_v65(self, connection):
+        for statement in V65_MIGRATION_STATEMENTS:
+            connection.execute(statement)
+        _validate_table_shapes(connection, V65_SCHEMA_STATEMENTS, V65_REQUIRED_TABLES)
+        _validate_integrity(connection)
+        connection.execute("INSERT INTO schema_migrations VALUES (?, ?, ?, ?, ?)", (
+            MIGRATION_V64_TO_V65_ID, SCHEMA_VERSION_V64, SCHEMA_VERSION_V65,
+            MIGRATION_V64_TO_V65_FINGERPRINT, datetime.now(timezone.utc).isoformat()))
+        changed = connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = ? AND value = ?",
+                                     (SCHEMA_VERSION_V65, "schema_version", SCHEMA_VERSION_V64))
+        if changed.rowcount != 1:
+            raise StorageOpenError("V2 v65 migration lost its schema boundary")
+
+    @staticmethod
+    def _validate_v65_migration_record(connection):
+        row = connection.execute("SELECT * FROM schema_migrations WHERE migration_id = ?",
+                                 (MIGRATION_V64_TO_V65_ID,)).fetchone()
+        if row is None or (row["from_version"] != SCHEMA_VERSION_V64 or row["to_version"] != SCHEMA_VERSION_V65
+                           or row["fingerprint"] != MIGRATION_V64_TO_V65_FINGERPRINT):
+            raise StorageOpenError("V2 data root has an untrusted v65 migration record")
 
     def _migrate_v52_to_v53(self, connection):
         for statement in V53_MIGRATION_STATEMENTS:
@@ -2830,6 +2863,23 @@ def _validate_data_root(value: Path) -> Path:
     root = value.resolve()
     if not root.name:
         raise StoragePathError("data_root must name a dedicated V2 directory")
-    if any(part.lower() in LEGACY_PLUGIN_DIRECTORY_NAMES for part in root.parts):
-        raise StoragePathError("V2 must not use a V1 plugin directory as its data root")
+    for ancestor in (root, *root.parents):
+        if ancestor.name.casefold() not in LEGACY_PLUGIN_DIRECTORY_NAMES:
+            continue
+        relative = root.relative_to(ancestor).parts
+        # The public plugin name is shared with 6.x. Its isolated upgrade child
+        # and a fresh installation's profiles must remain usable after takeover.
+        # Old data itself, other legacy plugins and arbitrary children stay read-only.
+        if (ancestor.name.casefold() != "astrbot_plugin_private_companion" or not relative
+                or relative[0].casefold() not in ("companion-7", "profiles")):
+            raise StoragePathError("V2 must not use a V1 plugin directory as its data root")
+        boundary = ancestor / relative[0]
+        checked = (root, *(parent for parent in root.parents if parent.is_relative_to(boundary)))
+        owned = any((ancestor / marker).is_file() for marker in (
+            ".companion-v2-storage-owner.json", ".companion-v2-storage-location.json"))
+        if relative[0].casefold() == "profiles" and not owned:
+            checked = (*checked, ancestor)
+        if any((folder / marker).exists() for folder in checked
+               for marker in ("companions.json", "companions.db", ".storage-backend-state.json")):
+            raise StoragePathError("V2 runtime must stay outside legacy user data")
     return root

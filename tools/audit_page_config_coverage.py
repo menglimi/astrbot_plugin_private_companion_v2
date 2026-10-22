@@ -49,6 +49,44 @@ MODULES = {
     # 唯一一个四层组（安装/角色/关系/窗口），160 个字段；此前不在表里，
     # 于是整组不参与自检——92 项没有控件的字段也一直是「通过」。
     "proactive.contact": "companion_v2.proactive.configuration",
+    # 以下六个分区此前有 spec、却不在表里，等于整组没有断言：漏了控件也不会变红。
+    "image.output": "companion_v2.conversation.media.output_settings",
+    "expression.learning": "companion_v2.expression.configuration",
+    "role_profile": "companion_v2.role_profile.configuration",
+    "relationship_profile": "companion_v2.relationships.profile",
+    # 这一组的字段分在两个模块里：正文方向在 authoring_service，封面选项在
+    # cover_assets。只指一个模块会漏掉另一半，所以用 cover_assets 的整组访问器。
+    "content.authoring": "companion_v2.conversation.content.cover_assets:group_fields",
+}
+
+# 控件不在 config-editor 的 spec 里、而由各页面自己的字段表渲染的分区。
+# 这里断言「承接页面还在，且至少有一个字段名出现在里面」——页面被改名或删掉时
+# 会变红，但受限于各页面的动态拼名，不做逐字段断言（逐字段的现状见
+# docs/CONFIG_SURFACE_GAPS_20261017.md）。
+DEDICATED_EDITORS = {
+    "memory": {"module": "companion_v2.memory.configuration",
+               "pages": ("pages/陪伴小屋/memory-settings-section.js",)},
+    "conversation.presentation": {"module": "companion_v2.conversation.reply_settings",
+                                  "pages": ("pages/陪伴小屋/reply-page.js",)},
+    "conversation.perception": {"module": "companion_v2.conversation.perception_settings",
+                                "pages": ("pages/陪伴小屋/perception-native-page.js",)},
+    "role.state": {"module": "companion_v2.role_work.state.configuration",
+                   "pages": ("pages/陪伴小屋/state-maintenance.js",
+                             "pages/陪伴小屋/state-editor.js",
+                             "pages/陪伴小屋/state-page.js")},
+    "expression.learning.group": {"module": "companion_v2.expression.configuration:group_configuration_fields",
+                                  "pages": ("pages/陪伴小屋/expression-page.js",)},
+    "expression.learning.private": {"module": "companion_v2.expression.configuration:private_configuration_fields",
+                                    "pages": ("pages/陪伴小屋/expression-page.js",)},
+    "expression.learning.role": {"module": "companion_v2.expression.configuration:role_scope_configuration_fields",
+                                 "pages": ("pages/陪伴小屋/config-editor.js",),
+                                 # 页面把这一组落成带 expression_ 前缀的同名控件
+                                 # （expression_private_source_mode …），按前缀放行。
+                                 "prefixes": ("expression_",)},
+    "role.growth": {"module": "companion_v2.role_work.growth.configuration",
+                    "pages": ("pages/陪伴小屋/learning-page.js",)},
+    "person.learning": {"module": "companion_v2.memory.person.configuration:learning_configuration_fields",
+                        "pages": ("pages/关系与权限/member-editor.js",)},
 }
 
 # 有意不接的字段：值写明理由。**不要**为了「让自检通过」把它们加进页面，
@@ -62,7 +100,12 @@ INTENTIONAL = {
         "mood_cross_window": "跨窗口共享，操作员难以判断实际影响",
         "mood_interest_window_minutes": "与更新概率高度耦合，单独调反而更难预期",
         "mood_neutral_band": "偏玄学，默认值已够用",
-        "online_status_enabled": "保存时会撤销对应 grant，与授权流程耦合",
+    },
+    # 这两个开关按范围单独维护：私聊的在 expression-page.js 的「私聊学习」段，
+    # 群聊的在「本群学习」段，属主是下面的 .private / .group 两个子分区。
+    "expression.learning": {
+        "private_learning_enabled": "由表达页「私聊学习」段维护（expression.learning.private）",
+        "group_learning_enabled": "由表达页「本群学习」段维护（expression.learning.group）",
     },
     "role.life": {},
 }
@@ -107,7 +150,18 @@ def backend_fields(module_name):
     """
     target, _, factory = module_name.partition(":")
     module = importlib.import_module(target)
-    fields = getattr(module, factory or "configuration_fields")()
+    factory = factory or "configuration_fields"
+    try:
+        fields = getattr(module, factory)()
+    except TypeError:
+        # reply_settings 的字段随分段策略与流式开关变化，必须传参才能展开；
+        # 这里用出厂默认值取全量，和 tools/audit_configuration_scopes.py 一致。
+        if target != "companion_v2.conversation.reply_settings":
+            raise
+        from companion_v2.conversation.segmentation import SegmentationPolicy
+        fields = getattr(module, factory)(SegmentationPolicy(), False, 0.5)
+        if isinstance(fields, tuple) and fields and not hasattr(fields[0], "field_id"):
+            fields = fields[0]
     if not fields:
         return None, set()
     group = fields[0].group_id
@@ -125,6 +179,33 @@ def main():
     missing_sections = [kind for kind in MODULES if kind not in spec and kind not in EXTERNAL_CONTROLS]
     for kind in missing_sections:
         problems.append(f"分区 {kind} 在注册表里有、前端 spec 里没有")
+
+    # 专用编辑器：页面在不在、字段名还在不在。不做逐字段断言（见 DEDICATED_EDITORS 注释）。
+    # role.growth / person.learning 在 MODULES 里已经按字段断言过，这里只补页面存在性，
+    # 不重复计数（否则总数会比注册表多出这几项）。
+    asserted_groups = set()
+    for module_name in MODULES.values():
+        group, short = backend_fields(module_name)
+        if short:
+            asserted_groups.add(group)
+    for kind, entry in DEDICATED_EDITORS.items():
+        group, short = backend_fields(entry["module"])
+        if not short:
+            problems.append(f"分区 {kind}: {entry['module']} 没声明字段")
+            continue
+        if group not in asserted_groups:
+            counted[kind] = short
+            asserted_groups.add(group)
+        pages, sources = entry["pages"], []
+        for page in pages:
+            path = ROOT / page
+            if not path.is_file():
+                problems.append(f"分区 {kind} ({group}): 承接页面 {page} 不存在")
+                continue
+            sources.append(path.read_text(encoding="utf-8"))
+        wanted = {prefix + name for name in short for prefix in entry.get("prefixes", ("",))}
+        if sources and not any(candidate in "\n".join(sources) for candidate in wanted):
+            problems.append(f"分区 {kind} ({group}): 承接页面里找不到任何字段名，控件可能已被删掉")
 
     for kind, module_name in MODULES.items():
         group, short = backend_fields(module_name)
@@ -168,8 +249,10 @@ def main():
     total = sum(len(names) for names in counted.values())
     excused = sum(len(group) for group in INTENTIONAL.values())
     external = sum(len(group) for group in EXTERNAL_CONTROLS.values())
+    dedicated = sum(len(counted[kind]) for kind in DEDICATED_EDITORS if kind in counted)
     print(f"全部 {len(counted)} 个分区覆盖自检通过"
-          f"（共 {total} 字段，其中 {excused} 项有意不接、{external} 项由其他页面维护）")
+          f"（共 {total} 字段，其中 {excused} 项有意不接、{external} 项由其他页面维护、"
+          f"{dedicated} 项由专用编辑器承接）")
     return 0
 
 

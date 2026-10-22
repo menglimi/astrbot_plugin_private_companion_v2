@@ -32,9 +32,9 @@ A2,enable_recall_cancel_reply,待接入,已接入,companion_v2/conversation/reca
 A2,enable_recall_enhancement,待接入,部分接入,companion_v2/conversation/recalls.py,失效链完整，无违禁词主动撤回
 A2,forward_message_debounce_seconds,待接入,已接入,companion_v2/conversation/flow.py,静默期覆盖合并转发
 A2,forward_message_max_chars,待接入,已接入,companion_v2/conversation/forwards/models.py,
-A2,forward_message_max_messages,待接入,已接入,companion_v2/conversation/forwards/models.py,MAX_NODES=32
+A2,forward_message_max_messages,待接入,已接入,companion_v2/conversation/forwards/models.py,DEFAULT_MAX_NODES=32；MAX_NODES=300；V1 旧值全范围映射
 A2,forward_message_mode,待接入,已接入,companion_v2/conversation/forwards/service.py,统一自然阅读
-A2,forward_message_parse_nested,待接入,已接入,companion_v2/conversation/forwards/models.py,MAX_DEPTH=4
+A2,forward_message_parse_nested,待接入,已接入,companion_v2/conversation/forwards/models.py,ForwardIntakePolicy.parse_nested；默认开启并提供管理页开关
 A2,group_scene_recent_limit,待接入,已接入,companion_v2/conversation/group_context.py,MAX_ITEMS=16
 A2,group_scene_recent_max_chars,待接入,已接入,companion_v2/conversation/group_context.py,MAX_BYTES=16384
 A2,image_message_debounce_seconds,待接入,已接入,companion_v2/conversation/flow.py,

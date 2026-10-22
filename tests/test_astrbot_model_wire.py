@@ -18,6 +18,23 @@ REPORTED_USAGE = Amount(40, 90, input_tokens=30, cached_input_tokens=10, output_
 
 
 class NativeModelTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_state_and_planning_use_json_mode_and_end_with_their_task_contract(self):
+        envelope = await self.envelope()
+        for kind in ("role_state", "calendar_planning"):
+            request = replace(envelope.original, output_format=kind, response_format="json_object",
+                              instruction="维护角色数据，只输出 JSON。")
+            wire = build_wire(replace(envelope, original=request))
+            self.assertEqual(wire.messages[0]["content"], envelope.original.role_instruction)
+            self.assertIn("不写聊天回复", wire.messages[-1]["content"])
+            self.assertNotIn("claims", wire.messages[-1]["content"])
+            async def respond(*_):
+                return completion('{"items":[]}')
+            self.native.provider.client.state.behavior = respond
+            result = await self.native_model.generate(replace(envelope, original=request))
+            self.assertEqual(result.status, "generated")
+            payload, _ = self.native.provider.client.state.calls[-1]
+            self.assertEqual(payload["response_format"], {"type": "json_object"})
+
     async def test_model_wire_records_the_final_prompt_when_a_snapshot_sink_is_attached(self):
         envelope = await self.envelope()
         snapshots = []
@@ -409,16 +426,21 @@ class NativeModelTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.native.provider.client.state.calls, [])
 
     async def test_host_persona_switch_during_generation_discards_tools_and_keeps_usage(self):
-        envelope = await self.envelope()
+        self.map_second_native_persona()
+        envelope = await self.envelope(tools=(ToolSpec("memo.list", "list", '{"type":"object"}'),))
         async def respond(*_):
-            self.native.selected = "different"
-            return completion()
+            # V2 follows the installed window/persona mapping, not the host's
+            # unrelated global default. Change that actual mapping in-flight.
+            self.select_window_persona("second")
+            return completion(tools=[NS(id="stale-call", type="function",
+                function=NS(name=tool_alias("memo.list"), arguments="{}"))])
         self.native.provider.client.state.behavior = respond
         response = await self.native_model.generate(envelope)
         self.assertEqual(response.status, "unknown")
         self.assertEqual(response.failure, ModelFailure.ROLE_RECHECK)
         self.assertEqual(response.usage, REPORTED_USAGE)
         self.assertIsNone(response.draft)
+        self.assertEqual(response.tool_calls, ())
 
     async def test_provider_change_after_response_has_its_own_failure_classification(self):
         envelope = await self.envelope()

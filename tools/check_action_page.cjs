@@ -7,7 +7,7 @@ const {pathToFileURL}=require("node:url");
 const {chromium}=require("playwright");
 
 function syntheticBridge(){
-  const host="astrbot_plugin_private_companion_v2";
+  const host="astrbot_plugin_private_companion";
   window.AstrBotPluginPage={
     ready:async()=>({pluginName:host}),
     onContext:()=>()=>{},

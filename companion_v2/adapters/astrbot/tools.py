@@ -68,6 +68,13 @@ class CompositeAstrBotToolPort:
                 return current
         return None
 
+    def provider_admission(self, host_tool_id):
+        for port in self.ports:
+            if any(item.host_tool_id == host_tool_id for item in port.declarations()):
+                factory = getattr(port, "provider_admission", None)
+                return factory(host_tool_id) if callable(factory) else None
+        return None
+
     async def invoke(self, host_tool_id, invocation):
         for port in self.ports:
             if any(item.host_tool_id == host_tool_id for item in port.declarations()):
@@ -203,5 +210,7 @@ def map_tools(runtime, port: AstrBotToolPort) -> ExternalToolExecutor:
                 raise RuntimeError("original host declaration is no longer loaded")
             return await port.invoke(declaration.host_tool_id, invocation)
 
-        providers.append(ExternalToolProvider(declaration.descriptor, invoke, current))
+        admission_factory = getattr(port, "provider_admission", None)
+        admit = admission_factory(declaration.host_tool_id) if callable(admission_factory) else None
+        providers.append(ExternalToolProvider(declaration.descriptor, invoke, current, admit))
     return ExternalToolExecutor(runtime, tuple(providers))

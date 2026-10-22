@@ -107,8 +107,17 @@ window.CompanionShell = (() => {
     shell.dataset.away = String(Boolean(state.section));
   }
 
-  /* 左栏导航。状态由首页右侧看板进入，避免与人格总览重复占位。 */
+  /* 左栏导航。四组都有标题：此前第一组没有分组名，「关系网」到「治理与维护」
+     六项悬在左栏顶部，而下面两组却有「能力配置」「设置」——同一列里一半有
+     标题一半没有，看起来像漏渲染。
+     「生活」这一组是二级视图（状态页、日记），此前只能从首页右栏或底部进入：
+     状态页有 85 个字段、13 个功能图块，是最大的配置面之一，离开后却只能回首页
+     再点一次；日记同理。视图用 kind="view"，点击走 data-shell-view。 */
   const RAIL_GROUPS = [
+    ["生活", [
+      ["state", "activity", "状态与日程", "view"],
+      ["diary", "book-open", "日记与生活", "view"],
+    ]],
     ["专题配置", [
       ["identity", "network", "关系网"],
       ["contact", "heart-handshake", "主动与联系"],
@@ -116,7 +125,7 @@ window.CompanionShell = (() => {
       ["learning", "graduation-cap", "学习与反思"],
       ["models", "sliders-horizontal", "模型与连接"],
       ["maintenance", "settings-2", "治理与维护"],
-    ], { untitled: true }],
+    ]],
     ["能力配置", [
       ["perception", "scan-eye", "感知"],
       ["understanding", "brain-circuit", "理解"],
@@ -134,17 +143,26 @@ window.CompanionShell = (() => {
     ]],
   ];
 
+  /* 导航的唯一一份分组数据。左栏和「全部功能」浮层都读它，
+     免得两处各维护一套名字（曾经浮层里叫「学习与成长」「资料与备份」，
+     左栏叫「学习与反思」「资料与维护」，同一个页面两个名字）。 */
+  function railGroups() {
+    return RAIL_GROUPS.map(([group, items]) => [group, items.map(([id, icon, label, kind]) => ({
+      id, icon, label, view: kind === "view",
+    }))]);
+  }
+
   function railHTML() {
-    return RAIL_GROUPS.map(([group, items, options]) => `
+    return RAIL_GROUPS.map(([group, items]) => `
       <div class="shell-nav-group">
-        ${options?.untitled ? "" : `<span class="shell-nav-title">${group}</span>`}
+        <span class="shell-nav-title">${group}</span>
         ${items.map(([id, icon, label, kind]) => {
           const isView = kind === "view";
           const active = isView ? state.view === id : state.section === id;
           const action = isView ? `data-shell-view="${id}"` : `data-shell-section="${id}"`;
           return `
           <button class="shell-nav-link" ${action}
-                  aria-pressed="${active}" title="${label}">
+                  aria-pressed="${active}" ${active ? 'aria-current="page"' : ""} title="${label}">
             ${I(icon)}<span>${label}</span>
           </button>`;
         }).join("")}
@@ -154,7 +172,7 @@ window.CompanionShell = (() => {
   return {
     $, $$, I,
     STAGE_STATIONS, VIEWS,
-    onChange, emit, paint, railHTML,
+    onChange, emit, paint, railHTML, railGroups,
     selectFurniture, selectSection, selectView, snapshot,
     get furniture() { return state.furniture; },
     get section() { return state.section; },

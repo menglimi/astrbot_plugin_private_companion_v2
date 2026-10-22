@@ -136,7 +136,7 @@ def create_bundled_extension(data_root, name, *, now=None, context=None, control
     config = ExtensionSettings(root, name)
     module = import_module("." + name + ".runtime", __package__)
     runtime = getattr(module, name.title() + "Runtime")(context, config, config.root, controller)
-    return BundledNativeLease("astrbot_plugin_private_companion_v2." + name,
+    return BundledNativeLease("astrbot_plugin_private_companion." + name,
         runtime.build_native(PRODUCT_VERSION), api=runtime, factory=factory,
         furniture=FurnitureDescriptor(name, name, labels[name], name))
 
@@ -155,6 +155,6 @@ def create_bundled_extensions(data_root: Path, *, now=None, context=None, contro
             safe_code = (code if name == "image" and isinstance(code, str) and code.isascii()
                          and len(code) <= 80 and code.replace("_", "").isalnum()
                          else "native_extension_unavailable")
-            issues.append(("astrbot_plugin_private_companion_v2." + name, safe_code))
+            issues.append(("astrbot_plugin_private_companion." + name, safe_code))
             logging.getLogger(__name__).exception("V2 native module unavailable: %s", name)
     return tuple(leases), tuple(issues)

@@ -361,7 +361,7 @@ class NativePrivateBridge:
         conversation_id, role, instruction = await self._role_for_umo(account, umo)
         return self._role_conversation_id(conversation_id, role), role, instruction
 
-    async def _selected_persona(self, account, umo):
+    async def _selected_persona(self, account, umo, *, fresh_selection=False):
         """Resolve the V2 override or AstrBot's active persona through a trusted mapping."""
         manager = self.context.conversation_manager
         cid = await bounded_native_lookup(manager.get_curr_conversation_id(umo), operation="conversation_id")
@@ -375,11 +375,14 @@ class NativePrivateBridge:
             if inspect.isawaitable(snapshot):
                 snapshot = await bounded_native_lookup(snapshot, operation="persona_snapshot", report_slow=False)
         snapshot_persona = (snapshot.get("persona_id") if isinstance(snapshot, dict)
-            and snapshot.get("bot_id") == account.bot_id and snapshot.get("persona_id") in projected_ids else None)
-        window_snapshot_used = snapshot_persona is not None
+            and snapshot.get("bot_id") == account.bot_id and snapshot.get("persona_id") in projected_ids
+            else None)
+        window_snapshot_used = snapshot_persona is not None and not fresh_selection
         if window_snapshot_used:
-            # The installed window mapping survives /reset and persona edits. Its
-            # current V2 role comes from the active manifest, not a stale snapshot field.
+            # A verified window binding belongs to the UMO, not to AstrBot's
+            # replaceable conversation row. Conversation reset/recreation must
+            # keep the window's role until an explicit refresh rechecks the
+            # native persona selection.
             selected = snapshot_persona
         else:
             override = None
@@ -391,8 +394,6 @@ class NativePrivateBridge:
                         or any(ord(char) < 32 for char in override)):
                     raise TaskError("host_persona_invalid", "the V2 window persona override is invalid")
                 selected = override
-            elif len(projected_ids) == 1:
-                selected = projected_ids[0]
             else:
                 if self.persona_snapshot_lookup is not None:
                     conversation_persona_id = await bounded_native_lookup(

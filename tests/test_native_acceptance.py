@@ -63,7 +63,7 @@ class NativeAcceptanceBoundaryTests(unittest.TestCase):
             sys.modules.pop(alias.__name__, None)
 
     def test_name_alias_discovery_is_denied_and_v2_name_is_distinct(self):
-        current = NS(name="astrbot_plugin_private_companion_v2", root_dir_name="astrbot_plugin_private_companion_v2")
+        current = NS(name="astrbot_plugin_private_companion", root_dir_name="astrbot_plugin_private_companion")
         with self.guard() as guard:
             self.assertIs(guard.discover(current.name, [current]), current)
             for name in ("astrbot_plugin_private_companion", "PrivateCompanion"):
@@ -153,14 +153,14 @@ open('data/astrbot_plugin_private_companion/user.json')
 
     def test_snapshot_never_copies_data_or_live_legacy_siblings(self):
         scanner = self.root / "scanner"
-        source = scanner / "astrbot_plugin_private_companion_v2"
+        source = scanner / "astrbot_plugin_private_companion"
         source.mkdir(parents=True)
         for name, text in {"main.py":"pass\n", "metadata.yaml":"name: fixture\n", "_conf_schema.json":"{}\n", "requirements.txt":"\n"}.items():
             (source / name).write_text(text, encoding="utf-8")
         (source / "companion_v2" / "data").mkdir(parents=True)
         (source / "companion_v2" / "data" / "user.py").write_text("should never be copied", encoding="utf-8")
         (scanner / "astrbot_plugin_private_companion").mkdir()
-        target = self.root / "scratch" / "astrbot_plugin_private_companion_v2"
+        target = self.root / "scratch" / "astrbot_plugin_private_companion"
         inventory = snapshot(source, target)
         self.assertEqual(len(inventory["files"]), 4)
         self.assertFalse((target / "companion_v2" / "data").exists())

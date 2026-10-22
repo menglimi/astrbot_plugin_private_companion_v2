@@ -18,7 +18,7 @@ from companion_v2.storage.management import retention_policy
 from .management_identity import dashboard_operator
 
 
-PREFIX = "/astrbot_plugin_private_companion_v2/backup"
+PREFIX = "/astrbot_plugin_private_companion/backup"
 MAX_REQUEST_BYTES = 65536
 
 

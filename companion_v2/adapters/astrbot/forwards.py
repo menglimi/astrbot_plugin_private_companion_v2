@@ -115,6 +115,8 @@ def freeze_nodes(records, resource_hash, *, audio_enabled=True, video_enabled=Tr
                         raise TaskError("host_forward_unsupported", "forward video decoder is unavailable")
                     videos.append(video_locator(position, data.get("file"), data.get("url")))
                     text.append("\n[视频 " + str(len(videos)) + "]\n")
+                elif kind in ("forward", "node") and not intake.parse_nested:
+                    text.append("\n[嵌套转发未展开 组件 " + str(position) + "]\n")
                 elif kind in ("forward", "node"):
                     children = data.get("content") if kind == "forward" else [part]
                     # NapCat expands nested contents with the outer read. Its

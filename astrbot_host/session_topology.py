@@ -11,6 +11,7 @@ from companion_v2.adapters.astrbot.group import group_event_route
 from companion_v2.adapters.astrbot.native import (
     account_number,
     bounded_native_lookup,
+    configured_default_persona_id,
 )
 from companion_v2.execution.models import TaskError, digest
 from .identity_derivation import derive_bot_id, derive_role_id, role_display_name
@@ -199,7 +200,6 @@ class SessionTopology:
         if settings is None:
             return
         mappings = tuple(settings.personas)
-        lookup = getattr(self.controller.native_types, "persona_selection_lookup", None)
         windows = []
         windows.extend((target, f"{target.platform_id}:FriendMessage:{target.participant_id}", "private")
                        for target in settings.targets if target.participant_id != "*")
@@ -222,12 +222,9 @@ class SessionTopology:
                             if callable(override_lookup) and not umo.endswith(":*") else None)
                 if selected == "":
                     selected = None
-                if selected is None and len(candidates) == 1:
-                    selected = candidates[0].persona_id
-                elif selected is None and callable(lookup):
-                    resolved = lookup(self.controller.context, umo, None)
-                    selected = (await bounded_native_lookup(resolved, operation="persona", report_slow=False)
-                                if inspect.isawaitable(resolved) else resolved)
+                if selected is None:
+                    # A single registered mapping is not a native persona choice.
+                    selected = await self._selected_native_persona(umo, None)
             except TaskError:
                 continue
             mapping = next((item for item in candidates if item.persona_id == selected), None)
@@ -238,6 +235,22 @@ class SessionTopology:
                 "role_id": mapping.role_id, "conversation_id": None,
                 "selection_source": "configured",
             }
+
+    async def _selected_native_persona(self, umo, conversation_persona_id):
+        # AstrBot routes a group's persona through the per-UMO agent config. The
+        # conversation row still carries the private/default persona, and passing
+        # it here would make every group window look like the private persona.
+        if type(umo) is str and ":GroupMessage:" in umo:
+            configured = configured_default_persona_id(self.controller.context, umo)
+            if (configured not in (None, "", "default", "[%None]")
+                    and conversation_persona_id not in ("default", "[%None]")):
+                conversation_persona_id = None
+        lookup = getattr(self.controller.native_types, "persona_selection_lookup", None)
+        if callable(lookup):
+            resolved = lookup(self.controller.context, umo, conversation_persona_id)
+            return (await bounded_native_lookup(resolved, operation="persona", report_slow=False)
+                    if inspect.isawaitable(resolved) else resolved)
+        return conversation_persona_id or configured_default_persona_id(self.controller.context, umo)
 
     async def reply_enabled(self, event):
         try:
@@ -454,6 +467,7 @@ class SessionTopology:
                 **({"display_name": observed_name, "group_name": observed_name} if kind == "group" and observed_name else {}),
                 "conversation_id": "", "managed": False, "native": True,
                 "details_available": False, "persona_id": "", "persona_override": "",
+                "persona_source": "unresolved",
                 "llm_enabled": True, "session_enabled": True, "persona_pinned": False, "roles": []})
         return result
 
@@ -502,24 +516,17 @@ class SessionTopology:
             binding = binding or next((row for row in matches if row.get(peer_field) == "*"), None)
             if override is not None:
                 selected = override
+                persona_source = "v2_window_override"
             else:
-                mapped_ids = {row.get("persona_id") for row in mappings
-                              if row.get("bot_id") == account["bot_id"]}
-                if len(mapped_ids) == 1:
-                    selected = next(iter(mapped_ids))
-                elif self.controller._multi_host:
-                    native_persona = item.get("persona_id")
-                    lookup = getattr(self.controller.native_types, "persona_selection_lookup", None)
-                    if callable(lookup):
-                        resolved = lookup(self.controller.context, umo, native_persona)
-                        native_persona = (await bounded_native_lookup(
-                            resolved, operation="persona", report_slow=False)
-                            if inspect.isawaitable(resolved) else resolved)
-                    selected = native_persona if type(native_persona) is str and native_persona in mapped_ids else ""
+                if self.controller._multi_host:
+                    native_persona = await self._selected_native_persona(umo, item.get("persona_id"))
+                    selected = native_persona if type(native_persona) is str else ""
+                    persona_source = "astrbot_selection" if selected else "unresolved"
                 elif not self.controller._multi_host:
                     configured_ids = {persona_id for row in matches for role_row in row.get("roles", [])
                                       for persona_id in role_row.get("persona_ids", []) if persona_id}
                     selected = next(iter(configured_ids)) if len(configured_ids) == 1 else ""
+                    persona_source = "role_mapping" if selected and binding else "unresolved"
             role = next((row["role_id"] for row in mappings if row.get("bot_id") == account["bot_id"]
                          and row.get("persona_id") == selected), None)
             if binding and not self.controller._multi_host:
@@ -534,6 +541,7 @@ class SessionTopology:
                 "managed": binding is not None and (not self.controller._multi_host or role is not None),
                 "native": True, "details_available": True,
                 "persona_id": selected, "persona_override": services.get("persona_id") or "",
+                "persona_source": persona_source,
                 "llm_enabled": services.get("llm_enabled", True),
                 "session_enabled": services.get("session_enabled", True),
                 "persona_pinned": bool(binding and not self.controller._multi_host),

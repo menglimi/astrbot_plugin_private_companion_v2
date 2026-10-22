@@ -88,7 +88,7 @@ async def run():
                     assert response["status"] == "ok", response
                     return response["data"]
 
-                directory = await read("/astrbot_plugin_private_companion_v2/page/targets")
+                directory = await read("/astrbot_plugin_private_companion/page/targets")
                 assert directory["targets"]
                 role = next(role for role in directory["targets"][0]["roles"] if role["role_id"] == "role-a")
                 await read(role["state_api"])

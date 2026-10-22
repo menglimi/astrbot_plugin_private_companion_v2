@@ -16,7 +16,7 @@ from .native import remember_session_settings
 from .settings import HostControlError
 
 
-PREFIX = "/astrbot_plugin_private_companion_v2/accounts"
+PREFIX = "/astrbot_plugin_private_companion/accounts"
 logger = logging.getLogger(__name__)
 
 

@@ -90,6 +90,7 @@ class AstrBotStagingController:
     """Own one fixed staging profile and its authenticated management surface."""
 
     def __init__(self, context: object, config: object, data_root: Path, *, native_types=None, now=None):
+        self.lifecycle_token = uuid4().hex
         self.context = context
         self.config = config
         self.data_root = Path(data_root).resolve()
@@ -460,6 +461,7 @@ class AstrBotStagingController:
             managed_extensions=MANAGED_EXTENSIONS)
         weather_port, weather_alert_port = configured_weather_ports(self.config)
         from .model_settings import conversation_provider_resolver
+        from .relay_tools import RelayToolPort
         search_provider_resolver = SearchSettingsStore(self.data_root).selected_provider_id
         loaded = self.bootstrap.load(runtime_instance_id="astrbot-staging-" + uuid4().hex,
                                      review_only=review_only,
@@ -479,7 +481,9 @@ class AstrBotStagingController:
                                      replacement_rules=self.settings.replacement_rules,
                                      fallback_on_refusal=self.settings.fallback_on_refusal,
                                      voice_policy=self.settings.voice_reply_policy
-                                         if self.settings.voice_reply_enabled else None)
+                                         if self.settings.voice_reply_enabled else None,
+                                     relay_tool_port_factory=lambda bridge: RelayToolPort(
+                                         bridge, native_types=self.native_types, enabled=not review_only))
         if loaded.failure is not None:
             await self.native_extensions.aclose()
             raise TaskError(loaded.failure.code, loaded.failure.reason)
@@ -874,7 +878,7 @@ class AstrBotStagingController:
         parked = self._parked_binding()
         if parked is None:
             return {"confirmed": False, "reason": "setup_binding_missing",
-                    "detail": "send companion_bind from the core administrator private window first"}
+                    "detail": "send 我会永远陪着你 from the core administrator private window first"}
         try:
             parked.identity()
         except HostControlError as error:
@@ -951,7 +955,7 @@ class AstrBotStagingController:
             existing_binding = self._parked_binding()
             if existing_binding is None:
                 return {"handled": True, "ok": False, "reason": "host_binding_missing",
-                        "reply": "还没有待确认的绑定，先发送 companion_bind。"}
+                        "reply": "还没有待确认的绑定，先发送「我会永远陪着你」。"}
             expected = (existing_binding.platform_id, existing_binding.account_id,
                         existing_binding.participant_id)
             actual = (identity["platform_id"], identity["account_id"], identity["participant_id"])

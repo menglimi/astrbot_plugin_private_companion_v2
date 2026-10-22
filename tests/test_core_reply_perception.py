@@ -4,12 +4,14 @@ import unittest
 from unittest.mock import AsyncMock, Mock
 
 from astrbot.core.agent.message import Message, TextPart, dump_messages_with_checkpoints
+from astrbot.core.provider.sources.fishaudio_tts_api_source import ProviderFishAudioTTSAPI
 from astrbot.core.provider.sources.openai_source import ProviderOpenAIOfficial
 from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA, inject_core_reply_prompt
 from astrbot_host.core_reply_perception import (
     inject_core_reply_perception_context,
     inject_core_reply_perception_policy,
 )
+from companion_v2.conversation.voice_reply import VoiceReplyPolicy
 
 
 class Event:
@@ -168,6 +170,129 @@ class CoreReplyPerceptionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(payloads[0]["expression_guidance"], payloads[1]["expression_guidance"])
         self.assertNotEqual(payloads[0]["companion_background"], payloads[1]["companion_background"])
 
+    async def test_language_voice_route_reaches_provider_input_and_tracks_live_drama_model(self):
+        event = Event()
+        event.extra["selected_provider"] = "chat-route"
+        chat = NS(provider_config={"id": "chat-route", "model": "chat-config"})
+        voice = ProviderFishAudioTTSAPI({
+            "id": "fish-ja", "name": "FishAudio", "type": "fishaudio_tts_api",
+            "api_key": "synthetic-voice-secret", "api_base": "https://tts.example.invalid/v1",
+            "model": "s2.1-pro-free", "fishaudio-tts-reference-id": "synthetic-reference",
+        }, {})
+        voice.set_model("drama-3")
+        voice.get_audio = AsyncMock()
+        policy = VoiceReplyPolicy(generation_mode="model_tag", language="ja",
+                                  provider_id="default-voice", ja_provider_id="fish-ja",
+                                  foreign_text_mode="translation")
+        turn = prepared()
+        turn.update(voice_reply_policy=policy, configured_voice_reply_policy=policy)
+        event.extra[CORE_REPLY_CONTEXT_EXTRA] = {"prepared": turn}
+        native = NS(get_provider_by_id=Mock(side_effect=lambda key: voice if key == "fish-ja" else chat),
+                    get_all_tts_providers=lambda: [voice], get_using_tts_provider_async=AsyncMock(),
+                    get_config=lambda **_: {"provider_tts_settings": {"enable": False}})
+        request = NS(system_prompt="AstrBot 人格", model="gpt-4.1", extra_user_content_parts=[])
+
+        inject_core_reply_perception_policy(event, request)
+        await inject_core_reply_perception_context(event, request, native_context=native)
+        route = perception_payload(request)["environment"]["tts_route"]
+        self.assertEqual(route["status"], "available")
+        self.assertEqual(route["provider_id"], "fish-ja")
+        self.assertEqual(route["provider_name"], "FishAudio")
+        self.assertEqual(route["model"], "drama-3")
+        self.assertEqual(route["language"], "ja")
+        self.assertEqual(route["generation_mode"], "model_tag")
+        self.assertEqual(route["delivery_mode"], "voice_and_text")
+        self.assertEqual(route["foreign_text_mode"], "translation")
+        self.assertTrue(route["companion_voice_active_this_turn"])
+        self.assertTrue(route["drama_3_directions"])
+        self.assertFalse(route["verified_server_model"])
+        self.assertFalse(route["host_tts_enabled"])
+        self.assertEqual(perception_payload(request)["environment"]["chat_route"]["model"], "gpt-4.1")
+
+        assembled = await object.__new__(ProviderOpenAIOfficial).assemble_context(
+            "现在用哪些聊天和朗读模型？", extra_user_content_parts=request.extra_user_content_parts)
+        wire = json.dumps(assembled, ensure_ascii=False)
+        self.assertIn("drama-3", wire)
+        for sensitive in ("synthetic-voice-secret", "tts.example.invalid", "synthetic-reference", "api_key"):
+            self.assertNotIn(sensitive, wire)
+        stable_prompt = request.system_prompt
+        for dynamic in ("fish-ja", "drama-3", "gpt-4.1"):
+            self.assertNotIn(dynamic, stable_prompt)
+
+        voice.set_model("s2.1-pro-free")
+        inject_core_reply_perception_policy(event, request)
+        await inject_core_reply_perception_context(event, request, native_context=native)
+        self.assertEqual(request.system_prompt, stable_prompt)
+        self.assertEqual(len(request.extra_user_content_parts), 1)
+        route = perception_payload(request)["environment"]["tts_route"]
+        self.assertEqual(route["model"], "s2.1-pro-free")
+        self.assertFalse(route["drama_3_directions"])
+        self.assertTrue(request.extra_user_content_parts[0]._no_save)
+        native.get_using_tts_provider_async.assert_not_awaited()
+        voice.get_audio.assert_not_awaited()
+
+    async def test_host_voice_route_uses_session_selection_in_private_and_group(self):
+        for kind in ("FriendMessage", "GroupMessage"):
+            with self.subTest(kind=kind):
+                event = Event()
+                event.unified_msg_origin = f"qq-main:{kind}:200"
+                turn = prepared()
+                turn["configured_voice_reply_policy"] = None
+                event.extra[CORE_REPLY_CONTEXT_EXTRA] = {"prepared": turn}
+                voice = NS(provider_config={"id": "session-voice", "model": "host-speech-model"})
+                native = NS(get_using_tts_provider_async=AsyncMock(return_value=voice),
+                            get_config=Mock(return_value={"provider_tts_settings": {
+                                "enable": True, "provider_id": "global-voice", "dual_output": False}}))
+                request = NS(extra_user_content_parts=[])
+                await inject_core_reply_perception_context(event, request, native_context=native)
+                route = perception_payload(request)["environment"]["tts_route"]
+                self.assertEqual(route["provider_id"], "session-voice")
+                self.assertEqual(route["configured_provider_id"], "global-voice")
+                self.assertEqual(route["model"], "host-speech-model")
+                self.assertEqual(route["delivery_mode"], "voice_only")
+                self.assertTrue(route["host_tts_enabled"])
+                self.assertFalse(route["companion_voice_enabled"])
+                self.assertFalse(route["companion_voice_active_this_turn"])
+                native.get_using_tts_provider_async.assert_awaited_once_with(umo=event.unified_msg_origin)
+                native.get_config.assert_called_once_with(umo=event.unified_msg_origin)
+
+    async def test_unavailable_voice_reports_disabled_missing_and_wrong_provider_without_guessing(self):
+        for case in ("disabled", "not_selected", "provider_not_loaded", "lookup_unavailable"):
+            with self.subTest(case=case):
+                event = Event()
+                turn = prepared()
+                turn["configured_voice_reply_policy"] = None
+                native = NS(get_using_tts_provider_async=AsyncMock(return_value=None),
+                            get_using_tts_provider=Mock(),
+                            get_config=lambda **_: {"provider_tts_settings": {"enable": case != "disabled"}})
+                if case == "provider_not_loaded":
+                    turn["configured_voice_reply_policy"] = VoiceReplyPolicy(provider_id="chat-not-tts")
+                    native.get_provider_by_id = Mock(return_value=NS(provider_config={"model": "chat-only"}))
+                    native.get_all_tts_providers = lambda: []
+                elif case == "lookup_unavailable":
+                    native.get_using_tts_provider_async.side_effect = RuntimeError("synthetic-lookup-error")
+                event.extra[CORE_REPLY_CONTEXT_EXTRA] = {"prepared": turn}
+                request = NS(extra_user_content_parts=[])
+                await inject_core_reply_perception_context(event, request, native_context=native)
+                route = perception_payload(request)["environment"]["tts_route"]
+                self.assertEqual(route["status"], "unavailable")
+                self.assertEqual(route["reason"], case)
+                self.assertNotIn("model", route)
+                self.assertFalse(route["drama_3_directions"])
+                native.get_using_tts_provider.assert_not_called()
+                if case in ("disabled", "provider_not_loaded"):
+                    native.get_using_tts_provider_async.assert_not_awaited()
+
+    async def test_older_host_voice_resolver_remains_supported(self):
+        event = Event()
+        event.extra[CORE_REPLY_CONTEXT_EXTRA] = {"prepared": prepared()}
+        voice = NS(provider_config={"id": "legacy-host-voice", "model": "legacy-speech"})
+        native = NS(get_using_tts_provider=Mock(return_value=voice))
+        request = NS(extra_user_content_parts=[])
+        await inject_core_reply_perception_context(event, request, native_context=native)
+        self.assertEqual(perception_payload(request)["environment"]["tts_route"]["model"], "legacy-speech")
+        native.get_using_tts_provider.assert_called_once_with(umo=event.unified_msg_origin)
+
     async def test_disabled_fields_keep_the_stable_policy_without_dynamic_context(self):
         event = Event()
         event.extra[CORE_REPLY_CONTEXT_EXTRA] = {"prepared": {
@@ -183,6 +308,8 @@ class CoreReplyPerceptionTests(unittest.IsolatedAsyncioTestCase):
         await inject_core_reply_perception_context(event, request, native_context=native_context)
 
         self.assertIn("【陪伴感知与自然表达】", request.system_prompt)
+        self.assertIn("承接中的短话保留原请求的对象与进度", request.system_prompt)
+        self.assertIn("不要每轮都用问题收尾", request.system_prompt)
         self.assertTrue(request.system_prompt.startswith("AstrBot 人格"))
         self.assertEqual(request.extra_user_content_parts, [])
         native_context.get_provider_by_id.assert_not_called()

@@ -15,7 +15,7 @@ from typing import Any, Callable
 
 
 SCHEMA = "companion.native-provider.v1"
-PLUGIN_ID = "astrbot_plugin_private_companion_v2.together"
+PLUGIN_ID = "astrbot_plugin_private_companion.together"
 PROVIDER_ID = "together.native"
 VERSION = "0.9.0"
 _ACTIONS = {"together.room.snapshot", "together.room.create", "together.room.close",

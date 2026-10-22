@@ -84,7 +84,7 @@
       <footer class="self-relationship-actions"><span>${state.contactDirty.size ? `${state.contactDirty.size} 项未保存`
         : state.loading ? "正在读取…" : "已同步"}</span><button type="button" class="button small primary"
           data-self-relationship-action="save-contact"${state.contactDirty.size && !state.busy && !state.loading ? "" : " disabled"}>
-          ${state.busy && state.contactPending ? "保存中" : "保存联系设置"}</button></footer>
+          ${state.busy && state.contactPending ? "保存中…" : "保存联系设置"}</button></footer>
     </section>` : "";
     const waiting = state.loading && !state.section
       ? `<p class="self-relationship-empty" role="status">正在读取关系资料…</p>` : "";

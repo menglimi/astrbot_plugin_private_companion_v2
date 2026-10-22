@@ -34,6 +34,7 @@ DRAFT_PURPOSE = "proactive_draft"
 DECISIONS = ("send", "drop")
 INSTRUCTION = """现在不是要你再写一条消息，而是替这个角色做一次发送前的自检。
 上面的人格就是判定标准：只有这条消息确实符合当前人格、世界观、关系边界和此刻语境，才允许发出。
+若提供 role_state（角色此刻的精力、作息、忙碌或心情状态），同时检查这条主动消息的语气与精神头是否同角色当前状态自洽。
 它是否重复、是否过度解读对方、是否宣称未发生的事、是否越过授权，都属于判定范围。
 你只能选择放行或拦下，不能改写正文、不能更换受众、不能补写事实，也不要输出正文。
 只输出 JSON，不添加 Markdown 围栏：
@@ -72,11 +73,14 @@ class JudgeVerdict:
 
 def judge_request(job):
     """The sealed judge prompt: persona, the finished body, and nothing to rewrite."""
-    materials = [PromptMaterial(GROUP, DRAFT_PURPOSE, json.dumps({
+    draft = {
         "purpose": PURPOSES[job["purpose"]], "purpose_id": job["purpose"],
         "draft_body": job["body"], "contact_now": job["at"],
         "draft_decision_confidence": job["confidence"],
-        "preference_note": job["note"]}, ensure_ascii=False))]
+        "preference_note": job["note"]}
+    if job.get("role_state"):
+        draft["role_state"] = job["role_state"]
+    materials = [PromptMaterial(GROUP, DRAFT_PURPOSE, json.dumps(draft, ensure_ascii=False))]
     trigger = BackgroundPromptTrigger(job["cause_id"], job["context"].actor.principal,
                                       job["context"].scope, job["observed_at"])
     return PromptRequest(trigger, job["role_instruction"],

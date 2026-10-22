@@ -1,5 +1,7 @@
 """Private-member editors sharing the established configuration owners."""
 
+import logging
+
 from companion_v2.configuration.management import (
     AcquaintanceManagement, PrivateAcquaintanceManagement,
     PrivateAcquaintanceLearningManagement, ProactiveContactManagement,
@@ -42,6 +44,9 @@ PRIVATE_REPLY_FIELDS = frozenset((
     "file_understanding_enabled", "file_understanding_format_groups", "file_understanding_max_size_mb",
     "file_understanding_max_chars", "file_understanding_timeout_seconds", "file_understanding_prompt",
 ))
+
+
+logger = logging.getLogger(__name__)
 
 
 class PrivateContactManagement(ProactiveContactManagement):
@@ -170,9 +175,17 @@ class PrivateMemberSettings:
 
     @outcome
     def status(self, operator):
-        with self.app.runtime.read_snapshot():
-            return {"sections": {name: require(editor(self.app, self.context).status(operator))
-                                 for name, editor in EDITORS.items()}}
+        sections, section_errors = {}, {}
+        for name, editor in EDITORS.items():
+            try:
+                with self.app.runtime.read_snapshot():
+                    sections[name] = require(editor(self.app, self.context).status(operator))
+            except TaskError as error:
+                section_errors[name] = {"code": error.code}
+            except Exception:
+                logger.exception("[CompanionV2] 私聊成员配置分区读取失败 section=%s", name)
+                section_errors[name] = {"code": "member_settings_section_failed"}
+        return {"sections": sections, "section_errors": section_errors}
 
     def _replayed_section_operation(self, name, editor, operator, section_key):
         targets = [editor._target()]

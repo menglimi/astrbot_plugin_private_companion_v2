@@ -41,8 +41,16 @@ def remove_v63(connection):
 
 
 def remove_v64(connection):
+    remove_v65(connection)
     connection.execute('DROP TABLE IF EXISTS "proactive_prompt_snapshots"')
     connection.execute("DELETE FROM schema_migrations WHERE migration_id = 'companion-v2.storage.v63-to-v64'")
+
+
+def remove_v65(connection):
+    columns = {row[1] for row in connection.execute('PRAGMA table_info("outbox")')}
+    if "receipt_ref" in columns:
+        connection.execute('ALTER TABLE outbox DROP COLUMN "receipt_ref"')
+    connection.execute("DELETE FROM schema_migrations WHERE migration_id = 'companion-v2.storage.v64-to-v65'")
 
 
 def remove_v60(connection):

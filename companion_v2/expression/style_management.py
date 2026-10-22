@@ -77,16 +77,16 @@ class ExpressionStyleManagement:
             raise TaskError("expression_sample_changed", "stored style samples are invalid") from None
         required = {"opened_at", "closed_at", "handles", "characters"}
         if (type(window) is not dict or not required <= set(window)
-                or set(window) - required - {"context_key", "source_kind"}
+                or set(window) - required - {"context_key", "source_kind", "legacy"}
                 or ("context_key" in window and (type(window["context_key"]) is not str
                     or len(window["context_key"]) != 64))
                 or window.get("source_kind", "confirmed_reply") not in
-                   ("confirmed_reply", "conversation_input", SHARE_PACK_SOURCE)
+                   ("confirmed_reply", "conversation_input", SHARE_PACK_SOURCE, "legacy_expression")
                 or type(window.get("handles")) is not list
                 or type(window.get("characters")) is not int or window["characters"] < 0
                 or type(handles) is not list
                 or (window.get("source_kind") == SHARE_PACK_SOURCE and (handles or window["handles"] or window["characters"] != 0))
-                or (window.get("source_kind") != SHARE_PACK_SOURCE and not handles)
+                or (window.get("source_kind") not in (SHARE_PACK_SOURCE, "legacy_expression") and not handles)
                 or any(type(value) is not str or value not in window["handles"] for value in handles)):
             raise TaskError("expression_sample_changed", "stored style samples are invalid")
         return run, window, handles
@@ -128,6 +128,9 @@ class ExpressionStyleManagement:
         opened_at, closed_at = self._window(window, at)
         if window.get("source_kind") == SHARE_PACK_SOURCE:
             return []
+        if window.get("source_kind") == "legacy_expression":
+            from .legacy_import import evidence
+            return evidence(window, handles)
         if window.get("source_kind") == "conversation_input" and not self.samples.reviews.allows_handles(context, handles):
             raise TaskError("expression_sample_changed", "sample approval was revoked")
         try:
@@ -177,7 +180,10 @@ class ExpressionStyleManagement:
                         run, window, handles = self._run(row, owner, context)
                         source_kind = window.get("source_kind", "confirmed_reply")
                         opened_at, closed_at = self._window(window, at)
-                        if source_kind != SHARE_PACK_SOURCE:
+                        if source_kind == "legacy_expression":
+                            from .legacy_import import evidence as legacy_evidence
+                            evidence = legacy_evidence(window, handles)
+                        elif source_kind != SHARE_PACK_SOURCE:
                             if source_kind == "conversation_input" and not self.samples.reviews.allows_handles(context, handles):
                                 raise TaskError("expression_sample_changed", "sample approval was revoked")
                             sample_context = self._evidence_context(window, context)
@@ -215,7 +221,7 @@ class ExpressionStyleManagement:
                     "last_feedback": feedback.get("last_feedback"),
                     "last_feedback_at": feedback.get("last_feedback_at"),
                     "review_reason": feedback.get("review_reason"),
-                    "source_title": run["summary"] if unavailable is None and source_kind == SHARE_PACK_SOURCE else None,
+                    "source_title": run["summary"] if unavailable is None and source_kind in (SHARE_PACK_SOURCE, "legacy_expression") else None,
                     "unavailable_reason": unavailable, "actions": actions,
                     "view_token": self._token(operator, context, row, policy_revision)})
             return {"items": items, "state": state,

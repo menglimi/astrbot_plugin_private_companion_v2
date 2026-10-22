@@ -210,9 +210,12 @@ window.CompanionSemanticPage = (() => {
     if(group&&state.sessions?.length)html+='<label class="semantic-session">群会话<select id="semanticSession" aria-label="群会话">'+state.sessions.map((id,index)=>'<option value="'+escape(id)+'" '+(id===state.session_id?'selected':'')+'>'+escape(id===target()?.group_id?'主群会话':'群会话 '+(index+1))+'</option>').join('')+'</select></label>';
     if(kinds.length&&!state.selection_ready)html+='<p class="memory-notice">当前群会话尚无可验证的成员输入；收到群消息后即可管理。</p>';
     else if(kinds.length) {
-      if(kinds.length>1)html+='<div class="semantic-toolbar"><div class="semantic-tabs" role="tablist"><button role="tab" aria-selected="'+(kind==="reaction")+'" data-semantic-kind="reaction">表情</button><button role="tab" aria-selected="'+(kind==="slang")+'" data-semantic-kind="slang">群词义</button></div>';
+      /* 表情 / 群词义两个切页：按 ARIA tabs 写全（tablist + tab + 一个 tabpanel），
+         之前只给了 role="tab"，读屏器报「标签页」却找不到受控面板。 */
+      if(kinds.length>1)html+='<div class="semantic-toolbar"><div class="semantic-tabs" role="tablist"><button role="tab" id="semantic-tab-reaction" aria-controls="semantic-panel" aria-selected="'+(kind==="reaction")+'" data-semantic-kind="reaction">表情</button><button role="tab" id="semantic-tab-slang" aria-controls="semantic-panel" aria-selected="'+(kind==="slang")+'" data-semantic-kind="slang">群词义</button></div>';
       else html+='<div class="semantic-toolbar"><span class="semantic-kind-label">'+(kind==="reaction"?"表情素材":"当前群词义")+'</span>';
       html+='<form id="semanticSearch"><input name="query" type="search" maxlength="2000" placeholder="检索'+(kind==="reaction"?"表情":"群词义")+'" aria-label="检索素材"><button class="button" '+(busy?"disabled":"")+'>检索</button></form></div>';
+      html+=`<div id="semantic-panel" role="tabpanel"${kinds.length>1?` aria-labelledby="semantic-tab-${kind}"`:""}>`;
       if(kind==="reaction")html+='<label class="semantic-import button"><span>导入素材</span><input id="semanticFile" type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif" '+(busy?"disabled":"")+'></label>';
       if(result)html+='<div class="semantic-results"><strong>检索结果 · '+(result.mode==="hybrid"?"语义与关键词":"关键词")+'</strong><span>'+(result.embedded||0)+'/'+(result.eligible||0)+' 已建索引'+(result.fallback_reason?" · 模型暂不可用":"")+'</span>'+(result.items||[]).map((item,index)=>'<button data-semantic-open="'+escape(item.id)+'">'+escape(item.payload.name||item.payload.term||'未命名素材 '+(index+1))+' · '+Number(item.score).toFixed(2)+'</button>').join("")+'</div>';
       html+='<div class="semantic-list">'+(state.items||[]).map(item=>{const payload=item.payload||{};const source={private_capture:"私聊自动收录",group_capture:"群聊自动收录"}[payload.collection_source]||"手动收录";
@@ -226,6 +229,7 @@ window.CompanionSemanticPage = (() => {
       if(!state.items?.length)html+='<p class="memory-notice">当前没有素材。</p>';
       if(state.next_after)html+='<button class="button" data-semantic="more" '+(busy?'disabled':'')+'>加载更多</button>';
       if(editing)html+=editor(editing);
+      html+='</div>';
     }
     if(kinds.length)html+='</section>';
     root.innerHTML=html;
@@ -408,5 +412,8 @@ window.CompanionSemanticPage = (() => {
   }
   function shownValue(id){return (draft?{...state.settings,...draft}:state.settings)[id];}
   function unmount(){generation++;abort?.abort();abort=null;root=null;scope=null;state=null;editing=null;busy=false;selectedTarget=null;selectedSelection=null;selectedScopeKey="";globalSettingsOnly=false;}
-  return {mount,unmount};
+  /* 页面级未保存守卫（page-guards.js）：草稿存在就说明有未提交的改法。
+     unmount 已经把 draft 之外的引用清掉，这里跟着 root 一起判断。 */
+  function isDirty(){return !!draft&&!!root;}
+  return {mount,unmount,isDirty};
 })();

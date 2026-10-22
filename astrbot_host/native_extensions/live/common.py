@@ -56,27 +56,7 @@ _active_live_stream_companion: Any | None = None
 # ``private_companion_`` prefix.  Keep the aliases in one place so an existing
 # installation can be read once while the public V2 page only exposes native
 # Live settings.
-LIVE_CONFIG_MIGRATIONS: dict[str, str] = {
-    'private_companion_live_context_enabled': 'live_relationship_context_enabled',
-    'private_companion_live_context_max_age_seconds': 'live_relationship_context_max_age_seconds',
-    'private_companion_live_context_recent_limit': 'live_relationship_context_recent_limit',
-    'private_companion_live_context_max_users': 'live_relationship_context_max_users',
-    'private_companion_live_context_include_identity_note': 'live_relationship_context_include_identity_note',
-    'private_companion_relationship_style_context_enabled': 'live_relationship_style_context_enabled',
-    'private_companion_relationship_style_include_profile': 'live_relationship_style_include_profile',
-    'private_companion_relationship_style_include_memories': 'live_relationship_style_include_memories',
-    'private_companion_writeback_enabled': 'live_state_writeback_enabled',
-    'private_companion_viewer_activity_enabled': 'live_viewer_activity_enabled',
-    'private_companion_viewer_activity_context_enabled': 'live_viewer_activity_context_enabled',
-    'private_companion_writeback_memory_event_types': 'live_writeback_event_types',
-    'private_companion_auto_register_viewers': 'live_auto_register_viewers',
-    'private_companion_auto_register_min_events': 'live_auto_register_min_events',
-    'private_companion_live_state_enabled': 'live_afterglow_enabled',
-    'private_companion_live_state_cooldown_seconds': 'live_afterglow_cooldown_seconds',
-    'private_companion_live_state_duration_hours': 'live_afterglow_duration_hours',
-    'private_companion_live_summary_enabled': 'live_summary_enabled',
-    'bili_live_streamer_identity_from_companion_enabled': 'bili_live_streamer_identity_from_v2_enabled',
-}
+from companion_v2.legacy.native_extension_configuration import LIVE_RENAMES as LIVE_CONFIG_MIGRATIONS
 
 
 def migrate_live_config_keys(config: Any) -> int:
@@ -133,7 +113,7 @@ class LiveNativeExtensionAPI:
 
     def companion_v2_status(self) -> dict[str, Any]:
         """Expose metadata without connecting OBS, VTS or a livestream service."""
-        return {'schema': 'companion.provider-status.v1', 'plugin_id': 'astrbot_plugin_private_companion_v2.live', 'enabled': self._plugin.native_v2_enabled, 'runtime_ready': self._plugin._native_provider is not None}
+        return {'schema': 'companion.provider-status.v1', 'plugin_id': 'astrbot_plugin_private_companion.live', 'enabled': self._plugin.native_v2_enabled, 'runtime_ready': self._plugin._native_provider is not None}
 
     def companion_v2_native(self):
         return self._plugin._native_provider if self._plugin.native_v2_enabled else None

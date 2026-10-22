@@ -10,7 +10,7 @@ from companion_v2.role_work.life.management import RoleLifeManagement
 
 from .management_identity import dashboard_operator
 
-PREFIX = "/astrbot_plugin_private_companion_v2/life"
+PREFIX = "/astrbot_plugin_private_companion/life"
 
 
 class LifeWebAPI:

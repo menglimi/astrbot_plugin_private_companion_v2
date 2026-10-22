@@ -93,7 +93,7 @@ window.CompanionBehaviorPage=(()=>{
   function mount(host,options={}){
     unmount();root=host;data={groups:[]};filter='';busy=false;loading=false;notice='';failed=false;
     root?.addEventListener('click',click);root?.addEventListener('change',change);
-    const prefix='/astrbot_plugin_private_companion_v2/';
+    const prefix='/astrbot_plugin_private_companion/';
     apiBase=typeof options.api==='string'&&options.api.startsWith(prefix)?options.api.slice(prefix.length):'';
     if(root&&apiBase)void read(version);
     else if(root){notice='请先选择已配置的角色。';render();}

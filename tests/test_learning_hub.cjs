@@ -7,7 +7,7 @@ const vm = require("node:vm");
 
 const ROOT = path.join(__dirname, "..");
 const PAGE = path.join(ROOT, "pages", "陪伴小屋");
-const HOST = "astrbot_plugin_private_companion_v2";
+const HOST = "astrbot_plugin_private_companion";
 
 test("学习工作台按导航加载每个真实数据模块", () => {
   const app = fs.readFileSync(path.join(PAGE, "app.js"), "utf8");
@@ -39,7 +39,7 @@ test("学习工作台按导航加载每个真实数据模块", () => {
   assert.match(app, /CompanionLearningOverviewPage\?\.mount/);
   assert.match(app, /CompanionLearningReviewPage\?\.mount/);
   assert.match(app, /globalSettingsOnly:true/);
-  assert.match(app, /'\/astrbot_plugin_private_companion_v2\/config',true/);
+  assert.match(app, /'\/astrbot_plugin_private_companion\/config',true/);
   assert.match(review, /state:"active"/);
   assert.match(review, /state:"decided"/);
   assert.doesNotMatch(review, /CompanionProduct\.role|CompanionProduct\.target/);

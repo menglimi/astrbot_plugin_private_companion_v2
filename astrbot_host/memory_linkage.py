@@ -7,7 +7,7 @@ from companion_v2.adapters.astrbot.memory_owner import read_memory_owner
 from companion_v2.foundation.refs import ScopeKind
 
 
-V2_PLUGIN_ID = "astrbot_plugin_private_companion_v2"
+V2_PLUGIN_ID = "astrbot_plugin_private_companion"
 SUMMARY_CATEGORIES = ("profile", "preference", "relationship", "private_conversation", "other")
 
 

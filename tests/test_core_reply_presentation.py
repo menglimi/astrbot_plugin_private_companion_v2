@@ -6,6 +6,7 @@ from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import AsyncMock, Mock
 
+from tests import astrbot_data_root  # Isolate the SDK before importing the host.
 from astrbot.core.message.components import At, Image, Plain, Reply
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot_host.core_reply import (
@@ -69,6 +70,31 @@ class CoreReplyPresentationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(self.texts(event), ["甲，乙。丙"])
                     self.assertEqual(self.observed, ["甲，乙。丙"])
                     self.assertEqual(source.chain[0].text, "甲，乙。丙。， \n")
+
+    async def test_internal_reaction_metadata_is_removed_before_guard_activation(self):
+        event = self.prepare()
+        source = MessageChain(chain=[
+            Plain("正文。<pc_reaction_"),
+            Plain('expression">{"intent":"内部态度"}</pc_reaction_expression>'),
+        ])
+        await event.send(source)
+        self.assertEqual(self.texts(event), ["正文。"])
+
+    async def test_internal_reaction_metadata_is_removed_across_native_stream_chunks(self):
+        def native_streamer(event):
+            async def send_stream(generator, **_):
+                async for chunk in generator:
+                    await event.send(chunk)
+            return send_stream
+
+        event = self.prepare(stream=True, streamer=native_streamer)
+        await event.send_streaming(self.chunks(
+            "正文。<pc_reaction_",
+            'expression\">{"intent":"内部态度，害羞"}',
+            "</pc_reaction_",
+            "expression>后续正文。",
+        ))
+        self.assertEqual(self.texts(event), ["正文。", "后续正文。"])
 
     async def test_each_native_private_bubble_cleans_its_own_tail(self):
         event = self.prepare(CLEANUP)

@@ -16,7 +16,7 @@ const test = require('node:test');
 const vm = require('node:vm');
 
 const source = fs.readFileSync(path.resolve(__dirname, '../pages/陪伴小屋/learning-page.js'), 'utf8');
-const HOST = 'astrbot_plugin_private_companion_v2';
+const HOST = 'astrbot_plugin_private_companion';
 const GROWTH = '/' + HOST + '/growth';
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const settle = async () => { for (let i = 0; i < 8; i++) await flush(); };

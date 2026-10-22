@@ -69,6 +69,24 @@ class MultiSettingsTests(unittest.TestCase):
 
 
 class NativePersonaSelectionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_group_window_ignores_the_private_conversation_default(self):
+        from astrbot_host.session_topology import SessionTopology
+
+        lookup = AsyncMock(return_value="group-persona")
+        context = NS(get_config=lambda **_kwargs: {
+            "agent_runner": {"runner_type": "local",
+                             "config": {"persona": {"persona_id": "group-persona"}}}})
+        topology = object.__new__(SessionTopology)
+        topology.controller = NS(context=context, _multi_host=True,
+                                 native_types=NS(persona_selection_lookup=lookup))
+
+        selected = await topology._selected_native_persona(
+            "qq-main:GroupMessage:201", "private-persona")
+
+        self.assertEqual(selected, "group-persona")
+        lookup.assert_awaited_once_with(topology.controller.context,
+                                        "qq-main:GroupMessage:201", None)
+
     async def test_empty_resolver_result_uses_the_configured_window_default(self):
         configuration = {
             "agent_runner": {"runner_type": "local", "config": {"persona": {"persona_id": "private-persona"}}},
@@ -113,6 +131,86 @@ class LegacyStagingReceiptTests(unittest.TestCase):
 
 
 class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_reviewed_bindings_detect_conflict_before_stopping_the_running_host(self):
+        await self.start_host()
+        expected = deepcopy(self.controller.config)
+        candidate = deepcopy(expected)
+        save = self.controller.save_plugin_config = AsyncMock()
+        original_probe = self.controller._probe
+        session = self.controller.session
+
+        async def changed_during_probe(*args, **kwargs):
+            result = await original_probe(*args, **kwargs)
+            self.controller.config["concurrent_edit"] = True
+            return result
+
+        with patch.object(self.controller, "_probe", side_effect=changed_during_probe), \
+                patch.object(session, "close", wraps=session.close) as close:
+            with self.assertRaises(TaskError) as caught:
+                await self.controller.apply_bindings(candidate, expected_config=expected)
+            close.assert_not_called()
+        self.assertEqual(caught.exception.code, "legacy_plan_stale")
+        save.assert_not_called()
+        self.assertIs(self.controller.session, session)
+        self.assertTrue(self.controller._accepting)
+        self.assertEqual(session.application.state, "running")
+
+    async def test_reviewed_bindings_resume_saved_routes_if_conflict_arrives_during_close(self):
+        await self.start_host()
+        expected = deepcopy(self.controller.config)
+        candidate = deepcopy(expected)
+        save = self.controller.save_plugin_config = AsyncMock()
+        session = self.controller.session
+        original_close = session.close
+
+        async def changed_during_close(*args, **kwargs):
+            result = await original_close(*args, **kwargs)
+            self.controller.config["concurrent_edit"] = True
+            return result
+
+        with patch.object(session, "close", side_effect=changed_during_close):
+            with self.assertRaises(TaskError) as caught:
+                await asyncio.wait_for(
+                    self.controller.apply_bindings(candidate, expected_config=expected), timeout=20)
+        self.assertEqual(caught.exception.code, "legacy_plan_stale")
+        save.assert_not_called()
+        self.assertTrue(self.controller.config["concurrent_edit"])
+        self.assertTrue(self.controller._accepting)
+        self.assertEqual(self.controller.session.application.state, "running")
+        self.assertIsNot(self.controller.session, session)
+
+    async def test_reviewed_bindings_reject_configuration_changed_while_waiting_for_lifecycle(self):
+        expected = deepcopy(self.controller.config)
+        candidate = deepcopy(expected)
+        save = self.controller.save_plugin_config = AsyncMock()
+        async with self.controller._lifecycle_lock:
+            applying = asyncio.create_task(self.controller.apply_bindings(candidate, expected_config=expected))
+            await asyncio.sleep(0)
+            self.controller.config["multi_host"]["installation_id"] = "changed-installation"
+        with self.assertRaises(TaskError) as caught:
+            await asyncio.wait_for(applying, timeout=2)
+        self.assertEqual(caught.exception.code, "legacy_plan_stale")
+        save.assert_not_called()
+
+    async def test_reviewed_bindings_prepare_the_first_valid_configuration(self):
+        candidate = multi_config()
+        unconfigured = deepcopy(candidate)
+        unconfigured["multi_host"] = {"enabled": False, "targets": [], "personas": []}
+        self.controller = self.make_controller(unconfigured)
+        self.assertEqual(self.controller.settings_error.code, "host_mappings_required")
+
+        def save(document):
+            self.controller.config.clear()
+            self.controller.config.update(deepcopy(document))
+
+        self.controller.save_plugin_config = save
+        result = await self.controller.apply_bindings(candidate)
+
+        self.assertTrue(result["saved"], result)
+        self.assertTrue(result["started"], result)
+        self.assertIsNone(self.controller.settings_error)
+        self.assertTrue(self.controller.status()["accepting"])
+
     async def test_profile_initialization_does_not_load_the_global_identity_grant_snapshot(self):
         with patch("companion_v2.identity_policy.repository.PersistentIdentityDirectory.snapshot",
                    side_effect=AssertionError("profile provisioning should read only the current subject")):
@@ -383,15 +481,15 @@ class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         }
         materials_route = NATIVE_PERCEPTION_PREFIX + "/materials"
         self.assertTrue({
-            "/astrbot_plugin_private_companion_v2/host-options",
-            "/astrbot_plugin_private_companion_v2/host-options/voice",
-            "/astrbot_plugin_private_companion_v2/host-options/poke",
-            "/astrbot_plugin_private_companion_v2/host-options/forward_intake",
-            "/astrbot_plugin_private_companion_v2/host-options/balance",
-            "/astrbot_plugin_private_companion_v2/storage",
+            "/astrbot_plugin_private_companion/host-options",
+            "/astrbot_plugin_private_companion/host-options/voice",
+            "/astrbot_plugin_private_companion/host-options/poke",
+            "/astrbot_plugin_private_companion/host-options/forward_intake",
+            "/astrbot_plugin_private_companion/host-options/balance",
+            "/astrbot_plugin_private_companion/storage",
         }.issubset(registered))
         storage_methods = {tuple(methods) for route, _, methods, _ in self.native.registered_web_apis
-                           if route == "/astrbot_plugin_private_companion_v2/storage"}
+                           if route == "/astrbot_plugin_private_companion/storage"}
         self.assertEqual(storage_methods, {("GET",), ("POST",)})
         self.assertTrue(expected.issubset(registered))
         self.assertIn(materials_route, registered)

@@ -1,5 +1,6 @@
 """Proactive voice and poke: sealed presentation plans that never join the fingerprint."""
 
+import asyncio
 from dataclasses import replace
 import json
 import unittest
@@ -7,9 +8,11 @@ from unittest.mock import patch
 
 from companion_v2.configuration.registry import ValueKind
 from companion_v2.conversation.delivery import DeliveryEnvelope
-from companion_v2.delivery.plan import DeliveryContent, PokePlan, VoicePlan
+from companion_v2.conversation.reply_management import ReplyManagement
+from companion_v2.delivery.plan import DeliveryContent, OutboundPlan, PokePlan, VoicePlan
 from companion_v2.delivery.service import DeliveryRequest
 from companion_v2.execution.models import TERMINAL, digest
+from companion_v2.foundation.outcome import Outcome
 from companion_v2.proactive.configuration import GROUP, configuration_fields
 from companion_v2.proactive.prompts import contact_output
 from tests.native_adapter_support import FakeReverseApi, NativeFixture
@@ -32,7 +35,7 @@ class ProactiveVoicePokeTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
         self.settings(app, {"enabled": True, **changes}).unwrap()
         return app
 
-    def choose(self, text="想起你上次提到的书，读到哪里了？", *, voice=True, poke=True, confidence=None):
+    def choose(self, text="想起你上次提到的书，读到哪里了？", *, voice=True, poke=True, confidence=None, speech=None):
         decision = {"decision": "send", "text": text}
         if voice:
             decision["voice_intent"] = True
@@ -40,6 +43,8 @@ class ProactiveVoicePokeTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
             decision["poke_intent"] = True
         if confidence is not None:
             decision["decision_confidence"] = confidence
+        if speech is not None:
+            decision["voice_text"] = speech
 
         async def respond(_envelope):
             return answered(json.dumps(decision, ensure_ascii=False))
@@ -88,7 +93,11 @@ class ProactiveVoicePokeTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
 
     def test_contact_output_bounds_the_two_expression_intents(self):
         for decision in ({"decision": "send", "text": "正文", "voice_intent": "yes"},
-                         {"decision": "send", "text": "正文", "poke_intent": 1}):
+                         {"decision": "send", "text": "正文", "poke_intent": 1},
+                         {"decision": "send", "text": "正文", "voice_text": "台词"},
+                         {"decision": "send", "text": "正文", "voice_intent": True, "voice_text": " "},
+                         {"decision": "send", "text": "正文", "voice_intent": True, "voice_text": 1},
+                         {"decision": "send", "text": "正文", "voice_intent": True, "voice_text": "长" * 2001}):
             with self.subTest(decision=decision):
                 with self.assertRaises(ValueError):
                     contact_output(json.dumps(decision, ensure_ascii=False))
@@ -120,10 +129,10 @@ class ProactiveVoicePokeTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
         task = await self.send_once(app)
         body = self.runtime.read_one("SELECT body FROM proactive_contacts WHERE task_id = ?", (task.task_id,))["body"]
         data = self.record(task.task_id)
-        self.assertEqual(data["voice"]["speech"], " ".join(body.split())[:12])
+        self.assertEqual(data["voice"]["speech"], " ".join(body.split()))
         self.assertNotIn("\n", data["voice"]["speech"])
         self.assertEqual((data["voice"]["provider_id"], data["voice"]["position"], data["voice"]["delivery_mode"]),
-                         ("", "after_text", "voice_and_text"))
+                         ("", "after_media", "voice_and_text"))
         self.assertEqual(data["poke"], {"count": 1})
         instruction = self.called[0].original.instruction
         self.assertIn("voice_intent", instruction)
@@ -146,6 +155,37 @@ class ProactiveVoicePokeTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(self.sent[0], DeliveryEnvelope)
         self.assertEqual(self.sent[0].voice, VoicePlan.parse(data["voice"]))
         self.assertEqual(self.sent[0].poke, PokePlan(count=1))
+
+    async def test_foreign_voice_uses_window_language_and_provider_without_cutting_the_body(self):
+        app = await self.enabled_actions(voice_action_enabled=True, voice_action_max_chars=6)
+        manager = ReplyManagement(app, self.contact_context())
+        status = manager.status(self.core).unwrap()
+        manager.configure(self.core, {"operation_key": "japanese-proactive", "edit_token": status["edit_token"],
+            "changes": {"voice_language": "ja", "voice_ja_provider_id": "japanese-tts",
+                        "voice_provider_id": "default-tts", "voice_timeout_seconds": 17}}).unwrap()
+        text, speech = "烛雨大人那边现在也安静下来了吗？", "そちらも、もう静かになりましたか？"
+        self.choose(text=text, speech=speech, poke=False)
+        task = await self.send_once(app)
+        data = self.record(task.task_id)
+        self.assertEqual(data["voice_language"], "ja")
+        self.assertEqual(data["voice"]["speech"], speech)
+        self.assertEqual(data["voice"]["provider_id"], "japanese-tts")
+        self.assertEqual(data["voice"]["timeout_seconds"], 17)
+        self.assertEqual(self.sent[0].text, text)
+        self.assertIn("voice_text 使用自然日语", self.called[0].original.instruction)
+        self.assertIn("不会按字数截断", self.called[0].original.instruction)
+
+    async def test_missing_foreign_speech_preserves_text_without_chinese_fallback(self):
+        app = await self.enabled_actions(voice_action_enabled=True)
+        manager = ReplyManagement(app, self.contact_context())
+        status = manager.status(self.core).unwrap()
+        manager.configure(self.core, {"operation_key": "missing-japanese-speech",
+            "edit_token": status["edit_token"], "changes": {"voice_language": "ja"}}).unwrap()
+        self.choose(text="今晚也想跟你说说话。", poke=False)
+        task = await self.send_once(app)
+        self.assertNotIn("voice", self.record(task.task_id))
+        self.assertEqual(self.sent[0].text, "今晚也想跟你说说话。")
+        self.assertIsNone(self.sent[0].voice)
 
     async def test_voice_cooldown_blocks_a_second_note_until_it_expires(self):
         app = await self.enabled_actions(voice_action_enabled=True, poke_action_enabled=True,
@@ -273,7 +313,7 @@ class ProactiveVoicePokeNativeTests(NativeFixture, unittest.IsolatedAsyncioTestC
     def api(self):
         return self.native.platform.client._api._wsr_api
 
-    async def test_poke_opens_the_message_and_the_note_joins_the_same_call(self):
+    async def test_poke_opens_the_message_and_voice_has_an_independent_request(self):
         envelope = await self.sealed(voice=VoicePlan("晚上好，记得吃饭。"), poke=PokePlan(1))
         api = self.api()
         self.assertIsInstance(api, FakeReverseApi)
@@ -286,10 +326,133 @@ class ProactiveVoicePokeNativeTests(NativeFixture, unittest.IsolatedAsyncioTestC
         self.native_sender.voice = voice
         receipt = await self.native_sender.send(envelope)
         self.assertEqual(receipt.status, "delivered")
-        self.assertEqual([action for action, _ in api.calls], ["friend_poke", "send_private_msg"])
+        self.assertEqual([action for action, _ in api.calls], ["friend_poke", "send_private_msg", "send_private_msg"])
         self.assertEqual(api.calls[0][1], {"self_id": "100", "user_id": 200})
         self.assertEqual(spoken, [("晚上好，记得吃饭。", "")])
-        self.assertEqual([component["type"] for component in api.calls[1][1]["message"]], ["text", "record"])
+        self.assertEqual([component["type"] for component in api.calls[1][1]["message"]], ["text"])
+        self.assertEqual(api.calls[1][1]["message"][0]["data"]["text"], envelope.text)
+        self.assertEqual([component["type"] for component in api.calls[2][1]["message"]], ["record"])
+
+    async def test_voice_timeout_cannot_erase_confirmed_final_text_or_replay_it(self):
+        envelope = await self.sealed(text="现在也安静下来了吗？", payload_hash=digest("现在也安静下来了吗？"),
+                                     voice=VoicePlan("そちらも静かになりましたか？"))
+        api = self.api()
+
+        async def voice(*_, **__):
+            return {"type": "record", "data": {"file": "base64://YQ=="}}
+
+        async def send(action, **params):
+            api.calls.append((action, params))
+            if params["message"][0]["type"] == "record":
+                raise TimeoutError("voice may have been sent")
+            return {"message_id": 123}
+
+        self.native_sender.voice, api.call_action = voice, send
+        receipt = await self.native_sender.send(envelope)
+        self.assertEqual(receipt.status, "delivered")
+        self.assertTrue(receipt.platform_ref.endswith(":123"))
+        self.assertEqual(len(api.calls), 2)
+        self.assertEqual(api.calls[0][1]["message"], [{"type": "text", "data": {"text": envelope.text}}])
+
+    async def test_unknown_text_does_not_send_optional_voice(self):
+        envelope = await self.sealed(voice=VoicePlan("こんばんは。"))
+        api = self.api()
+
+        async def voice(*_, **__):
+            return {"type": "record", "data": {"file": "base64://YQ=="}}
+
+        self.native_sender.voice = voice
+        api.result = {}
+        self.assertEqual((await self.native_sender.send(envelope)).status, "unknown")
+        self.assertEqual(len(api.calls), 1)
+        self.assertEqual([part["type"] for part in api.calls[0][1]["message"]], ["text"])
+
+    async def test_quoted_text_preserves_leading_voice_as_a_separate_request(self):
+        envelope = await self.sealed(voice=VoicePlan("こんばんは。", position="before_text"),
+                                     plan=OutboundPlan(quote="123"))
+
+        async def voice(*_, **__):
+            return {"type": "record", "data": {"file": "base64://YQ=="}}
+
+        self.native_sender.voice = voice
+        self.assertEqual((await self.native_sender.send(envelope)).status, "delivered")
+        messages = [params["message"] for _, params in self.api().calls]
+        self.assertEqual([[part["type"] for part in message] for message in messages],
+                         [["record"], ["reply", "text"]])
+        self.assertEqual(messages[1][1]["data"]["text"], envelope.text)
+
+    async def test_leading_voice_followed_by_revocation_remains_unknown_without_sending_text(self):
+        envelope = await self.sealed(voice=VoicePlan("こんばんは。", position="before_text"))
+        api = self.api()
+        original = api.call_action
+
+        async def voice(*_, **__):
+            return {"type": "record", "data": {"file": "base64://YQ=="}}
+
+        async def send(action, **params):
+            result = await original(action, **params)
+            self.native_sender.authorize = lambda: Outcome.failed("authorization_revoked", "withdrawn")
+            return result
+
+        self.native_sender.voice, api.call_action = voice, send
+        self.assertEqual((await self.native_sender.send(envelope)).status, "unknown")
+        self.assertEqual(len(api.calls), 1)
+        self.assertEqual([part["type"] for part in api.calls[0][1]["message"]], ["record"])
+
+    async def test_leading_voice_followed_by_qq_text_refusal_is_not_safe_to_replay(self):
+        envelope = await self.sealed(voice=VoicePlan("こんばんは。", position="before_text"))
+        api = self.api()
+
+        async def voice(*_, **__):
+            return {"type": "record", "data": {"file": "base64://YQ=="}}
+
+        async def send(action, **params):
+            api.calls.append((action, params))
+            if params["message"][0]["type"] == "record":
+                return {"message_id": 123}
+            return {"retcode": 1200, "message": "EventChecker sendMsg"}
+
+        self.native_sender.voice, api.call_action = voice, send
+        self.assertEqual((await self.native_sender.send(envelope)).status, "unknown")
+        self.assertEqual(len(api.calls), 2)
+
+    async def test_revocation_after_text_prevents_optional_voice_without_losing_text_receipt(self):
+        envelope = await self.sealed(voice=VoicePlan("こんばんは。"))
+        api = self.api()
+        original = api.call_action
+
+        async def voice(*_, **__):
+            return {"type": "record", "data": {"file": "base64://YQ=="}}
+
+        async def send(action, **params):
+            result = await original(action, **params)
+            self.native_sender.authorize = lambda: Outcome.failed("authorization_revoked", "withdrawn")
+            return result
+
+        self.native_sender.voice, api.call_action = voice, send
+        receipt = await self.native_sender.send(envelope)
+        self.assertEqual(receipt.status, "delivered")
+        self.assertEqual(len(api.calls), 1)
+        self.assertEqual([part["type"] for part in api.calls[0][1]["message"]], ["text"])
+
+    async def test_cancelled_optional_voice_preserves_the_confirmed_text_receipt(self):
+        envelope = await self.sealed(voice=VoicePlan("こんばんは。"))
+        api = self.api()
+
+        async def voice(*_, **__):
+            return {"type": "record", "data": {"file": "base64://YQ=="}}
+
+        async def send(action, **params):
+            api.calls.append((action, params))
+            if params["message"][0]["type"] == "record":
+                raise asyncio.CancelledError
+            return {"message_id": 789}
+
+        self.native_sender.voice, api.call_action = voice, send
+        receipt = await self.native_sender.send(envelope)
+        self.assertEqual(receipt.status, "delivered")
+        self.assertTrue(receipt.platform_ref.endswith(":789"))
+        self.assertEqual(len(api.calls), 2)
 
     async def test_unconfirmed_poke_never_blocks_the_sealed_text(self):
         envelope = await self.sealed(poke=PokePlan(1))

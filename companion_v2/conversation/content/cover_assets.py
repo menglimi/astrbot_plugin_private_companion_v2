@@ -62,6 +62,16 @@ COVER_DEFAULTS = {field.field_id.rsplit(".", 1)[-1]: field.default for field in 
 ALL_FIELDS = authoring_fields() + configuration_fields()
 
 
+def group_fields():
+    """The authoring group's full field set: prose options plus the cover options.
+
+    ``authoring_service`` only owns the prose half and this module only adds the
+    cover half, so neither ``configuration_fields()`` is the group contract.
+    The coverage audit reads this accessor to compare the whole group at once.
+    """
+    return ALL_FIELDS
+
+
 @dataclass(frozen=True)
 class CoverIntent:
     """What the caller asked for: attach *this* image to *this* work's version.

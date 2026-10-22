@@ -11,7 +11,7 @@ from companion_v2.foundation.outcome import Outcome
 from .management_identity import dashboard_operator
 
 
-PREFIX = "/astrbot_plugin_private_companion_v2/reality-access"
+PREFIX = "/astrbot_plugin_private_companion/reality-access"
 
 CAPABILITY_PATHS = {
     ACTION: "",

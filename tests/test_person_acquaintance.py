@@ -251,9 +251,15 @@ class PersonAcquaintanceTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         fields = {field.field_id: field for field in self.app.configuration.registry.group("person")}
         self.assertEqual(fields["person.acquaintance_enabled"].default, True)
         self.assertEqual(fields["person.acquaintance_card_chars"].default, 1024)
+        self.assertEqual(fields["person.cross_window_awareness_enabled"].default, True)
+        self.assertEqual(fields["person.cross_window_attention_wait_seconds"].default, 3)
+        self.assertEqual(fields["person.cross_window_peer_minutes"].default, 5)
+        self.assertEqual(fields["person.cross_window_peer_reply_minutes"].default, 60)
         context, _ = await self.receive(sender="200")
         values = AcquaintanceSettings(self.app.configuration).read(context)
         self.assertEqual(values["person.acquaintance_enabled"], True)
+        self.assertEqual(values["person.cross_window_max_items"], 4)
+        self.assertEqual(values["person.cross_window_peer_reply_minutes"], 60)
 
 
 class PersonCardModelTests(unittest.TestCase):

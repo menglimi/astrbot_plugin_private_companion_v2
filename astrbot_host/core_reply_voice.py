@@ -230,8 +230,10 @@ async def prepare_core_reply_voice_message(
     event_id = prepared.get("event_id") or prepared.get("turn_id") or "core-reply"
     claim = None
     claim_route = getattr(delivery, "claim_core_route", None)
-    if callable(claim_route) and policy.cooldown_seconds:
-        claim = claim_route(context, event_id, policy.cooldown_seconds)
+    kind = getattr(getattr(getattr(context, "scope", None), "kind", None), "value", None)
+    cooldown = policy.cooldown(kind) if kind is not None else policy.cooldown_seconds
+    if callable(claim_route) and cooldown:
+        claim = claim_route(context, event_id, cooldown)
         if claim is None:
             note["state"] = "cooldown"
             return cleaned_message

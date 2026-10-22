@@ -49,6 +49,7 @@ logger = logging.getLogger(__name__)
 
 class AstrBotMultiController:
     def __init__(self, context, config, data_root, *, native_types=None, now=None):
+        self.lifecycle_token = uuid4().hex
         self.config = config
         self.context, self.data_root = context, Path(data_root).resolve()
         self.integration = IntegrationRegistry(context)
@@ -331,7 +332,7 @@ class AstrBotMultiController:
         if request.kind == "confirm":
             if existing is None:
                 return {"handled": True, "ok": False, "reason": "host_binding_missing",
-                        "reply": "还没有待确认的核心管理员窗口，先发送 companion_bind。"}
+                        "reply": "还没有待确认的核心管理员窗口，先发送「我会永远陪着你」。"}
             expected = (existing.platform_id, existing.account_id, existing.participant_id)
             actual = (identity["platform_id"], identity["account_id"], identity["participant_id"])
             return {"handled": True, "ok": expected == actual,
@@ -365,7 +366,7 @@ class AstrBotMultiController:
             if binding.get("recovered"):
                 return {"confirmed": True, "binding": binding}
             return {"confirmed": False, "reason": "setup_binding_missing",
-                    "detail": "send companion_bind from the core administrator private window first"}
+                    "detail": "send 我会永远陪着你 from the core administrator private window first"}
         try:
             self._register_core_binding(parked)
         except (TaskError, HostControlError, ValueError, TypeError) as error:
@@ -480,7 +481,11 @@ class AstrBotMultiController:
                     "settings_fingerprint": settings.fingerprint, "provider_fingerprint": provider_fingerprint(provider),
                     "personas": [asdict(persona) for persona in personas]}
         manifest["fingerprint"] = digest(manifest)
-        self._settings()  # termination may have started while native reads awaited
+        # Native reads may outlive termination. A reviewed candidate can also be
+        # the first valid configuration, so rechecking the old settings here
+        # would reject the very mapping that apply_bindings is preparing.
+        if self._terminated:
+            raise TaskError("host_terminated", "the shared host is stopping or terminated")
         return manifest, conversations
 
     def _open(self):
@@ -611,8 +616,24 @@ class AstrBotMultiController:
                     self.authority.provision_scope(target, scope, role)
         return receipt
 
-    async def apply_bindings(self, candidate):
+    async def apply_bindings(self, candidate, *, expected_config=None):
         """Apply Dashboard-reviewed routes while retaining existing native owners."""
+        was_accepting = self._accepting
+        try:
+            return await self._apply_reviewed_bindings(candidate, expected_config=expected_config)
+        except TaskError as error:
+            # A concurrent configuration edit can arrive while close() drains
+            # workers. Reject the stale candidate, then reopen the saved routes
+            # after releasing the lifecycle lock instead of leaving them stopped.
+            if (error.code == "legacy_plan_stale" and was_accepting and not self._terminated
+                    and self.session is not None and self.session.application.state == "stopped"):
+                self.refresh_settings()
+                recovered = await self.start()
+                if recovered.failure is not None:
+                    logger.warning("[CompanionV2] 映射保存冲突后恢复运行失败 code=%s", recovered.failure.code)
+            raise
+
+    async def _apply_reviewed_bindings(self, candidate, *, expected_config=None):
         result = None
         settings = None
         async with self._lifecycle_lock:
@@ -623,13 +644,24 @@ class AstrBotMultiController:
             async with self._control_lock:
                 if self._terminated:
                     raise TaskError("host_terminated", "the shared host is stopping or terminated")
+                if expected_config is not None and self.config != expected_config:
+                    raise TaskError("legacy_plan_stale", "插件配置在等待保存期间已变化，请重新试算。")
                 settings, profile_root, adopting_legacy_profile = self._resolve_settings(candidate)
                 save = getattr(self, "save_plugin_config", None)
                 if not callable(save):
                     raise TaskError("account_config_persistence_unavailable", "the host has no plugin configuration writer")
             manifest, _ = await self._probe(settings, include_conversations=False)
-            self._accepting = False
-            session = self.session
+            async with self._control_lock:
+                if self._terminated:
+                    raise TaskError("host_terminated", "the shared host is stopping or terminated")
+                if expected_config is not None and self.config != expected_config:
+                    raise TaskError("legacy_plan_stale", "插件配置在核对映射期间已变化，请重新试算。")
+                root = profile_root / "runtime"
+                if self.runtime is not None and (self.runtime.data_root != root.resolve()
+                        or self.runtime.installation_id != settings.installation_id):
+                    raise TaskError("host_storage_changed", "stop and reload before changing the active V2 data installation")
+                self._accepting = False
+                session = self.session
             if session is not None:
                 report = await session.close(grace_seconds=2)
                 if report.state != "stopped":
@@ -637,6 +669,8 @@ class AstrBotMultiController:
             async with self._control_lock:
                 if self._terminated:
                     raise TaskError("host_terminated", "the shared host is stopping or terminated")
+                if expected_config is not None and self.config != expected_config:
+                    raise TaskError("legacy_plan_stale", "插件配置在等待保存期间已变化，请重新试算。")
                 self._idle()
                 root = profile_root / "runtime"
                 if self.runtime is not None and (self.runtime.data_root != root.resolve()
@@ -840,7 +874,24 @@ class AstrBotMultiController:
         if account is None or account.bot_id != target.bot_id:
             return None
         umo = bridge._umo(target.platform_id, native_scope_id)
-        _, persona_id, _, special = await bridge._selected_persona(account, umo)
+        # A native persona can change without replacing the conversation ID.
+        # Refresh once at admission; later steps in this turn reuse its snapshot.
+        # An unmapped native persona is a valid non-admission result, rather
+        # than a host failure. Keep the event router alive so another mapped
+        # window can continue to operate and the operator can repair the
+        # mapping from the dashboard.
+        try:
+            _, persona_id, _, special = await bridge._selected_persona(account, umo, fresh_selection=True)
+        except TaskError as error:
+            if error.code in {
+                "host_persona_unmapped",
+                "host_persona_window_unbound",
+                "host_persona_unavailable",
+                "host_persona_invalid",
+                "host_conversation_missing",
+            }:
+                return None
+            raise
         if special or type(persona_id) is not str:
             return None
         return next((mapping for mapping in self.settings.personas
@@ -913,7 +964,7 @@ class AstrBotMultiController:
             logger.warning("[CompanionV2] 群复读动作未完成 error_type=%s", type(error).__name__)
             return Outcome.failed("group_repeat_failed", "the literal repeat action could not be completed")
 
-    async def prepare_core_reply(self, event, target=None, *, group_admission=None):
+    async def prepare_core_reply_context(self, event, target=None, *, group_admission=None):
         try:
             session = self.session
             current_target = self.target_for_event(event)
@@ -922,7 +973,25 @@ class AstrBotMultiController:
             target = current_target
             if not self.claims(event) or session is None or target is None:
                 return Outcome.failed("host_not_claimed", "the native event is outside the active configured targets")
-            return await session.prepare_core_reply(event, target, group_admission=group_admission)
+            return await session.prepare_core_reply_context(
+                event, target, group_admission=group_admission)
+        except TaskError as error:
+            return Outcome.failed(error.code, str(error))
+        except Exception as error:
+            logger.error("[CompanionV2] 核心回复上下文解析失败 error_type=%s", type(error).__name__)
+            return Outcome.failed("host_core_reply_prepare_failed", "core reply admission could not be prepared")
+
+    async def prepare_core_reply(self, event, target=None, *, group_admission=None, plan=None):
+        try:
+            session = self.session
+            current_target = self.target_for_event(event)
+            if target is not None and target != current_target:
+                raise TaskError("host_target_mismatch", "the requested core reply target is not the current native route")
+            target = current_target
+            if not self.claims(event) or session is None or target is None:
+                return Outcome.failed("host_not_claimed", "the native event is outside the active configured targets")
+            return await session.prepare_core_reply(
+                event, target, group_admission=group_admission, plan=plan)
         except TaskError as error:
             return Outcome.failed(error.code, str(error))
         except Exception as error:

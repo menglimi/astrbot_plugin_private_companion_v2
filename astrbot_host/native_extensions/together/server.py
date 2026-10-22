@@ -353,7 +353,7 @@ class TogetherRoomServer:
         return web.json_response(
             {
                 "ok": True,
-                "plugin": "astrbot_plugin_private_companion_v2.together",
+                "plugin": "astrbot_plugin_private_companion.together",
                 "port": self.port,
                 "rooms": len(self.plugin.rooms),
             },

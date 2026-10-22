@@ -6,7 +6,7 @@ const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
 
-const HOST = "astrbot_plugin_private_companion_v2";
+const HOST = "astrbot_plugin_private_companion";
 const shellHtml = fs.readFileSync(path.join(__dirname, "../pages/陪伴小屋/index.html"), "utf8");
 const shellCss = fs.readFileSync(path.join(__dirname, "../pages/陪伴小屋/shell.css"), "utf8");
 const sidebarSource = fs.readFileSync(path.join(__dirname, "../pages/陪伴小屋/home-sidebar.js"), "utf8");
@@ -53,7 +53,7 @@ async function harness(savedTheme = null, extensions = [], options = {}) {
   }
   const navigations = [];
   const window = {
-    location: {href: "http://localhost/api/plugin/page/content/astrbot_plugin_private_companion_v2/cottage/"},
+    location: {href: "http://localhost/api/plugin/page/content/astrbot_plugin_private_companion/cottage/"},
     addEventListener(type, handler) { events[type] = handler; },
     navigate: (...route) => navigations.push(route),
     matchMedia: () => ({matches: false}),
@@ -72,7 +72,7 @@ async function harness(savedTheme = null, extensions = [], options = {}) {
           return {status: "error", data: {code: options.summaryErrors[endpoint]}};
         }
         if (endpoint === "page/workspace-entry") return options.workspaceEntry || {content_path:
-          "/api/plugin/page/content/astrbot_plugin_private_companion_v2/%E9%99%AA%E4%BC%B4%E5%B0%8F%E5%B1%8B/?asset_token=fresh"};
+          "/api/plugin/page/content/astrbot_plugin_private_companion/%E9%99%AA%E4%BC%B4%E5%B0%8F%E5%B1%8B/?asset_token=fresh"};
         if (endpoint === "page/targets") return options.directoryUnavailable
           ? {status: "error", data: {code: options.directoryError || "staging_not_initialized"}} : nextDirectory || catalog;
         if (endpoint === "integration/manifest") return {extensions, providers:[], summary: {connected_count: 0}};
@@ -237,7 +237,7 @@ test("a bundle that still fails after token refresh identifies the remaining res
   const h = await harness(null, [], {lazyBundles: true, failWorkspaceLoads: 2,
     workspaceAssetUrl: "http://localhost/workspace-bundles/host.js?v=test&asset_token=stale",
     workspaceEntry: {content_path:
-      "/api/plugin/page/content/astrbot_plugin_private_companion_v2/%E9%99%AA%E4%BC%B4%E5%B0%8F%E5%B1%8B/?asset_token=fresh"}});
+      "/api/plugin/page/content/astrbot_plugin_private_companion/%E9%99%AA%E4%BC%B4%E5%B0%8F%E5%B1%8B/?asset_token=fresh"}});
   h.frames.splice(0);
   const host = h.addFrame("host");
   h.product.mountWorkspace();
@@ -376,7 +376,10 @@ test("the role cottage selector is inside the room and the outer status bar is a
   const roomScene = shellHtml.indexOf('class="voxel-room"', roomStart);
   assert.ok(roomStart >= 0 && roleTitle > roomStart && roleTitle < roomScene,
     "role title and selector belong inside the room scene at its top layer");
-  const roleStyle = shellCss.match(/\.stage-role\s*\{([^}]*)\}/)?.[1] || "";
+  /* 取的是基础规则本身。原来的正则 `\.stage-role\s*\{` 会先命中任何以
+     `.stage-role` 结尾的选择器（例如 `#homeShell[data-away="true"] .stage-role{display:none}`
+     那条缩略态规则），于是断言随时序变化而指向另一条规则。锚到行首。 */
+  const roleStyle = shellCss.match(/^\.stage-role\s*\{([^}]*)\}/m)?.[1] || "";
   assert.match(roleStyle, /position:\s*absolute/);
   assert.match(roleStyle, /top:\s*12px/);
   assert.match(roleStyle, /left:\s*12px/);

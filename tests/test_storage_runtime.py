@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
@@ -176,6 +176,39 @@ class StorageRuntimeTests(unittest.TestCase):
             self.assertEqual(stale_transition.failure.code, "operation_state_conflict")
             runtime.close()
 
+    def test_outbox_acceptance_persists_the_platform_receipt_across_restart(self) -> None:
+        with TemporaryDirectory(prefix="companion-v2-outbox-receipt-") as temporary:
+            runtime = StorageRuntime.open(data_root=Path(temporary) / "v2-data", installation_id=INSTALLATION_ID)
+            operations = OperationRepository(runtime)
+            operations.reserve(operation(), parameter_hash="parameters-a", observed_at=NOW,
+                               outbox_part_id="part-a", outbox_payload_hash="payload-a").unwrap()
+            dispatched = operations.transition_outbox("operation-a", "part-a",
+                expected_operation_state=OperationState.ACCEPTED,
+                next_operation_state=OperationState.UNKNOWN,
+                expected_outbox_state="pending", next_outbox_state="unknown", observed_at=NOW)
+            self.assertTrue(dispatched.is_success)
+
+            missing_receipt = operations.transition_outbox("operation-a", "part-a",
+                expected_operation_state=OperationState.UNKNOWN,
+                next_operation_state=OperationState.COMPLETED,
+                expected_outbox_state="unknown", next_outbox_state="accepted", observed_at=NOW + timedelta(seconds=1))
+            self.assertEqual(missing_receipt.failure.code, "outbox_receipt_invalid")
+
+            completed = operations.transition_outbox("operation-a", "part-a",
+                expected_operation_state=OperationState.UNKNOWN,
+                next_operation_state=OperationState.COMPLETED,
+                expected_outbox_state="unknown", next_outbox_state="accepted",
+                observed_at=NOW + timedelta(seconds=1), receipt_ref="onebot-message:248610")
+            self.assertTrue(completed.is_success)
+            self.assertEqual(operations.outbox("operation-a", "part-a").unwrap().receipt_ref,
+                             "onebot-message:248610")
+            runtime.close()
+
+            with StorageRuntime.open(data_root=Path(temporary) / "v2-data",
+                                     installation_id=INSTALLATION_ID) as restarted:
+                self.assertEqual(OperationRepository(restarted).outbox("operation-a", "part-a").unwrap().receipt_ref,
+                                 "onebot-message:248610")
+
     def test_checkpoint_compare_and_swap_preserves_recovery_cursor(self) -> None:
         with TemporaryDirectory(prefix="companion-v2-storage-") as temporary:
             runtime = StorageRuntime.open(data_root=Path(temporary) / "v2-data", installation_id=INSTALLATION_ID)
@@ -226,6 +259,59 @@ class StorageRuntimeTests(unittest.TestCase):
                     data_root=Path(temporary) / "astrbot_plugin_private_companion",
                     installation_id=INSTALLATION_ID,
                 )
+
+    def test_takeover_child_and_fresh_public_name_can_open_without_touching_legacy_data(self):
+        with TemporaryDirectory(prefix="companion-storage-takeover-") as temporary:
+            public = Path(temporary) / "astrbot_plugin_private_companion"
+            public.mkdir()
+            source = public / "companions.json"
+            source.write_bytes(b'{"legacy":true}\n')
+            source_bytes = source.read_bytes()
+            with self.assertRaises(StoragePathError):
+                StorageRuntime.open(data_root=public / "profiles" / "main" / "runtime",
+                                    installation_id=INSTALLATION_ID)
+            child = public / "companion-7" / "profiles" / "main" / "runtime"
+            runtime = StorageRuntime.open(data_root=child, installation_id=INSTALLATION_ID)
+            runtime.close()
+            runtime = StorageRuntime.open(data_root=child, installation_id=INSTALLATION_ID)
+            runtime.close()
+            self.assertEqual(source.read_bytes(), source_bytes)
+            self.assertFalse((public / StorageRuntime.DATABASE_FILENAME).exists())
+            source.unlink()
+            runtime = StorageRuntime.open(data_root=public / "profiles" / "main" / "runtime",
+                                          installation_id=INSTALLATION_ID)
+            runtime.close()
+
+    def test_isolated_child_rejects_legacy_markers_inside_its_boundary(self):
+        with TemporaryDirectory(prefix="companion-storage-boundary-") as temporary:
+            public = Path(temporary) / "astrbot_plugin_private_companion"
+            child = public / "companion-7"
+            child.mkdir(parents=True)
+            (child / "companions.db").write_bytes(b"legacy sentinel")
+            for root in (child, child / "profiles" / "main" / "runtime", public / "arbitrary"):
+                with self.assertRaises(StoragePathError):
+                    StorageRuntime.open(data_root=root, installation_id=INSTALLATION_ID)
+            foreign = Path(temporary) / "astrbot_plugin_remember_you" / "companion-7" / "runtime"
+            with self.assertRaises(StoragePathError):
+                StorageRuntime.open(data_root=foreign, installation_id=INSTALLATION_ID)
+
+    def test_existing_owned_profiles_allow_parent_legacy_files_but_not_runtime_contamination(self):
+        for marker in (".companion-v2-storage-owner.json", ".companion-v2-storage-location.json"):
+            with self.subTest(marker=marker), TemporaryDirectory() as temporary:
+                public = Path(temporary) / "astrbot_plugin_private_companion"
+                public.mkdir()
+                source = public / "companions.json"
+                source.write_bytes(b'{"legacy":true}\n')
+                (public / marker).write_text("{}\n", encoding="utf-8")
+                root = public / "profiles" / "main" / "runtime"
+                runtime = StorageRuntime.open(data_root=root, installation_id=INSTALLATION_ID)
+                runtime.close()
+                runtime = StorageRuntime.open(data_root=root, installation_id=INSTALLATION_ID)
+                runtime.close()
+                self.assertEqual(source.read_bytes(), b'{"legacy":true}\n')
+                (root / "companions.db").write_bytes(b"legacy sentinel")
+                with self.assertRaises(StoragePathError):
+                    StorageRuntime.open(data_root=root, installation_id=INSTALLATION_ID)
 
     def test_runtime_fails_closed_for_a_partially_initialized_database(self) -> None:
         with TemporaryDirectory(prefix="companion-v2-storage-") as temporary:

@@ -14,6 +14,7 @@ from companion_v2.conversation.reply_preparation import trim_blank_edges
 from companion_v2.conversation.segment_control import controlled_parts
 from companion_v2.conversation.text_processing import (
     OUTPUT_TEXT_FIELDS,
+    InternalExpressionProtocolFilter,
     ReplyTextPolicy,
     strip_internal_expression_protocol,
 )
@@ -164,6 +165,43 @@ def has_reply_body(chain):
                else not isinstance(component, (At, AtAll, Reply)) for component in chain)
 
 
+def strip_internal_expression_message(message):
+    """Remove private reaction metadata even when normal presentation is skipped."""
+    if isinstance(message, str):
+        cleaned = strip_internal_expression_protocol(message)
+        if cleaned == message:
+            return message
+        return cleaned if cleaned.strip() else None
+    chain = getattr(message, "chain", None)
+    if not isinstance(chain, (list, tuple)):
+        return message
+    output, changed, index = [], False, 0
+    while index < len(chain):
+        component = chain[index]
+        if not isinstance(component, Plain):
+            output.append(component)
+            index += 1
+            continue
+        start, text = index, []
+        while index < len(chain) and isinstance(chain[index], Plain):
+            text.append(chain[index].text)
+            index += 1
+        source = "".join(text)
+        cleaned = strip_internal_expression_protocol(source)
+        changed = changed or cleaned != source
+        if cleaned.strip():
+            if cleaned == source:
+                output.extend(chain[start:index])
+            else:
+                output.append(Plain(cleaned))
+    if not changed:
+        return message
+    if not has_reply_body(output):
+        return None
+    derive = getattr(message, "derive", None)
+    return derive(output) if callable(derive) else MessageChain(chain=output)
+
+
 def note_removed_text(event):
     core = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
     if isinstance(core, dict):
@@ -171,9 +209,13 @@ def note_removed_text(event):
 
 
 def present_core_reply_message(event, message, *, from_stream=False):
+    if getattr(message, "type", None) in CONTROL_TYPES:
+        return message
+    message = strip_internal_expression_message(message)
+    if message is None:
+        return None
     presentation = core_reply_presentation(event)
-    if (presentation is None or getattr(message, "type", None) in CONTROL_TYPES
-            or getattr(message, MARKED, None) is presentation
+    if (presentation is None or getattr(message, MARKED, None) is presentation
             or (from_stream and _PRESENTED_STREAM.get() is presentation)):
         return message
     core = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
@@ -272,3 +314,36 @@ async def present_core_reply_stream(event, generator):
         output = present_core_reply_message(event, buffered)
         if output is not None:
             yield output
+
+
+async def strip_internal_expression_stream(generator):
+    """Remove reaction metadata before native stream adapters can split it."""
+    protocol = InternalExpressionProtocolFilter()
+    async for chunk in generator:
+        if getattr(chunk, "type", None) in CONTROL_TYPES:
+            yield chunk
+            continue
+        if isinstance(chunk, str):
+            visible = protocol.feed(chunk)
+            if visible:
+                yield visible
+            continue
+        chain = getattr(chunk, "chain", None)
+        if not isinstance(chain, (list, tuple)):
+            yield chunk
+            continue
+        output, changed = [], False
+        for component in chain:
+            if not isinstance(component, Plain):
+                output.append(component)
+                continue
+            visible = protocol.feed(component.text)
+            if visible:
+                output.append(component if visible == component.text else Plain(visible))
+            changed = changed or visible != component.text
+        if output:
+            if changed:
+                derive = getattr(chunk, "derive", None)
+                chunk = derive(output) if callable(derive) else MessageChain(chain=output)
+            yield chunk
+    protocol.finish()

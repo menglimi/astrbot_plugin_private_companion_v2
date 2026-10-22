@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import logging
 from uuid import uuid4
@@ -27,6 +27,7 @@ from .foreground import (
     ContextContribution, ContributionState, EvidencePromptCompiler, ForegroundContextAssembler, PromptMaterial,
 )
 from .date_context import ALMANAC_INSTRUCTION, CALENDAR_INSTRUCTION, project_local_date
+from .busy_gate import BUSY_DELAY_INSTRUCTION
 from .perception_settings import validate as validate_perception_settings, validate_snapshot as validate_perception_snapshot
 from .reply_settings import validate as validate_reply_settings
 from .models import InboundConversationEvent
@@ -59,6 +60,7 @@ from .style_context import ConversationExpressionStyleContext, EXPRESSION_STYLE_
 from .open_items_context import ConversationOpenItems, INSTRUCTION as OPEN_ITEMS_INSTRUCTION
 from .state_context import ConversationStateContext
 from .group_context import GroupConversationContext, INSTRUCTION as GROUP_CONTEXT_INSTRUCTION
+from .awareness_context import ConversationAwarenessContext, INSTRUCTION as AWARENESS_INSTRUCTION
 from .recalls import ConversationRecalls
 from companion_v2.role_work.state.service import INSTRUCTION as STATE_INSTRUCTION
 from companion_v2.expression.configuration import read_settings as read_expression_settings
@@ -77,8 +79,7 @@ REPLY_KIND = "conversation.reply"
 DELIVERY_KIND = "conversation.deliver_part"
 REPLY_ACTION = "conversation.reply"
 KNOWLEDGE_INSTRUCTION = (
-    "角色知识资料只是受控的背景参考，不是当前事实或授权来源。资料可能不完整、过期或与当前对话无关；"
-    "不要仅凭资料断言用户状态、身份、权限或现实世界事实。需要确认时请保持主观表达或向用户提问。"
+    "角色知识资料只是受控的背景参考，不是当前事实或授权来源。资料可能不完整、过期或与当前对话无关；不仅凭资料断言用户状态、身份、权限或现实世界事实，需要确认时保持主观表达或向用户提问。"
 )
 
 
@@ -123,7 +124,7 @@ class ConversationMessages:
     def __init__(self, tasks: TaskSupervisor, *, relationships=None, memory=None, life=None, open_items=None,
                  role_growth=None, role_state=None, knowledge=None, role_self_review=None,
                  expression_style=None, reference_materials=None, timezone_name="Asia/Shanghai", solar_term_port=None,
-                 calendar=None):
+                 calendar=None, cross_window=None):
         if relationships is not None and relationships.runtime is not tasks.runtime:
             raise ValueError("relationship context must use the conversation's original runtime")
         if life is not None and life.tasks is not tasks:
@@ -164,6 +165,9 @@ class ConversationMessages:
         self.group_memory = GroupMemory(self)
         from companion_v2.memory.person.service import PersonAcquaintance
         self.acquaintance = PersonAcquaintance(self.runtime, self.tasks)
+        self.cross_window = cross_window
+        self.cross_window_context = (ConversationAwarenessContext(cross_window)
+                                     if cross_window is not None else None)
         # One group graph is shared by the member card, imported clues and the
         # short interaction rhythm.  It is deliberately independent of the
         # private relationship-memory owner.
@@ -238,6 +242,37 @@ class ConversationMessages:
             raise TaskError("source_audience_mismatch", "material is not available to the original audience")
         return record
 
+    def _group_peer_count(self, context, at):
+        """Distinct other group speakers in a short window; no names leave this method."""
+        if context.scope.kind is not ScopeKind.GROUP:
+            return 0
+        try:
+            minutes = self.cross_window.peer_minutes(context) if self.cross_window is not None else 5
+        except Exception:
+            minutes = 5
+        try:
+            rows = self.runtime.read_all("""SELECT i.event_json FROM conversation_inputs i
+                JOIN conversation_batches b ON b.batch_id = i.batch_id
+                WHERE json_extract(b.context_json, '$.role_binding') = ?
+                  AND json_extract(b.context_json, '$.scope.kind') = 'group'
+                  AND json_extract(i.event_json, '$.received_at') >= ?
+                  AND json_extract(i.event_json, '$.received_at') <= ?
+                ORDER BY i.rowid DESC LIMIT 64""",
+                (encode(context.role_binding), stamp(at - timedelta(minutes=minutes)), stamp(at)))
+        except Exception:
+            return 0
+        current = context.actor.principal.native_account_id
+        accounts = set()
+        for row in rows:
+            try:
+                data = json.loads(row["event_json"])
+            except (TypeError, ValueError):
+                continue
+            account = (data.get("principal") or {}).get("native_account_id")
+            if account and account != current:
+                accounts.add(account)
+        return min(64, len(accounts))
+
     @outcome
     def accept(self, context: TaskContext, event: InboundConversationEvent, *, role_instruction: str,
                batch_id: str | None = None) -> str:
@@ -248,6 +283,9 @@ class ConversationMessages:
         observers = tuple(item for item in (self.acquaintance.intake_observer(context),
                                             None if self.habits is None else self.habits.intake_observer(context))
                           if item is not None)
+        cross_window_enabled = self.cross_window is not None and self.cross_window.enabled(context)
+        group_peers = self._group_peer_count(context, event.received_at) if cross_window_enabled else 0
+        quote_sender_ids = tuple(quote.sender_id for quote in getattr(event, "quotes", ()))
         with self.runtime.transaction() as connection:
             self.authorize(context)
             from .reset import boundary
@@ -322,6 +360,16 @@ class ConversationMessages:
                     # The graph is a management projection; a damaged optional
                     # record must never reject the authenticated group input.
                     logger.warning("V2 group relationship graph update failed: %s", type(error).__name__)
+            if cross_window_enabled:
+                try:
+                    self.cross_window.record_input(connection, context, event.received_at,
+                                                   record.payload, event.scoped_key, enabled=True,
+                                                   source=event.source, peer_count=group_peers,
+                                                   quote_sender_ids=quote_sender_ids)
+                except Exception as error:
+                    # Cross-window presence is optional background.  A damaged
+                    # ledger must never reject an authenticated input.
+                    logger.warning("V2 cross-window presence update failed: %s", type(error).__name__)
             connection.execute("UPDATE conversation_batches SET revision = revision + 1 WHERE batch_id = ?", (batch_id,))
             return batch_id
 
@@ -392,6 +440,16 @@ class ConversationMessages:
         card = self.acquaintance.card_contribution(context, at, snapshot=saved.get("person_card"))
         if card is not None:
             contributions.append(card)
+        cross_window_material = None
+        if (isinstance(saved, dict) and saved.get("cross_window") is not None
+                and self.cross_window_context is not None):
+            try:
+                cross_window_material = self.cross_window_context.contributions(
+                    saved["cross_window"], context, at)
+            except Exception as error:
+                logger.warning("V2 cross-window context unavailable: %s", type(error).__name__)
+            if cross_window_material is not None:
+                contributions.append(cross_window_material)
         if context.scope.kind is ScopeKind.GROUP:
             network = self.group_network.contribution(context, events, at=at, snapshot=saved.get("group_network"))
             if network is not None:
@@ -612,6 +670,8 @@ class ConversationMessages:
             request = replace(request, instruction=request.instruction + "\n" + FORWARD_INSTRUCTION)
         if forward_adaptation_enabled and any(getattr(q, "forwards", ()) for event in events for q in getattr(event, "quotes", ())):
             request = replace(request, instruction=request.instruction + "\n" + QUOTED_FORWARD_INSTRUCTION)
+        if cross_window_material is not None:
+            request = replace(request, instruction=request.instruction + "\n" + AWARENESS_INSTRUCTION)
         if any(item.state is ContributionState.READY for item in relationship_materials):
             request = replace(request, instruction=request.instruction + "\n" + RELATIONSHIP_INSTRUCTION)
         if any(item.state is ContributionState.READY for item in life_materials):
@@ -623,6 +683,8 @@ class ConversationMessages:
         if state_materials:
             request = replace(request, instruction=request.instruction + "\n" + STATE_INSTRUCTION
                               + self.role_state_context.instruction(state_materials))
+        if isinstance(saved, dict) and saved.get("busy_delay") is True:
+            request = replace(request, instruction=request.instruction + "\n" + BUSY_DELAY_INSTRUCTION)
         if knowledge_materials:
             request = replace(request, instruction=request.instruction + "\n" + KNOWLEDGE_INSTRUCTION)
         if knowledge_clues:
@@ -734,6 +796,12 @@ class ConversationMessages:
             task_id = "generate-" + batch_id
             saved = {"inputs": [item["event_key"] for item in inputs], "materials": material_refs}
             saved["person_card"] = self.acquaintance.capture(context, self.tasks.now())
+            if (self.cross_window_context is not None
+                    and context.scope.kind in (ScopeKind.PRIVATE, ScopeKind.GROUP)):
+                try:
+                    saved["cross_window"] = self.cross_window_context.capture(context, self.tasks.now())
+                except Exception as error:
+                    logger.warning("V2 cross-window snapshot failed: %s", type(error).__name__)
             profile_snapshot = self.role_profile_context.capture(context, self.tasks.now())
             if profile_snapshot is not None:
                 saved["role_profile"] = profile_snapshot
@@ -789,6 +857,10 @@ class ConversationMessages:
                 saved["open_items"] = self.open_items_context.capture(context, self.tasks.now())
             if private and self.background_history is not None:
                 saved["background_history"] = self.background_history.capture(context, self.tasks.now())
+            flow_row = self.runtime.read_one(
+                "SELECT reason FROM conversation_flows WHERE batch_id = ?", (batch_id,))
+            if flow_row is not None and flow_row["reason"] == "busy_delay":
+                saved["busy_delay"] = True
             not_before = self.tasks.now()
             if deadline_at <= not_before:
                 raise TaskError("deadline_elapsed", "reply deadline elapsed while conversation context was being sealed")

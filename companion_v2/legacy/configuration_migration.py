@@ -16,12 +16,14 @@ from companion_v2.configuration.registry import (
     LegacyProbabilityUnit,
     ValueKind,
 )
+from companion_v2.legacy.catalog import V1_SUPPORTED_VERSION
 
 
 _BOOL_TRUE = {"true", "yes", "1", "on", "enabled"}
 _BOOL_FALSE = {"false", "no", "0", "off", "disabled", ""}
 _INT = re.compile(r"^[+-]?\d+$")
 _UNIT_SECONDS = {"seconds": 1, "minutes": 60, "hours": 3600, "days": 86400}
+_MISSING = object()
 _WEATHER_CONVERTER_SOURCES = frozenset({
     "weather_config.enable_weather_context",
     "weather_config.weather_location",
@@ -38,6 +40,15 @@ _WEATHER_CONVERTER_SOURCES = frozenset({
 _SCHEDULE_INFLUENCE_ENABLED = "skill_growth_config.enable_skill_growth_schedule_influence"
 _SCHEDULE_INFLUENCE_STRENGTH = "skill_growth_config.skill_growth_schedule_influence_strength"
 _SCHEDULE_INFLUENCE_TARGET = "role.growth.skills.schedule_influence_strength"
+_ENVIRONMENT_PERCEPTION_MASTER = "basic_config.enable_environment_perception"
+_ENVIRONMENT_PERCEPTION_TARGETS = (
+    "conversation.perception.calendar_enabled",
+    "conversation.perception.platform_enabled",
+    "conversation.perception.model_route_enabled",
+    "conversation.perception.configured_modalities_enabled",
+)
+_MODEL_PERCEPTION_SOURCE = "basic_config.enable_model_perception"
+_MODEL_PERCEPTION_MODALITIES_TARGET = "conversation.perception.configured_modalities_enabled"
 _SMART_SILENCE_SOURCE = "emotion_relationship_config.enable_smart_silence"
 _PARTIAL_MAPPING_NOTES = {
     "message_debounce_config.enable_private_image_self_recognition":
@@ -169,8 +180,20 @@ def automatically_handled_configuration_sources() -> frozenset[str]:
     sources.update(_ACCOUNT_CONFIGURATION_SOURCES)
     sources.update(_WEATHER_CONVERTER_SOURCES)
     sources.update((_SCHEDULE_INFLUENCE_ENABLED, _SCHEDULE_INFLUENCE_STRENGTH))
+    sources.add(_ENVIRONMENT_PERCEPTION_MASTER)
+    from .proactive_configuration import DEFAULT_ENABLED_SOURCE
+    sources.add(DEFAULT_ENABLED_SOURCE)
     sources.update(_SEGMENT_SPECIALIZED_SOURCES)
+    from .reply_configuration import PRIVATE_DEBOUNCE_SOURCES
+    sources.update(PRIVATE_DEBOUNCE_SOURCES)
+    from .image_configuration_migration import IMAGE_CONFIGURATION_SOURCES
+    sources.update(IMAGE_CONFIGURATION_SOURCES)
     sources.add("voice_action_config.tts_frequency_control_mode")
+    sources.update(("model_assignment_config.model_replacement_rules",
+        "model_assignment_config.model_replacement_scope",
+        "model_assignment_config.enable_sensitive_model_replacement",
+        "model_assignment_config.SENSITIVE_REPLACEMENT_PROVIDER_ID",
+        "model_assignment_config.sensitive_replacement_keywords", "model_timeout_overrides"))
     return frozenset(sources)
 
 
@@ -226,20 +249,45 @@ def unmapped_configuration_differences(config: dict) -> tuple[ConfigurationDiffe
 
 def plugin_configuration_defaults() -> dict[str, object]:
     """Schema defaults used to distinguish untouched compatibility values from V2 edits."""
-    return {rule["target"]: rule["contract"].get("default")
-            for rule in plugin_configuration_rules() if "default" in rule["contract"]}
+    defaults = {rule["target"]: rule["contract"].get("default")
+                for rule in plugin_configuration_rules() if "default" in rule["contract"]}
+    defaults.update(_configuration_rule_document().get("plugin_defaults", {}))
+    return defaults
 
 
 def _source_value(config: dict, source: str):
-    group, _, name = source.partition(".")
-    nested = config.get(group)
-    if isinstance(nested, dict) and name in nested:
-        return True, nested[name]
+    """Read a legacy setting from its nested path, with flat-key fallback.
+
+    V1 mostly stored settings as ``group -> leaf`` objects, but a few settings
+    (notably relationship-stage routes) have another nested object below the
+    group.  The old one-dot lookup silently treated those values as absent and
+    then reported them as if the user had never configured them.
+    """
+    parts = tuple(part for part in source.split(".") if part)
+    nested = config
+    for part in parts:
+        if not isinstance(nested, dict) or part not in nested:
+            nested = _MISSING
+            break
+        nested = nested[part]
+    if nested is not _MISSING:
+        return True, nested
     if source in config:
         return True, config[source]
-    if group == "weather_config" and name in config:
-        return True, config[name]
+    if len(parts) == 2 and parts[0] == "weather_config" and parts[1] in config:
+        return True, config[parts[1]]
     return False, None
+
+
+def _source_precedence_conflict(config: dict, source: str) -> bool:
+    """Whether a nested value and its flat compatibility alias disagree."""
+    parts = tuple(part for part in source.split(".") if part)
+    nested = config
+    for part in parts:
+        if not isinstance(nested, dict) or part not in nested:
+            return False
+        nested = nested[part]
+    return source in config and nested != config[source]
 
 
 def _boolean(value):
@@ -293,6 +341,9 @@ def _convert_duration(rule: dict, value: object, field):
 
 def _convert_value(rule: dict, value: object, field):
     transform = rule.get("transform")
+    if transform == "component_order":
+        from .behavior_configuration import component_order
+        return field.validate(component_order(value))
     if transform == "bool_to_expression_intensity":
         enabled = _boolean(value)
         return field.validate(field.default if enabled else 0)
@@ -309,10 +360,11 @@ def _convert_value(rule: dict, value: object, field):
         if source_type in ("int", "integer"):
             old_key = rule["source"]
             probability = LegacyProbabilityRule(
-                "6.6.2", old_key, LegacyProbabilityUnit.PERCENT,
+                V1_SUPPORTED_VERSION, old_key, LegacyProbabilityUnit.PERCENT,
             )
             converted = probability.convert(
-                source_version="6.6.2", old_key=old_key, value=_number(value, integer=True), field=field,
+                source_version=V1_SUPPORTED_VERSION, old_key=old_key,
+                value=_number(value, integer=True), field=field,
             )
         else:
             converted = _number(value, integer=False)
@@ -348,12 +400,112 @@ def _schedule_influence_tier(value: object, field) -> int:
     return field.validate(tier)
 
 
+def _append_environment_perception_master(config, registry, candidates, differences):
+    """Honor V1's environment master switch over V2's independently editable parts."""
+    present, raw = _source_value(config, _ENVIRONMENT_PERCEPTION_MASTER)
+    if not present:
+        return
+    if _source_precedence_conflict(config, _ENVIRONMENT_PERCEPTION_MASTER):
+        differences.append(ConfigurationDifference(
+            "conversation.perception", "group_precedence",
+            "分组值与平铺兼容值不同；按 V1 宿主实际读取顺序采用分组值。",
+            _ENVIRONMENT_PERCEPTION_MASTER,
+        ))
+    try:
+        enabled = _boolean(raw)
+    except (TypeError, ValueError) as error:
+        differences.append(ConfigurationDifference(
+            "conversation.perception", "invalid_value",
+            f"环境感知总开关无法识别，相关分项保持各自迁移结果：{error}。",
+            _ENVIRONMENT_PERCEPTION_MASTER,
+        ))
+        return
+    if enabled:
+        return
+
+    # In V1 the parent switch suppressed all of these projections regardless of
+    # their saved child values. V2 has no parent switch, so materialize the same
+    # effective behavior while leaving unrelated calendar detail switches alone.
+    for target in _ENVIRONMENT_PERCEPTION_TARGETS:
+        field = registry.fields.get(target)
+        if field is None:
+            differences.append(ConfigurationDifference(
+                target, "unavailable", "当前 V2 运行档没有注册此环境感知分项，已跳过。",
+                _ENVIRONMENT_PERCEPTION_MASTER,
+            ))
+            continue
+        try:
+            disabled = field.validate(False)
+        except (TypeError, ValueError) as error:
+            differences.append(ConfigurationDifference(
+                target, "invalid_value", f"环境感知分项关闭值未通过 V2 校验：{error}。",
+                _ENVIRONMENT_PERCEPTION_MASTER,
+            ))
+            continue
+        # The V1 parent switch dominates child settings. Replace any child
+        # candidates rather than reporting a false conflict between the master
+        # switch and the intentionally saved per-feature preferences.
+        candidates[target] = [({"source": _ENVIRONMENT_PERCEPTION_MASTER,
+                               "confidence": "high"}, disabled)]
+        differences.append(ConfigurationDifference(
+            target, "inactive_source",
+            "V1 环境感知总开关已关闭；为保持升级后的行为，V2 对应分项已关闭。",
+            _ENVIRONMENT_PERCEPTION_MASTER,
+        ))
+
+
+def _append_model_perception_modalities(config, registry, candidates, differences):
+    """V1's model switch covered both route identity and configured input modes."""
+    master_present, master_raw = _source_value(config, _ENVIRONMENT_PERCEPTION_MASTER)
+    if master_present:
+        try:
+            if not _boolean(master_raw):
+                return
+        except (TypeError, ValueError):
+            pass
+    present, raw = _source_value(config, _MODEL_PERCEPTION_SOURCE)
+    if not present:
+        return
+    try:
+        enabled = _boolean(raw)
+    except (TypeError, ValueError):
+        # The ordinary rule conversion already records the invalid source value.
+        return
+    field = registry.fields.get(_MODEL_PERCEPTION_MODALITIES_TARGET)
+    if field is None:
+        differences.append(ConfigurationDifference(
+            _MODEL_PERCEPTION_MODALITIES_TARGET, "unavailable",
+            "当前 V2 运行档没有注册模型能力感知分项，已跳过。", _MODEL_PERCEPTION_SOURCE,
+        ))
+        return
+    try:
+        converted = field.validate(enabled)
+    except (TypeError, ValueError) as error:
+        differences.append(ConfigurationDifference(
+            _MODEL_PERCEPTION_MODALITIES_TARGET, "invalid_value",
+            f"模型能力感知分项未通过 V2 校验：{error}。", _MODEL_PERCEPTION_SOURCE,
+        ))
+        return
+    candidates[_MODEL_PERCEPTION_MODALITIES_TARGET] = [(
+        {"source": _MODEL_PERCEPTION_SOURCE, "confidence": "high"}, converted,
+    )]
+
+
 def _contract_value(rule: dict, value: object):
     contract = rule["contract"]
     transform = rule["transform"]
     source_type = rule["source_type"].lower()
 
-    if transform in ("bool_to_voice_trigger", "bool_to_voice_delivery"):
+    if transform == "voice_generation_mode":
+        aliases = {name: "model_tag" for name in (
+            "fast_tag", "hybrid", "direct", "tag", "tags", "fast",
+            "postprocess", "convert", "post", "llm")}
+        if type(value) is not str or value.strip().lower() not in aliases:
+            raise ValueError("旧语音生成方式不可识别")
+        converted = aliases[value.strip().lower()]
+    elif transform == "bool_to_voice_scope":
+        converted = "full" if _boolean(value) else "partial"
+    elif transform in ("bool_to_voice_trigger", "bool_to_voice_delivery"):
         enabled = _boolean(value)
         converted = (("always" if enabled else "request") if transform == "bool_to_voice_trigger"
                      else ("voice_only" if enabled else "voice_and_text"))
@@ -374,7 +526,16 @@ def _contract_value(rule: dict, value: object):
         number = _number(value, integer=False)
         inherited_voice_probability = (rule["target"] in {
             "voice_reply.private_probability", "voice_reply.group_probability"} and number == -1)
+        if rule["target"] == "voice_reply.primary_mention_probability" and not 0 <= number <= 100:
+            raise ValueError("旧核心用户提及概率必须在 0 到 100 之间")
         converted = -1.0 if inherited_voice_probability else number / 100
+    elif transform == "one_minus_probability":
+        # V1 stored the chance of using a preset poke reply.  V2 stores the
+        # complementary chance of handing the interaction to its model lane.
+        number = _number(value, integer=False)
+        if not math.isfinite(number) or not 0 <= number <= 1:
+            raise ValueError("旧戳一戳预设回复概率必须在 0 到 1 之间")
+        converted = 1 - number
     elif transform == "integer":
         number = _number(value, integer=False)
         if not float(number).is_integer():
@@ -389,9 +550,15 @@ def _contract_value(rule: dict, value: object):
         converted = milliseconds // 1000
     elif transform == "numeric_string_integer":
         converted = _number(value, integer=True)
+    elif transform == "route_rules":
+        from companion_v2.model_gateway.replacement_rules import checked_rules
+        converted = json.dumps(value, ensure_ascii=False, separators=(",", ":")) if isinstance(value, list) else value
+        checked_rules(converted)
     elif transform == "json_list":
         if not isinstance(value, list) or any(type(item) is not str for item in value):
             raise ValueError("旧值不是列表")
+        if rule["target"] == "segmentation.split_words":
+            value = list(dict.fromkeys(value))
         converted = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
     else:
         target_type = contract["type"]
@@ -462,7 +629,7 @@ def _voice_trigger_value(config, raw, *, window_kind=None):
         present, override = _source_value(config, f"voice_action_config.tts_{kind}_trigger_probability")
         override = _number(override, integer=False) if present else -1
         chances.append(override if override >= 0 else chance)
-    return "always" if all(value >= 100 for value in chances) else "request"
+    return "always" if any(value > 0 for value in chances) else "request"
 
 
 def _convert_contract_configuration(config, rules, *, label: str, window_kind=None) -> ConfigurationMigration:
@@ -478,10 +645,7 @@ def _convert_contract_configuration(config, rules, *, label: str, window_kind=No
         present, raw = _source_value(config, source)
         if not present:
             continue
-        group, _, name = source.partition(".")
-        nested = config.get(group)
-        if (isinstance(nested, dict) and name in nested and source in config
-                and nested[name] != config[source]):
+        if _source_precedence_conflict(config, source):
             differences.append(ConfigurationDifference(
                 rule["target"], "group_precedence",
                 "分组值与平铺兼容值不同；按 V1 宿主实际读取顺序采用分组值。", source,
@@ -529,19 +693,48 @@ def convert_plugin_configuration(config, *, rules=None, window_kind=None) -> Con
     if window_kind not in (None, "private", "group"):
         raise ValueError("window kind must be private or group")
     source_rules = plugin_configuration_rules() if rules is None else rules
+    selection_differences = ()
+    if rules is None:
+        from .reply_configuration import select_plugin_rules
+        source_rules, selection_differences = select_plugin_rules(config, source_rules)
     if window_kind is not None:
         source_rules = tuple(rule for rule in source_rules
                              if rule["source"] != "legacy_compat_config.segmented_proactive_interval_max")
-    return _convert_contract_configuration(
+    migration = _convert_contract_configuration(
         config, source_rules, label="插件", window_kind=window_kind,
     )
+    if selection_differences:
+        migration = ConfigurationMigration(migration.changes, migration.confidence, migration.sources,
+                                           migration.differences + selection_differences)
+    # The V1 reactive-poke setting controlled the split between a preset reply
+    # and the model branch.  V2 exposes both the probability and its explicit
+    # enable switch, so carry the switch along with the converted probability
+    # instead of leaving a non-zero probability inert after migration.
+    source = "reactive_poke_config.reactive_poke_normal_reply_probability"
+    probability_target = "poke.model_reply_probability"
+    enabled_target = "poke.model_reply_enabled"
+    if (probability_target in migration.changes
+            and any(source in source_keys for source_keys in migration.sources.values())):
+        changes = dict(migration.changes)
+        confidence = dict(migration.confidence)
+        sources = dict(migration.sources)
+        changes[enabled_target] = changes[probability_target] > 0
+        confidence[enabled_target] = confidence.get(probability_target, "medium")
+        sources[enabled_target] = (source,)
+        migration = ConfigurationMigration(changes, confidence, sources, migration.differences)
+    return migration
 
 
 def convert_semantic_configuration(config, *, rules=None) -> ConfigurationMigration:
     """Convert V1 settings into the V2 semantic catalog, reporting alias conflicts."""
-    return _convert_contract_configuration(
-        config, semantic_configuration_rules() if rules is None else rules, label="语义",
-    )
+    source_rules = semantic_configuration_rules() if rules is None else rules
+    differences = ()
+    if rules is None:
+        from .configuration_precedence import select_semantic_rules
+        source_rules, differences = select_semantic_rules(config, source_rules)
+    migration = _convert_contract_configuration(config, source_rules, label="语义")
+    return ConfigurationMigration(migration.changes, migration.confidence, migration.sources,
+                                  migration.differences + differences)
 
 
 _WINDOWED_SEGMENT_TARGETS = frozenset({
@@ -599,10 +792,7 @@ def _append_component_strategies(config, registry, candidates, differences, rule
         present, raw = _source_value(config, source)
         if not present:
             continue
-        group, _, name = source.partition(".")
-        nested = config.get(group)
-        if (isinstance(nested, dict) and name in nested and source in config
-                and nested[name] != config[source]):
+        if _source_precedence_conflict(config, source):
             differences.append(ConfigurationDifference(
                 target or "conversation.presentation.component_order", "group_precedence",
                 "分组值与平铺兼容值不同；按 V1 宿主实际读取顺序采用分组值。", source,
@@ -662,10 +852,7 @@ def _append_window_segment_value(config, registry, candidates, differences, rule
     present, raw = _source_value(config, source)
     if not present:
         return False
-    group, _, name = source.partition(".")
-    nested = config.get(group)
-    if (isinstance(nested, dict) and name in nested and source in config
-            and nested[name] != config[source]):
+    if _source_precedence_conflict(config, source):
         differences.append(ConfigurationDifference(
             target, "group_precedence",
             "分组值与平铺兼容值不同；按 V1 宿主实际读取顺序采用分组值。", source,
@@ -746,10 +933,7 @@ def _append_window_segmentation(config, registry, candidates, differences, rules
                 sources.append(_SEGMENT_CHAT_SCOPE)
         if sources:
             for source in sources:
-                group, _, name = source.partition(".")
-                nested = config.get(group)
-                if (isinstance(nested, dict) and name in nested and source in config
-                        and nested[name] != config[source]):
+                if _source_precedence_conflict(config, source):
                     differences.append(ConfigurationDifference(
                         "conversation.presentation.enabled", "group_precedence",
                         "分组值与平铺兼容值不同；按 V1 宿主实际读取顺序采用分组值。", source,
@@ -879,10 +1063,27 @@ def convert_configuration(config, *, registry, rules=None, window_kind=None) -> 
     differences = []
     candidates: dict[str, list[tuple[dict, object]]] = {}
     source_rules = configuration_rules() if rules is None else rules
+    if rules is None:
+        from .configuration_precedence import select_registry_rules
+        source_rules, selection_differences = select_registry_rules(config, source_rules)
+        differences.extend(selection_differences)
     for rule in source_rules:
+        if rules is None:
+            from .behavior_configuration import SPECIAL_SOURCES
+            if rule["source"] in SPECIAL_SOURCES:
+                continue
+        if rule["source"].startswith("legacy_compat_config.") and rule["source"].rsplit(".", 1)[-1] in (
+                "enable_maintenance_token_saver", "maintenance_token_soft_limit"):
+            from .reply_configuration import soft_alias_is_inactive
+            if soft_alias_is_inactive(config, rule["source"]):
+                continue
         if window_kind is not None and _windowed_segment_rule(rule):
             continue
         source = rule["source"]
+        if source == _ENVIRONMENT_PERCEPTION_MASTER:
+            # The V1 parent switch is converted together with its child fields
+            # below; it has no standalone V2 registry destination.
+            continue
         if source in (_SCHEDULE_INFLUENCE_ENABLED, _SCHEDULE_INFLUENCE_STRENGTH):
             continue
         if source in _WEATHER_CONVERTER_SOURCES:
@@ -890,10 +1091,7 @@ def convert_configuration(config, *, registry, rules=None, window_kind=None) -> 
         present, raw = _source_value(config, source)
         if not present:
             continue
-        group, _, name = source.partition(".")
-        nested = config.get(group)
-        if (isinstance(nested, dict) and name in nested and source in config
-                and nested[name] != config[source]):
+        if _source_precedence_conflict(config, source):
             differences.append(ConfigurationDifference(
                 rule["target"], "group_precedence",
                 "分组值与平铺兼容值不同；按 V1 宿主实际读取顺序采用分组值。", source,
@@ -918,6 +1116,10 @@ def convert_configuration(config, *, registry, rules=None, window_kind=None) -> 
                 rule["target"], "partial_mapping", partial_note, source,
             ))
 
+    _append_environment_perception_master(config, registry, candidates, differences)
+    if rules is None:
+        _append_model_perception_modalities(config, registry, candidates, differences)
+
     enabled_present, enabled_raw = _source_value(config, _SCHEDULE_INFLUENCE_ENABLED)
     strength_present, strength_raw = _source_value(config, _SCHEDULE_INFLUENCE_STRENGTH)
     if enabled_present or strength_present:
@@ -926,10 +1128,7 @@ def convert_configuration(config, *, registry, rules=None, window_kind=None) -> 
             (_SCHEDULE_INFLUENCE_STRENGTH, strength_present),
         ) if present)
         for source in source_keys:
-            group, _, name = source.partition(".")
-            nested = config.get(group)
-            if (isinstance(nested, dict) and name in nested and source in config
-                    and nested[name] != config[source]):
+            if _source_precedence_conflict(config, source):
                 differences.append(ConfigurationDifference(
                     _SCHEDULE_INFLUENCE_TARGET, "group_precedence",
                     "分组值与平铺兼容值不同；按 V1 宿主实际读取顺序采用分组值。", source,
@@ -981,6 +1180,16 @@ def convert_configuration(config, *, registry, rules=None, window_kind=None) -> 
                     ))
 
     if rules is None:
+        from .behavior_configuration import append_behavior_configuration
+        append_behavior_configuration(config, registry, candidates, differences)
+        from .configuration_precedence import append_compound_configuration
+        append_compound_configuration(config, registry, candidates, differences)
+        from .proactive_configuration import append_contact_defaults
+        append_contact_defaults(config, registry, candidates, differences)
+        from .model_configuration import append_model_configuration
+        append_model_configuration(config, registry, candidates, differences)
+        from .reply_configuration import append_private_debounce
+        append_private_debounce(config, registry, candidates, differences, window_kind=window_kind)
         _append_component_strategies(config, registry, candidates, differences, source_rules)
         if window_kind is not None:
             _append_window_segmentation(config, registry, candidates, differences, source_rules, window_kind)
@@ -1012,10 +1221,7 @@ def _legacy_account_ids(config, source, differences):
     present, raw = _source_value(config, source)
     if not present:
         return False, []
-    group, _, name = source.partition(".")
-    nested = config.get(group)
-    if (isinstance(nested, dict) and name in nested and source in config
-            and nested[name] != config[source]):
+    if _source_precedence_conflict(config, source):
         differences.append(ConfigurationDifference(
             source, "group_precedence",
             "分组值与平铺兼容值不同；按 V1 宿主实际读取顺序采用分组值。", source,
@@ -1054,10 +1260,7 @@ def _legacy_string(config, source, differences):
     present, raw = _source_value(config, source)
     if not present:
         return False, ""
-    group, _, name = source.partition(".")
-    nested = config.get(group)
-    if (isinstance(nested, dict) and name in nested and source in config
-            and nested[name] != config[source]):
+    if _source_precedence_conflict(config, source):
         differences.append(ConfigurationDifference(
             source, "group_precedence",
             "分组值与平铺兼容值不同；按 V1 宿主实际读取顺序采用分组值。", source,
@@ -1074,10 +1277,7 @@ def _legacy_boolean(config, source, differences):
     present, raw = _source_value(config, source)
     if not present:
         return False, False
-    group, _, name = source.partition(".")
-    nested = config.get(group)
-    if (isinstance(nested, dict) and name in nested and source in config
-            and nested[name] != config[source]):
+    if _source_precedence_conflict(config, source):
         differences.append(ConfigurationDifference(
             source, "group_precedence",
             "分组值与平铺兼容值不同；按 V1 宿主实际读取顺序采用分组值。", source,
@@ -1095,10 +1295,7 @@ def _legacy_persona_ids(config, source, differences):
     present, raw = _source_value(config, source)
     if not present:
         return False, []
-    group, _, name = source.partition(".")
-    nested = config.get(group)
-    if (isinstance(nested, dict) and name in nested and source in config
-            and nested[name] != config[source]):
+    if _source_precedence_conflict(config, source):
         differences.append(ConfigurationDifference(
             source, "group_precedence",
             "分组值与平铺兼容值不同；按 V1 宿主实际读取顺序采用分组值。", source,
@@ -1162,6 +1359,32 @@ def _legacy_account_inventory(accounts):
         if (type(default_persona_id) is str and len(default_persona_id.strip()) <= 120
                 and not any(ord(char) < 32 for char in default_persona_id)):
             account["default_persona_id"] = default_persona_id.strip() or "[%None]"
+        if "native_windows" in item:
+            account["native_windows"] = []
+            for window in item["native_windows"] if isinstance(item["native_windows"], list) else ():
+                if not isinstance(window, dict):
+                    continue
+                kind, peer, persona = (window.get(field) for field in
+                                       ("scope_kind", "native_scope_id", "persona_id"))
+                if (kind not in ("private", "group") or type(peer) is not str
+                        or len(peer) > 32 or not peer.isascii() or not peer.isdecimal() or int(peer) <= 0
+                        or peer != str(int(peer)) or type(persona) is not str
+                        or not persona.strip() or len(persona) > 120
+                        or any(ord(char) < 32 for char in persona)):
+                    continue
+                record = {"scope_kind": kind, "native_scope_id": peer, "persona_id": persona.strip()}
+                origin = window.get("unified_msg_origin")
+                if origin is not None:
+                    prefix = platform_id.strip() + (":FriendMessage:" if kind == "private" else ":GroupMessage:")
+                    if type(origin) is not str or not origin.startswith(prefix):
+                        continue
+                    ids = origin[len(prefix):].split("_")
+                    if (len(ids) not in ((1,) if kind == "private" else (1, 2)) or ids[-1] != peer
+                            or any(len(value) > 32 or not value.isascii() or not value.isdecimal()
+                                   or int(value) <= 0 or value != str(int(value)) for value in ids)):
+                        continue
+                    record["unified_msg_origin"] = origin
+                account["native_windows"].append(record)
         result.append(account)
     return sorted(result, key=lambda row: (row["platform_id"], row["account_id"]))
 
@@ -1289,18 +1512,8 @@ def _legacy_group_ids(config, differences):
     return [], "group_observation_config.group_whitelist_ids"
 
 
-def convert_account_configuration(config, *, accounts=()) -> ConfigurationMigration:
-    """Map V1 account, recipient and persona settings using the live host inventory.
-
-    The converter never turns an old ID into a new route without a matching,
-    connected OneBot account and a loaded persona mapping. It proposes multi-host
-    bindings but leaves the selected V2 runtime mode untouched.
-    """
-    if not isinstance(config, dict):
-        return ConfigurationMigration({}, {}, {}, (
-            ConfigurationDifference("", "invalid_source", "V1 配置不是键值映射。"),
-        ))
-
+def _legacy_target_scope(config, accounts):
+    """Resolve old authorization before considering persona availability."""
     differences = []
     inventory = _legacy_account_inventory(accounts)
     selected_accounts = _selected_legacy_accounts(config, inventory, differences)
@@ -1338,6 +1551,39 @@ def convert_account_configuration(config, *, accounts=()) -> ConfigurationMigrat
         ))
         group_ids = []
 
+    return selected_accounts, private_ids, group_ids, group_source, differences
+
+
+def legacy_authorized_windows(config, *, accounts=()):
+    """Return exact old targets for read-only native persona discovery."""
+    if not isinstance(config, dict):
+        return []
+    selected, private_ids, group_ids, _, _ = _legacy_target_scope(config, accounts)
+    return [{**account, "scope_kind": kind, "native_scope_id": peer}
+            for account in selected
+            for kind, peers in (("private", private_ids), ("group", group_ids)) for peer in peers]
+
+
+def legacy_persona_storage_shared(config):
+    """Use the same recognized switch values as the configuration converter."""
+    if not isinstance(config, dict):
+        return False
+    present, raw = _source_value(config, "basic_config.enable_multi_persona_mode")
+    if not present:
+        return True
+    try:
+        return not _boolean(raw)
+    except ValueError:
+        return False
+
+
+def convert_account_configuration(config, *, accounts=()) -> ConfigurationMigration:
+    """Map authorized targets to loaded native personas without changing runtime mode."""
+    if not isinstance(config, dict):
+        return ConfigurationMigration({}, {}, {}, (
+            ConfigurationDifference("", "invalid_source", "V1 配置不是键值映射。"),
+        ))
+    selected_accounts, private_ids, group_ids, group_source, differences = _legacy_target_scope(config, accounts)
     specific_present, specific_persona = _legacy_string(
         config, "basic_config.plugin_specific_persona_id", differences,
     )
@@ -1400,7 +1646,15 @@ def convert_account_configuration(config, *, accounts=()) -> ConfigurationMigrat
     for account in selected_accounts:
         account_key = account["platform_id"], account["account_id"]
         role_map = account["persona_roles"]
-        requested_personas = effective_personas
+        native_windows = account.get("native_windows")
+        authorized_windows = [row for row in native_windows or ()
+            if row["native_scope_id"] in (private_ids if row["scope_kind"] == "private" else group_ids)]
+        requested_personas = list(effective_personas)
+        if native_windows is not None and not multi_enabled:
+            # V1 single-role storage followed each window's native persona. A
+            # plugin-specific persona was not a forced choice for every window.
+            requested_personas.extend(row["persona_id"] for row in authorized_windows
+                                      if row["persona_id"] not in requested_personas)
         if not requested_personas:
             default_persona = account.get("default_persona_id")
             if default_persona is None:
@@ -1437,8 +1691,27 @@ def convert_account_configuration(config, *, accounts=()) -> ConfigurationMigrat
                 ))
             continue
         routes_by_account[account_key] = (account, persona_pairs)
+        mapped_personas = {pair[0] for pair in persona_pairs}
+
+        def window_available(kind, peer):
+            if native_windows is None:
+                return True
+            windows = [row for row in authorized_windows
+                       if row["scope_kind"] == kind and row["native_scope_id"] == peer]
+            if windows and all(row["persona_id"] in mapped_personas for row in windows):
+                return True
+            differences.append(ConfigurationDifference(
+                "multi_host.targets" if kind == "private" else "multi_host.group_targets",
+                "unavailable_persona",
+                f"账号 {account['account_id']} 的{'私聊' if kind == 'private' else '群聊'} {peer} 人格尚未核验或未登记，保留现有配置。",
+                "basic_config.plugin_specific_persona_id",
+            ))
+            return False
+
         if private_ids:
             for participant_id in private_ids:
+                if not window_available("private", participant_id):
+                    continue
                 private_targets.append({
                     "target_id": "v1t-" + hashlib.sha256(
                         json.dumps([account["platform_id"], account["account_id"], participant_id],
@@ -1451,6 +1724,8 @@ def convert_account_configuration(config, *, accounts=()) -> ConfigurationMigrat
                 })
         if group_ids:
             for group_id in group_ids:
+                if not window_available("group", group_id):
+                    continue
                 group_targets.append({
                     "target_id": "v1g-" + hashlib.sha256(
                         json.dumps([account["platform_id"], account["account_id"], group_id],
@@ -1515,6 +1790,11 @@ def convert_account_configuration(config, *, accounts=()) -> ConfigurationMigrat
             single_persona = pairs[0]
         else:
             single_persona = None
+        if account and "native_windows" in account:
+            selected = {row["persona_id"] for row in account["native_windows"]
+                        if row["scope_kind"] == "private"
+                        and row["native_scope_id"] == target["participant_id"]}
+            single_persona = next((pair for pair in pairs if pair[0] in selected), None) if len(selected) == 1 else None
         if account and single_persona:
             persona_id, role_id = single_persona
             single = {

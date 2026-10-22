@@ -146,6 +146,8 @@ class SampleCatalogTests(unittest.TestCase):
             yield
 
         def read_all(self, query, parameters):
+            if "FROM expression_style_runs" in query:
+                return []
             self.query = (query, parameters)
             return self.rows
 

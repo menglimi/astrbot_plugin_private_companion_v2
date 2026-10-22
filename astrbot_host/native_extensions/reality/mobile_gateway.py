@@ -32,7 +32,7 @@ try:
 except Exception:
     aiohttp = None
     web = None
-PLUGIN_NAME = 'astrbot_plugin_private_companion_v2.reality'
+PLUGIN_NAME = 'astrbot_plugin_private_companion.reality'
 MOBILE_API_VERSION = '1.0'
 MOBILE_MAX_BODY_BYTES = 256 * 1024
 MOBILE_MAX_SESSIONS_PER_USER = 8
@@ -576,7 +576,7 @@ class MobileGatewayMixin:
                             'reports': {kind: {'accepted_at': received_at,
                                                'age_seconds': max(0, int(now - received_at))}
                                         for kind, received_at in session.get('report_receipts', {}).items()}})
-        return {'owner': 'astrbot_plugin_private_companion_v2', 'execution_path': 'v2_native',
+        return {'owner': 'astrbot_plugin_private_companion', 'execution_path': 'v2_native',
                 'active_sessions': len(devices), 'devices': devices}
 
     def _mobile_record_upload(self, session: dict[str, Any], kind: str, received_at: float) -> None:
@@ -753,7 +753,7 @@ class MobileGatewayMixin:
     async def mobile_health(self) -> tuple[dict[str, Any], int]:
         """Return a deliberately small liveness response without credentials."""
         return ({'ok': True, 'data': {'service': 'reality_companion_mobile', 'api_version': MOBILE_API_VERSION, 'pairing_required': True,
-                                    'owner': 'astrbot_plugin_private_companion_v2', 'execution_path': 'v2_native',
+                                    'owner': 'astrbot_plugin_private_companion', 'execution_path': 'v2_native',
                                     'gateway_version': PRODUCT_VERSION}}, 200)
 
     async def mobile_snapshot(self) -> tuple[dict[str, Any], int]:

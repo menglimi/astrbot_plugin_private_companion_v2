@@ -80,14 +80,15 @@ class NativeInputTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(current["account_id"], "100")
         self.assertEqual(self.native.provider.client.state.calls, [])
 
-    async def test_single_v2_persona_mapping_never_reads_host_conversation_persona(self):
+    async def test_single_v2_persona_mapping_does_not_claim_an_unmapped_native_selection(self):
         account = self.bridge.accounts[("qq-main", "100")]
         self.native.persona_manager.personas_v3 = [self.native.persona]
-        with patch.object(self.native.conversation_manager, "get_conversation",
-                           side_effect=AssertionError("the V2 persona map must not read the host conversation")):
-            result = await self.bridge._selected_persona(account, self.bridge._umo("qq-main", "200"))
-
-        self.assertEqual(result[1:], ("original", self.native.persona, False))
+        self.bridge.persona_snapshot_lookup = AsyncMock(return_value="group-persona")
+        with self.assertRaises(TaskError) as raised:
+            await self.bridge._selected_persona(account, self.bridge._umo("qq-main", "200"))
+        self.assertEqual(raised.exception.code, "host_persona_window_unbound")
+        self.bridge.persona_snapshot_lookup.assert_awaited_once_with(
+            self.native, "qq-main:FriendMessage:200", "conversation-1")
 
     async def test_uncached_multiple_v2_personas_resolve_the_astrbot_selection_once(self):
         account = self.bridge.accounts[("qq-main", "100")]
@@ -111,15 +112,12 @@ class NativeInputTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refreshed, [("qq-main:FriendMessage:200", "100", "bot-a",
                                       "second", ROLE.subject_id, "conversation-1")])
 
-    async def test_unmapped_conversation_persona_uses_configured_v2_window_snapshot(self):
+    async def test_snapshot_without_matching_conversation_rechecks_native_persona(self):
         account = self.bridge.accounts[("qq-main", "100")]
         self.map_second_native_persona()
-        self.bridge.session_persona_override_lookup = AsyncMock(
-            side_effect=AssertionError("installed persona snapshots are authoritative until refresh"))
-        self.bridge.persona_snapshot_lookup = AsyncMock(
-            side_effect=AssertionError("installed persona snapshots do not query conversation personas"))
-        self.bridge.persona_selection_lookup = AsyncMock(
-            side_effect=AssertionError("installed persona snapshots do not resolve personas"))
+        self.bridge.session_persona_override_lookup = AsyncMock(return_value=None)
+        self.bridge.persona_snapshot_lookup = AsyncMock(return_value="second")
+        self.bridge.persona_selection_lookup = AsyncMock(return_value="second")
         self.bridge.persona_window_snapshot_lookup = lambda *_: {
             "bot_id": "bot-a", "persona_id": "original", "role_id": "stale-role",
             "conversation_id": None, "selection_source": "configured",
@@ -129,12 +127,12 @@ class NativeInputTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
 
         result = await self.bridge._selected_persona(account, self.bridge._umo("qq-main", "200"))
 
-        self.assertEqual(result[1:], ("original", self.native.persona, False))
+        self.assertEqual(result[1:], ("second", self.native.persona_manager.personas_v3[1], False))
         self.assertEqual(refreshed, [("qq-main:FriendMessage:200", "100", "bot-a",
-                                      "original", ROLE.subject_id, "conversation-1")])
-        self.bridge.session_persona_override_lookup.assert_not_awaited()
-        self.bridge.persona_snapshot_lookup.assert_not_awaited()
-        self.bridge.persona_selection_lookup.assert_not_awaited()
+                                      "second", ROLE.subject_id, "conversation-1")])
+        self.bridge.session_persona_override_lookup.assert_awaited_once()
+        self.bridge.persona_snapshot_lookup.assert_awaited_once()
+        self.bridge.persona_selection_lookup.assert_awaited_once()
 
     async def test_empty_conversation_persona_uses_local_agent_runner_default(self):
         account = self.bridge.accounts[("qq-main", "100")]

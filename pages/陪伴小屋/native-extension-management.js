@@ -17,6 +17,9 @@ window.CompanionNativeExtensionManagement = (() => {
     vts_not_authenticated:"VTube Studio 尚未授权，请请求授权并在 VTS 弹窗中点允许。",
     vts_auth_timeout:"等待授权超时。请在 VTube Studio 弹窗中点允许，再重新连接核对授权结果。",
     camera_user_ineligible:"此用户没有主机摄像头使用权限，请选择管理员或主要用户。",
+    camera_consent_required:"请先确认该用户的摄像头授权，再保存启用策略。",
+    camera_user_not_configured:"请先确认该用户的摄像头授权，再保存使用策略。",
+    native_mihome_unavailable:"米家运行时不可用，请在 AstrBot 运行环境安装米家依赖后重载插件。",
     native_service_not_running:"此模块尚未运行，请启用模块并等待启动完成。",
     native_service_changed:"模块已停止或重新配置，请刷新当前状态。",
     native_reality_action_failed:"操作未完成，请核对现实设备配置和当前用户授权。",
@@ -47,9 +50,10 @@ window.CompanionNativeExtensionManagement = (() => {
       this.alive = false; clearTimeout(this.timer); this.timer = null;
       this.root.removeEventListener("click", this.click); this.root.removeEventListener("change", this.change);
     }
-    update(record) { this.record = record; if (this.current()) this.render(); }
+    update(record) { this.saveCameraDraft(); this.record = record; if (this.current()) this.render(); }
     setBlocked(value) { this.blocked = value; this.updateButtons(); }
     button(action, text = actionNames[action], extra = "") {
+      if (action.startsWith("mihome_")) extra += " data-native-requires-mihome";
       return `<button class="button small" type="button" data-native-action="${action}" ${extra}>${escape(text)}</button>`;
     }
     notice(message, failed = false) {
@@ -72,24 +76,27 @@ window.CompanionNativeExtensionManagement = (() => {
     }
     reality() {
       const data = this.record.management, mi = data.mihome || {}, auth = mi.auth || {}, login = mi.login || {};
+      const available = mi.available !== false && (mi.available === true || !!mi.auth || !!mi.login);
       const logged = auth.logged_in === true || login.credential_present === true;
       const loginLabels = {idle:"尚未登录", starting:"正在生成二维码", waiting:"等待扫码确认", pending:"等待扫码确认", success:"登录成功", already_logged_in:"已登录", expired:"二维码已过期", timeout:"登录已超时", error:"登录未完成"};
-      const state = logged ? "已登录" : loginLabels[login.status] || (login.running ? "等待扫码确认" : "尚未登录");
+      const state = !available ? mi.available === false ? "米家运行时不可用" : "米家状态未读取"
+        : logged ? "已登录" : loginLabels[login.status] || (login.running ? "等待扫码确认" : "尚未登录");
       const qr = qrSource(login.qr_image || this.lastQr);
       if (login.qr_available && login.qr_image) this.lastQr = qr;
       if (!login.qr_available || logged) this.lastQr = "";
-      const qrMarkup = login.qr_available && !logged && qr ? `<div class="native-management-qr"><img src="${escape(qr)}" alt="米家登录二维码" width="180" height="180"><p>用米家 App 扫描，并在手机上确认登录。</p></div>` : "";
+      const qrMarkup = available && login.qr_available && !logged && qr ? `<div class="native-management-qr"><img src="${escape(qr)}" alt="米家登录二维码" width="180" height="180"><p>用米家 App 扫描，并在手机上确认登录。</p></div>` : "";
       const devices = Array.isArray(mi.devices) ? mi.devices : [];
-      const devicesMarkup = devices.length ? `<div class="native-management-table"><table><thead><tr><th>设备</th><th>位置</th><th>状态</th></tr></thead><tbody>${devices.map(device => `<tr><td>${escape(device.name || device.alias || device.did || "设备")}<small>${escape(device.model || "")}</small></td><td>${escape([device.home_name, device.room_name].filter(Boolean).join(" · ") || device.room || "—")}</td><td>${device.online === true ? "在线" : device.online === false ? "离线" : "尚未读取"}</td></tr>`).join("")}</tbody></table></div>` : `<p class="native-management-muted">${logged ? "设备目录还是空的，点击同步设备读取。" : "登录后可以同步设备。"}</p>`;
-      return `<div class="native-management"><details open><summary>米家账号与设备 <span>${escape(state)}</span></summary><div class="native-management-body"><div class="native-management-actions">${this.button("mihome_start_login", logged ? "重新扫码登录" : "扫码登录")}${this.button("mihome_login_status")}${this.button("mihome_sync_devices", undefined, logged ? "" : "data-native-requires-login")}${this.button("mihome_logout", undefined, logged ? "" : "data-native-requires-login")}</div>${qrMarkup}<p class="native-management-muted">${escape(login.message || auth.last_login_error || "")}</p>${devicesMarkup}${mi.snapshot_at ? `<small class="native-management-muted">最近同步：${escape(mi.snapshot_at)}</small>` : ""}</div></details>${this.camera(data)}${this.audio(data)}<div class="native-management-bottom"><button class="button small" type="button" data-native-management-refresh>刷新管理状态</button><p data-native-action-notice role="status" aria-live="polite"></p></div></div>`;
+      const devicesMarkup = devices.length ? `<div class="native-management-table"><table><thead><tr><th>设备</th><th>位置</th><th>状态</th></tr></thead><tbody>${devices.map(device => `<tr><td>${escape(device.name || device.alias || device.did || "设备")}<small>${escape(device.model || "")}</small></td><td>${escape([device.home_name, device.room_name].filter(Boolean).join(" · ") || device.room || "—")}</td><td>${device.online === true ? "在线" : device.online === false ? "离线" : "尚未读取"}</td></tr>`).join("")}</tbody></table></div>` : `<p class="native-management-muted">${!available ? "米家就绪后可登录并同步设备。" : logged ? "设备目录还是空的，点击同步设备读取。" : "登录后可以同步设备。"}</p>`;
+      return `<div class="native-management"><details open><summary>米家账号与设备 <span>${escape(state)}</span></summary><div class="native-management-body"><div class="native-management-actions">${this.button("mihome_start_login", logged ? "重新扫码登录" : "扫码登录")}${this.button("mihome_login_status")}${this.button("mihome_sync_devices", undefined, logged ? "" : "data-native-requires-login")}${this.button("mihome_logout", undefined, logged ? "" : "data-native-requires-login")}</div>${qrMarkup}<p class="native-management-muted">${escape(!available ? mi.reason || "米家管理状态暂不可读取，请刷新核对。" : login.message || auth.last_login_error || "")}</p>${devicesMarkup}${mi.snapshot_at ? `<small class="native-management-muted">最近同步：${escape(mi.snapshot_at)}</small>` : ""}</div></details>${this.camera(data)}${this.audio(data)}<div class="native-management-bottom"><button class="button small" type="button" data-native-management-refresh>刷新管理状态</button><p data-native-action-notice role="status" aria-live="polite"></p></div></div>`;
     }
     camera(data) {
       const users = Array.isArray(data.users) ? data.users : [], camera = data.camera || {};
       const selected = window.CompanionProduct?.target?.();
       if (!this.cameraUser) this.cameraUser = selected?.scope_kind === "private" ? String(selected.participant_id || "") : String(users[0]?.user_id || "");
-      const user = users.find(row => String(row.user_id) === this.cameraUser), policy = this.cameraDraft || user?.camera || {};
-      const eligible = user?.camera?.eligible !== false, consented = user?.camera?.consented === true;
-      const state = !eligible ? "当前用户不可用" : consented ? "已确认授权" : "尚未确认";
+      const user = users.find(row => String(row.user_id) === this.cameraUser), policy = {...(user?.camera || {}), ...(this.cameraDraft || {})};
+      const eligible = user?.camera?.eligible, consented = user?.camera?.consented === true;
+      const state = !Array.isArray(data.users) ? "授权状态未读取" : !user?.camera ? "尚无摄像头授权记录"
+        : eligible === false ? "当前用户不可用" : consented ? "已确认授权" : "尚未确认";
       const modes = [["off","仅明确请求"],["ask","主动前先询问"],["auto","按授权主动"]];
       const cameras = Array.isArray(camera.devices) ? camera.devices : [];
       const list = cameras.length ? `<ul class="native-management-camera-devices">${cameras.map(device => `<li>${escape(device.name || device.label || "摄像头")} <span>索引 ${escape(device.index ?? device.camera_index ?? "—")}</span></li>`).join("")}</ul>` : `<p class="native-management-muted">尚未发现摄像头，点击扫描摄像头读取设备目录。</p>`;
@@ -140,14 +147,17 @@ window.CompanionNativeExtensionManagement = (() => {
     }
     updateButtons() {
       const mi = this.record.management?.mihome, logged = mi?.auth?.logged_in === true || mi?.login?.credential_present === true;
+      const mihomeAvailable = mi?.available !== false && (mi?.available === true || !!mi?.auth || !!mi?.login);
       const consent = this.root.querySelector("[data-native-camera-consent]")?.checked === true;
       this.root.querySelectorAll("[data-native-action], [data-native-use-hotkey]").forEach(button => {
         button.disabled = this.busy || this.blocked || button.hasAttribute("data-native-requires-login") && !logged
+          || button.hasAttribute("data-native-requires-mihome") && !mihomeAvailable
           || button.hasAttribute("data-native-requires-auth") && this.record.management?.authenticated !== true
           || button.hasAttribute("data-native-requires-consent") && !consent;
       });
       const refresh = this.root.querySelector("[data-native-management-refresh]");
       if (refresh) refresh.disabled = this.busy || this.blocked;
+      this.root.querySelectorAll("input, select").forEach(node => { node.disabled = this.busy || this.blocked; });
       this.root.setAttribute("aria-busy", String(this.busy));
     }
     saveCameraDraft() {
@@ -155,14 +165,41 @@ window.CompanionNativeExtensionManagement = (() => {
       const node = this.root.querySelector("[data-native-camera-enabled]");
       if (!node) return;
       this.cameraOpen = this.root.querySelector("[data-native-camera-details]").open;
-      this.cameraDraft = {enabled:node.checked, proactive_mode:this.root.querySelector("[data-native-camera-mode]").value,
+      const draft = {enabled:node.checked, proactive_mode:this.root.querySelector("[data-native-camera-mode]").value,
         proactive_max_daily:Number(this.root.querySelector("[data-native-camera-daily]").value)};
+      const stored = this.record.management?.users?.find(row => String(row.user_id) === this.cameraUser)?.camera;
+      this.cameraDraft = this.differences(draft, {enabled:stored?.enabled === true,
+        proactive_mode:stored?.proactive_mode || "off", proactive_max_daily:stored?.proactive_max_daily ?? -1});
       this.publishState();
     }
-    saveAudioDraft() {
-      if (!this.root.querySelector("[data-native-audio-device]")) return;
-      this.audioOpen = this.root.querySelector("[data-native-audio-details]").open;
-      const value = key => Number(this.root.querySelector(`[data-native-audio-input="${key}"]`).value);
+    differences(values, stored) {
+      const result = {};
+      for (const [key, value] of Object.entries(values)) {
+        if (value && typeof value === "object" && !Array.isArray(value)) {
+          const nested = this.differences(value, stored?.[key]);
+          if (nested) result[key] = nested;
+        } else if (JSON.stringify(value) !== JSON.stringify(stored?.[key])) result[key] = value;
+      }
+      return Object.keys(result).length ? result : null;
+    }
+    storedAudioValues() {
+      const data = this.record.management || {}, output = data.audio_output || {};
+      const user = data.users?.find(row => String(row.user_id) === this.cameraUser);
+      const policy = user?.policy || {}, alarm = user?.alarm || {};
+      return {device_id:output.selected_device_id || "system_default", output_volume:output.playback_volume ?? 35,
+        policy:{proactive_voice_enabled:policy.proactive_voice_enabled === true, playback_volume:policy.playback_volume ?? 35},
+        alarm:{enabled:alarm.enabled === true, time:alarm.time || "07:30", message:alarm.message || "",
+          delivery_mode:alarm.delivery_mode || "chat_on_failure", require_acknowledgement:alarm.require_acknowledgement !== false,
+          days:Array.isArray(alarm.days) ? alarm.days : [0,1,2,3,4,5,6],
+          playback_volume:alarm.playback_volume ?? 35, repeat_count:alarm.repeat_count ?? 1,
+          repeat_interval_seconds:alarm.repeat_interval_seconds ?? 20, snooze_minutes:alarm.snooze_minutes ?? 10,
+          volume_step:alarm.volume_step ?? 8, max_volume:alarm.max_volume ?? 70, fade_in_ms:alarm.fade_in_ms ?? 800}};
+    }
+    audioFormValues() {
+      const value = key => {
+        const text = this.root.querySelector(`[data-native-audio-input="${key}"]`).value;
+        return text.trim() ? Number(text) : "";
+      };
       const alarm = {enabled:this.root.querySelector("[data-native-alarm-enabled]").checked,
         time:this.root.querySelector("[data-native-alarm-time]").value,
         message:this.root.querySelector("[data-native-alarm-message]").value,
@@ -170,22 +207,31 @@ window.CompanionNativeExtensionManagement = (() => {
         require_acknowledgement:this.root.querySelector("[data-native-alarm-ack]").checked,
         days:[...this.root.querySelectorAll("[data-native-alarm-day]:checked")].map(node => Number(node.dataset.nativeAlarmDay))};
       for (const key of ["playback_volume","repeat_count","repeat_interval_seconds","snooze_minutes","volume_step","max_volume","fade_in_ms"]) alarm[key] = value(key);
-      this.audioDraft = {device_id:this.root.querySelector("[data-native-audio-device]").value, output_volume:value("output_volume"),
+      return {device_id:this.root.querySelector("[data-native-audio-device]").value, output_volume:value("output_volume"),
         policy:{proactive_voice_enabled:this.root.querySelector("[data-native-audio-proactive]").checked, playback_volume:value("policy_volume")}, alarm};
+    }
+    saveAudioDraft() {
+      if (!this.root.querySelector("[data-native-audio-device]")) return;
+      this.audioOpen = this.root.querySelector("[data-native-audio-details]").open;
+      const values = this.audioFormValues();
+      this.audioDraft = this.differences(values, this.storedAudioValues());
       this.publishState();
+      return values;
     }
     publishState() { this.options.onState?.({user:this.cameraUser, draft:this.cameraDraft, open:this.cameraOpen, consent:this.cameraConsent, audioOpen:this.audioOpen, audioDraft:this.audioDraft, cameraTestResult:this.cameraTestResult, cameraPreview:this.cameraPreview}); }
     async read({quiet = false} = {}) {
-      if (!this.current() || this.reading) return;
+      if (!this.current() || this.reading || this.busy && !quiet) return;
       this.reading = true;
+      const operation = this.operation;
       try {
         const result = await window.CompanionProduct.request("GET", "extensions");
-        if (!this.current()) return;
+        if (!this.current() || operation !== this.operation) return;
         const record = result?.extensions?.[this.name];
         if (!record?.management) throw {code:"native_management_unavailable"};
         this.saveCameraDraft(); this.record.management = record.management;
         this.options.onRead?.(record); this.render();
-      } catch (error) { if (this.current() && !quiet) this.notice(errors[error?.code] || "管理状态暂时读取不到，请重新刷新。", true); }
+        if (!quiet) this.notice("管理状态已刷新。");
+      } catch (error) { if (this.current() && operation === this.operation && !quiet) this.notice(errors[error?.code] || "管理状态暂时读取不到，请重新刷新。", true); }
       finally { this.reading = false; }
     }
     scheduleRead() {
@@ -195,6 +241,7 @@ window.CompanionNativeExtensionManagement = (() => {
     }
     async run(action, payload) {
       if (this.busy || this.blocked || !this.current()) return;
+      this.operation = (this.operation || 0) + 1;
       this.saveCameraDraft(); this.busy = true; this.options.onBusy?.(true); this.updateButtons();
       const waiting = action === "request_auth" ? "请在 VTube Studio 弹窗中点“允许”，正在等待授权结果…" : `正在${actionNames[action] || "执行操作"}…`;
       this.notice(waiting);
@@ -213,11 +260,15 @@ window.CompanionNativeExtensionManagement = (() => {
             && String(preview.user_id) === String(payload.user_id) && cameraPreviewSource(preview.data_url) ? preview : null;
           this.publishState();
         }
-        if (action === "consent_camera" || action === "update_camera_policy") { this.cameraDraft = null; this.cameraConsent = false; this.publishState(); }
+        if (action === "update_camera_policy") this.cameraDraft = null;
+        if (action === "consent_camera" && this.cameraDraft) delete this.cameraDraft.enabled;
+        if (action === "consent_camera" || action === "update_camera_policy") { this.cameraConsent = false; this.publishState(); }
         if (this.audioDraft) {
           if (action === "select_audio") { delete this.audioDraft.device_id; delete this.audioDraft.output_volume; }
-          if (["update_audio_policy","revoke_audio_consent"].includes(action)) delete this.audioDraft.policy;
-          if (["save","disable","revoke_audio_consent"].includes(action)) delete this.audioDraft.alarm;
+          if (action === "update_audio_policy") delete this.audioDraft.policy;
+          if (action === "save") delete this.audioDraft.alarm;
+          if (["disable","revoke_audio_consent"].includes(action) && this.audioDraft.alarm) delete this.audioDraft.alarm.enabled;
+          if (action === "revoke_audio_consent" && this.audioDraft.policy) delete this.audioDraft.policy.proactive_voice_enabled;
           this.publishState();
         }
         this.options.onRecord?.(record);
@@ -242,8 +293,7 @@ window.CompanionNativeExtensionManagement = (() => {
     payload(action, button) {
       if (action === "mihome_login_status") return {qr_revision:this.record.management?.mihome?.login?.qr_revision || ""};
       if (["select_audio","test_audio","request_audio_consent","revoke_audio_consent","update_audio_policy","save","disable","stop_session","test","cancel_reminder"].includes(action)) {
-        this.saveAudioDraft();
-        const draft = this.audioDraft;
+        const draft = this.saveAudioDraft();
         if (action === "select_audio") return {device_id:draft.device_id, playback_volume:draft.output_volume};
         if (action === "test_audio") return {playback_volume:draft.output_volume};
         const user_id = this.root.querySelector("[data-native-audio-user]").value.trim();

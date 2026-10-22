@@ -10,7 +10,14 @@ from urllib.parse import urlsplit
 from .types import NativeImageError, fingerprint
 
 BACKENDS = {"auto", "online_api", "sd_webui", "comfyui"}
-PLATFORMS = {"auto", "openai", "minimax"}
+# Keep the complete V1 provider vocabulary in the persisted contract.  A saved
+# provider can be shown and edited even when its protocol adapter is not loaded;
+# routing reports it as unsupported instead of silently changing it to OpenAI.
+PLATFORMS = {
+    "auto", "openai", "openrouter", "agnes", "sensenova", "minimax",
+    "bailian", "modelscope", "doubao", "gemini",
+}
+IMAGE_QUALITIES = {"auto", "low", "medium", "high", "standard", "hd"}
 IMAGE_OPERATIONS = ("generate", "edit")
 LOCAL_ROUTES = {"comfyui", "sd_webui"}
 
@@ -93,11 +100,21 @@ def settings(plugin):
     saved = native.get("output")
     if isinstance(saved, dict):
         result = copy.deepcopy(saved)
+        result.setdefault("legacy_backend", "")
+        result.setdefault("legacy_options", {})
+        result.setdefault("network", {})
+        for endpoint in result.get("endpoints", []):
+            if isinstance(endpoint, dict):
+                endpoint.setdefault("quality", "standard")
+                endpoint.setdefault("max_reference_images", 1)
+                endpoint.setdefault("size_label", f"{endpoint.get('width', 1024)}x{endpoint.get('height', 1024)}")
         result["operation_routes"] = _stored_operation_routes(result)
         return result
     connection = copy.deepcopy(native.get("connection", {}))
     result = {"enabled": native.get("enabled") is True,
               "backend": native.get("backend", "sd_webui"), "endpoints": [],
+              "legacy_backend": "",
+              "legacy_options": {}, "network": {},
               "sd_webui": connection if native.get("backend") != "comfyui" else {},
               "comfyui": connection if native.get("backend") == "comfyui" else {}}
     result["operation_routes"] = _default_operation_routes(result)
@@ -108,12 +125,56 @@ def public_configuration(plugin):
     source = settings(plugin)
     result = copy.deepcopy(source)
     for item in [*result.get("endpoints", []), result.get("sd_webui", {}), result.get("comfyui", {})]:
+        headers = item.pop("custom_headers", None)
+        item["custom_headers_set"] = bool(headers)
+        item["custom_header_names"] = sorted(headers) if isinstance(headers, dict) else []
         item["api_key_set"] = bool(item.pop("api_key", ""))
+    network = result.setdefault("network", {})
+    network["download_proxy_set"] = bool(network.pop("download_proxy", ""))
     provider = getattr(plugin, "_native_v2_provider", None)
     return {"revision": fingerprint(source), "settings": result,
             "live": bool(provider and not provider._closed),
             "limits": {"max_endpoints": 24, "timeout_min": 1, "timeout_max": 1800},
             "supported_backends": sorted(BACKENDS), "supported_platforms": sorted(PLATFORMS)}
+
+
+def _network(value, previous):
+    if not isinstance(value, dict) or value.keys() - {"download_proxy", "download_proxy_set",
+                                                       "use_environment_proxy", "clear_download_proxy"}:
+        raise NativeImageError("invalid_configuration")
+    result = copy.deepcopy(value)
+    proxy = result.get("download_proxy", previous.get("download_proxy", ""))
+    use_environment_proxy = result.get("use_environment_proxy", previous.get("use_environment_proxy", False))
+    result.pop("download_proxy_set", None)
+    clear = result.pop("clear_download_proxy", False)
+    if (not isinstance(proxy, str) or len(proxy) > 2048 or type(use_environment_proxy) is not bool
+            or type(clear) is not bool):
+        raise NativeImageError("invalid_configuration")
+    if clear:
+        proxy = ""
+    elif not proxy:
+        proxy = previous.get("download_proxy", "")
+    if proxy:
+        try:
+            parsed = urlsplit(proxy)
+        except ValueError as exc:
+            raise NativeImageError("invalid_configuration") from exc
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password \
+        or parsed.fragment:
+            raise NativeImageError("invalid_configuration")
+    return {"download_proxy": proxy.rstrip("/"), "use_environment_proxy": use_environment_proxy}
+
+
+def _legacy_options(value, previous):
+    if value is None:
+        value = previous or {}
+    if not isinstance(value, dict) or len(json.dumps(value, ensure_ascii=False)) > 20000:
+        raise NativeImageError("invalid_configuration")
+    try:
+        encoded = json.loads(json.dumps(value, ensure_ascii=False))
+    except (TypeError, ValueError) as exc:
+        raise NativeImageError("invalid_configuration") from exc
+    return encoded
 
 
 def _connection(value, previous):
@@ -131,7 +192,10 @@ def _connection(value, previous):
     if not isinstance(raw, str):
         raise NativeImageError("invalid_configuration")
     if raw:
-        url = urlsplit(raw)
+        try:
+            url = urlsplit(raw)
+        except ValueError as exc:
+            raise NativeImageError("invalid_configuration") from exc
         if url.scheme not in {"http", "https"} or not url.hostname or url.username or url.password or url.fragment:
             raise NativeImageError("invalid_configuration")
     timeout = result.get("timeout_seconds", 300)
@@ -157,11 +221,16 @@ def save_configuration(plugin, revision, changes):
     if fingerprint(before) != revision:
         raise NativeImageError("configuration_conflict")
     if not isinstance(changes, dict) or changes.keys() - {
-            "enabled", "backend", "endpoints", "sd_webui", "comfyui", "operation_routes"}:
+            "enabled", "backend", "legacy_backend", "legacy_options", "network", "endpoints", "sd_webui",
+            "comfyui", "operation_routes"}:
         raise NativeImageError("invalid_configuration")
     candidate = {**before, **copy.deepcopy(changes)}
-    if type(candidate.get("enabled")) is not bool or candidate.get("backend") not in BACKENDS:
+    if (type(candidate.get("enabled")) is not bool or candidate.get("backend") not in BACKENDS
+            or not isinstance(candidate.get("legacy_backend", ""), str)
+            or len(candidate.get("legacy_backend", "")) > 64):
         raise NativeImageError("invalid_configuration")
+    candidate["legacy_options"] = _legacy_options(candidate.get("legacy_options"), before.get("legacy_options", {}))
+    candidate["network"] = _network(candidate.get("network", {}), before.get("network", {}))
     for name in ("sd_webui", "comfyui"):
         candidate[name] = _connection(candidate.get(name, {}), before.get(name, {}))
     endpoints = candidate.get("endpoints")
@@ -172,21 +241,53 @@ def save_configuration(plugin, revision, changes):
     normalized = []
     for item in endpoints:
         if not isinstance(item, dict) or item.keys() - {"id", "name", "enabled", "platform", "model",
-                "width", "height", "base_url", "api_key", "api_key_set", "clear_api_key", "timeout_seconds"}:
+                "width", "height", "size_label", "quality", "max_reference_images", "base_url", "api_key", "api_key_set",
+                "clear_api_key", "clear_custom_headers", "timeout_seconds", "custom_headers", "custom_headers_set",
+                "custom_header_names", "ratio"}:
             raise NativeImageError("invalid_configuration")
         identifier = item.get("id")
         if not isinstance(identifier, str) or not identifier or len(identifier) > 128 or identifier in ids:
             raise NativeImageError("invalid_configuration")
         ids.add(identifier)
+        quality = item.get("quality", "standard")
+        max_reference_images = item.get("max_reference_images", 1)
         if (type(item.get("enabled")) is not bool or item.get("platform") not in PLATFORMS
                 or any(type(item.get(key)) is not str or len(item[key]) > 240 for key in ("name", "model"))
-                or any(type(item.get(key)) is not int or not 64 <= item[key] <= 8192 for key in ("width", "height"))):
+                or any(type(item.get(key)) is not int or not 64 <= item[key] <= 8192 for key in ("width", "height"))
+                or ("size_label" in item and (not isinstance(item.get("size_label"), str)
+                                               or len(item.get("size_label", "")) > 64))
+                or quality not in IMAGE_QUALITIES
+                or type(max_reference_images) is not int or not 0 <= max_reference_images <= 8):
+            raise NativeImageError("invalid_configuration")
+        clear_headers = item.get("clear_custom_headers", False)
+        if type(clear_headers) is not bool:
+            raise NativeImageError("invalid_configuration")
+        headers = {} if clear_headers else item.get("custom_headers", previous.get(identifier, {}).get("custom_headers", {}))
+        if headers in (None, ""):
+            headers = {}
+        if isinstance(headers, str):
+            try:
+                headers = json.loads(headers)
+            except ValueError as exc:
+                raise NativeImageError("invalid_configuration") from exc
+        if (type(headers) is not dict or len(headers) > 32
+                or any(not isinstance(key, str) or not key or len(key) > 80
+                       or not isinstance(value, str) or len(value) > 2000
+                       or "\r" in value or "\n" in value for key, value in headers.items())):
+            raise NativeImageError("invalid_configuration")
+        ratio = item.get("ratio", "")
+        if not isinstance(ratio, str) or len(ratio) > 20:
             raise NativeImageError("invalid_configuration")
         connection = _connection({key:value for key,value in item.items() if key in
             {"base_url", "api_key", "api_key_set", "clear_api_key", "timeout_seconds"}}, previous.get(identifier, {}))
-        normalized.append({**item, **connection})
+        normalized.append({**item, "size_label": item.get("size_label", f"{item.get('width')}x{item.get('height')}"),
+                           **connection, "custom_headers": headers, "ratio": ratio, "quality": quality,
+                           "max_reference_images": max_reference_images})
         normalized[-1].pop("api_key_set", None)
         normalized[-1].pop("clear_api_key", None)
+        normalized[-1].pop("clear_custom_headers", None)
+        normalized[-1].pop("custom_headers_set", None)
+        normalized[-1].pop("custom_header_names", None)
     candidate["endpoints"] = normalized
     if "operation_routes" not in changes:
         if "backend" in changes and changes["backend"] != before.get("backend"):
@@ -216,6 +317,8 @@ def save_configuration(plugin, revision, changes):
         raise NativeImageError("configuration_busy")
     from .output_routing import OutputRoutingBackend
     backend = OutputRoutingBackend(candidate, Path(plugin.data_dir) / "native_v2" / "transport")
+    if candidate["enabled"] and not backend.operations:
+        raise NativeImageError("native_endpoint_unconfigured")
     original = copy.deepcopy(plugin.config.get("native_v2", {}))
     saver = getattr(plugin.config, "save_config", None)
     if not callable(saver):

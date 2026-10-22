@@ -5,7 +5,7 @@
 正式小屋通过 AstrBot Page SDK 获取 `page/targets` 与 `integration/manifest`。目标/角色和业务入口来自已认证的 V2 宿主目录；生活、状态、关系、记忆、成长按选中入口读取和提交，原版本、权限与操作回执保持有效。
 
 Content、Image、Screen、Reality、Together、Game、Live 七项能力都是
-`astrbot_plugin_private_companion_v2` 包内的 native extension。它们由 V2
+`astrbot_plugin_private_companion` 包内的 native extension。它们由 V2
 自己的 native extension registry 装配、启停、授权和执行，不要求安装或加载
 七个同名伴侣插件，也不通过外部插件对象转发对话、设备或活动状态。
 

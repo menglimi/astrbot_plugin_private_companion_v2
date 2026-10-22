@@ -72,7 +72,7 @@ class IntegrationRegistry:
     @staticmethod
     def _bundled_extension(spec, application, native_extensions, terminated):
         item = {**spec, "kind": "native_extension", "owner": "companion_v2",
-                "host_plugin_id": "astrbot_plugin_private_companion_v2", "assembled": False,
+                "host_plugin_id": "astrbot_plugin_private_companion", "assembled": False,
                 "version": PRODUCT_VERSION, "status_connected": True, "enabled": False,
                 "runtime_ready": False, "integration_state": "unassembled",
                 "reason": "V2 本体拓展尚未装配", "pages": [], "update_available": False,
@@ -372,7 +372,7 @@ class UnifiedCompanionExtensionAPI:
     def room_furniture_catalog(self):
         manifest = self.manifest()
         items = [{**item["furniture"],
-                  "plugin_id": "astrbot_plugin_private_companion_v2",
+                  "plugin_id": "astrbot_plugin_private_companion",
                   "extension_id": item["extension_id"],
                   "integration_state": item["integration_state"],
                   "owner": "companion_v2"}

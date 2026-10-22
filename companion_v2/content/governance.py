@@ -6,6 +6,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+from companion_v2.storage.sqlite_path import readonly_uri
+
 from .models import ContentError, WorkOwner, canonical, identifier, integer
 
 
@@ -35,7 +37,7 @@ class ContentGovernance:
     def _connection(self):
         # Never acquire the writer's lock while the host may hold its own lock.
         # WAL gives this short independent reader a committed snapshot.
-        connection = sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
+        connection = sqlite3.connect(readonly_uri(self.path), uri=True, timeout=1)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA query_only=ON")
         return connection

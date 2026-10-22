@@ -23,8 +23,8 @@ test("表达规则因明确负反馈退回复审时显示原因和计数", async
   vm.runInContext(source,context);
   context.window.CompanionLearningReviewPage.mount(root,{sources:[{
     key:"role-a",label:"星缘 · 私聊",
-    replyApi:"/astrbot_plugin_private_companion_v2/targets/profile-a/roles/role-a/reply",
-    growthApi:"/astrbot_plugin_private_companion_v2/targets/profile-a/roles/role-a/growth",
+    replyApi:"/astrbot_plugin_private_companion/targets/profile-a/roles/role-a/reply",
+    growthApi:"/astrbot_plugin_private_companion/targets/profile-a/roles/role-a/growth",
   }]});
   for(let index=0;index<40&&!root.innerHTML.includes("退回复审");index++)await flush();
   assert.ok(root.innerHTML.includes("明确反馈 · 认可 1 / 不喜欢 2"));

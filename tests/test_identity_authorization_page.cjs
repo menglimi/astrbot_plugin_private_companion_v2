@@ -167,7 +167,7 @@ function harness({ persons, groups = [], group_networks = [], group_access, auth
   const window = {
     parent: {postMessage: (message, origin) => navigations.push({message, origin})},
     AstrBotPluginPage: {
-      ready: () => Promise.resolve({ pluginName: "astrbot_plugin_private_companion_v2" }),
+      ready: () => Promise.resolve({ pluginName: "astrbot_plugin_private_companion" }),
       apiGet: (route, params, requestOptions) => new Promise((resolve, reject) => {
         requests.push({ method: "GET", route, params, requestOptions, resolve, reject });
       }),
@@ -905,6 +905,72 @@ test("私聊回复配置读取失败时显示未确认状态并禁用保存", as
   const save = findControl(detail, "保存回复设置");
   assert.ok(save?.disabled, "配置未读取成功前不能提交窗口覆盖");
   assert.match(flat(findAll(detail, "member-savebar")[0]), /配置读取失败，未确认同步/);
+});
+
+test("其他成员配置分区读取失败不影响回复设置读写", async () => {
+  const reply = {edit_token: "reply-edit-1", fields: {style_prompt: {kind: "text", maximum_chars: 4000}},
+    settings: {style_prompt: "角色默认表达"}, inherited_settings: {style_prompt: "角色默认表达"}, provenance: {}};
+  const h = harness({persons: [person("subject-1", "阿澈")],
+    authorizations: {"subject-1": status("subject-1", [])},
+    memberSettings: {"subject-1": {sections: {reply},
+      section_errors: {growth: {code: "member_settings_section_failed"}}}},
+    post: request => ({sections: {reply: {...reply, edit_token: "reply-edit-2",
+      settings: {...reply.settings, ...request.body.sections.reply.changes}}}})});
+  const detail = await open(h, "阿澈", "回复微调");
+  const style = findInput(detail, "表达风格补充");
+  assert.ok(style);
+  assert.equal(style.disabled, false);
+  style.value = "仅对这个用户保持温柔";
+  style.handlers.input();
+  const save = findControl(h.element("person-detail"), "保存回复设置");
+  assert.equal(save.disabled, false);
+  save.handlers.click();
+  await h.send(request => request.method === "POST");
+  const written = h.requests.find(request => request.method === "POST");
+  assert.deepEqual(Object.keys(written.body.sections), ["reply"]);
+  assert.equal(written.body.sections.reply.changes.style_prompt, "仅对这个用户保持温柔");
+});
+
+test("失败分区显示错误码与重读入口", async () => {
+  const h = harness({persons: [person("subject-1", "阿澈")],
+    authorizations: {"subject-1": status("subject-1", [])},
+    memberSettings: {"subject-1": {sections: {},
+      section_errors: {profile: {code: "member_settings_section_failed"}}}}});
+  const detail = await open(h, "阿澈", "人工关系资料");
+  assert.match(flat(detail), /关系资料读取失败（member_settings_section_failed）/);
+  const reread = findControl(detail, "重新读取");
+  assert.ok(reread);
+  reread.handlers.click();
+  await h.settle();
+  assert.equal(h.requests.filter(request => request.method === "GET" && request.route === "acquaintance/settings").length, 2);
+});
+
+test("重读时分区失败会清除旧快照并保留草稿", async () => {
+  const reply = {edit_token: "reply-edit-1", fields: {style_prompt: {kind: "text", maximum_chars: 4000}},
+    settings: {style_prompt: "旧的已保存表达"}, inherited_settings: {style_prompt: "角色默认表达"}, provenance: {}};
+  const memberSettings = {"subject-1": {sections: {reply}}};
+  const h = harness({persons: [person("subject-1", "阿澈")],
+    authorizations: {"subject-1": status("subject-1", [])}, memberSettings});
+  const detail = await open(h, "阿澈", "回复微调");
+  const style = findInput(detail, "表达风格补充");
+  style.value = "仍要保留的未保存草稿";
+  style.handlers.input();
+  const refresh = detail.querySelectorAll(".member-icon-button")[0];
+  refresh.handlers.click();
+  memberSettings["subject-1"] = {sections: {}, section_errors: {reply: {code: "member_settings_section_failed"}}};
+  await h.send(request => request.method === "GET"
+    && (request.route === authorization || request.route === "acquaintance/settings"));
+  assert.equal(findInput(h.element("person-detail"), "表达风格补充"), null,
+    "失败分区不能继续展示旧已保存值");
+  assert.match(flat(h.element("person-detail")), /回复设置读取失败（member_settings_section_failed）/);
+  const savebar = findAll(h.element("person-detail"), "member-savebar")[0];
+  assert.match(flat(savebar), /1 项草稿待对应分区恢复读取/);
+  assert.equal(findControl(savebar, "保存回复设置").disabled, true);
+  findControl(h.element("person-detail"), "重新读取").handlers.click();
+  memberSettings["subject-1"] = {sections: {reply: {...reply, edit_token: "reply-edit-2"}}};
+  await h.send(request => request.method === "GET"
+    && (request.route === authorization || request.route === "acquaintance/settings"));
+  assert.equal(findInput(h.element("person-detail"), "表达风格补充").value, "仍要保留的未保存草稿");
 });
 
 test("保存桥接超时会自动重放同一幂等请求并确认结果", async () => {

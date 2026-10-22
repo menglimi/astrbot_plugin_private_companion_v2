@@ -7,7 +7,7 @@ const http = require("node:http");
 const {chromium} = require("playwright");
 
 async function run({pageRoot, output, bridgePath}) {
-  const HOST = "astrbot_plugin_private_companion_v2", calls = [], errors = [], checks = [];
+  const HOST = "astrbot_plugin_private_companion", calls = [], errors = [], checks = [];
   await fs.mkdir(output, {recursive: true});
   const sdk = await fs.readFile(bridgePath, "utf8");
   const api = name => `/${HOST}/host/targets/qa/roles/qa/${name}`;

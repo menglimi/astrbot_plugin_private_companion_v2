@@ -48,6 +48,50 @@ def _air_burst_until(rounds, at, window_seconds, threshold, cooldown_seconds):
     return until if until is not None and at < until else None
 
 
+def _native_same_speaker_streak(recent, speaker_id, at, rounds, window_seconds=20):
+    if not speaker_id:
+        return 0
+    latest_reply = max(rounds) if rounds else None
+    count = 0
+    for item in reversed(recent):
+        if item.get("type") != "group_member_message":
+            continue
+        raw = item.get("received_at")
+        try:
+            when = datetime.fromisoformat(raw) if isinstance(raw, str) else None
+        except ValueError:
+            when = None
+        if when is None or when > at:
+            continue
+        if (at - when).total_seconds() > window_seconds:
+            break
+        if latest_reply is not None and when <= latest_reply:
+            break
+        if str(item.get("speaker_id") or "") != str(speaker_id):
+            break
+        count += 1
+    return count
+
+
+def _recent_member_pressure(recent, at, window_seconds=20):
+    count, speakers = 0, set()
+    for item in recent:
+        if item.get("type") != "group_member_message":
+            continue
+        raw = item.get("received_at")
+        try:
+            when = datetime.fromisoformat(raw) if isinstance(raw, str) else None
+        except ValueError:
+            when = None
+        if when is None or when > at or (at - when).total_seconds() > window_seconds:
+            continue
+        count += 1
+        speaker = str(item.get("speaker_id") or "")
+        if speaker:
+            speakers.add(speaker)
+    return count, len(speakers)
+
+
 def group_hints(request, context, settings, recent, reply_batches, *, native=False):
     # Use the original input time on every tool continuation and recovery.
     at = request.event.received_at
@@ -132,8 +176,12 @@ def group_hints(request, context, settings, recent, reply_batches, *, native=Fal
         + json.dumps(wakeup["group_wakeup_interest_keywords"], ensure_ascii=False) + "。")
     if wakeup["group_wakeup_bot_name_enabled"] and not name:
         instruction += "原人格若已明确给出自己的名字，也可用作称呼线索；不要从成员自称或历史文字另造名字。"
+    if primary:
+        instruction += ("本轮发言账号属于管理员配置的主要成员；在遵守群聊降噪与隐私边界的前提下，"
+            "回应时可自然流露一点熟稔与默契（如更松弛地接梗、护短或心照不宣的语气），"
+            "但不外溢私聊独占称呼、私密记忆或后台任务，也不赋予额外权限。")
     if primary and wakeup["group_wakeup_owner_direct_words"]:
-        instruction += ("本轮发言账号属于管理员配置的主要成员；其专属称呼 "
+        instruction += ("其专属称呼 "
             + json.dumps(wakeup["group_wakeup_owner_direct_words"], ensure_ascii=False)
             + " 可作为直接叫你的线索，但仍须看是否正在对你说话；这不赋予其他授权或私聊资料访问权。")
     chance = round(wakeup["group_wakeup_interest_probability"] * 100)
@@ -146,10 +194,25 @@ def group_hints(request, context, settings, recent, reply_batches, *, native=Fal
         f"{wakeup['group_wakeup_topic_interest_max_boost']}%；设为 0 时不额外提高。"
         "热闹群聊或他人正在连续对话时更克制，是否接话仍取决于原人格和当下语境。")
     merged = sum(material.purpose.startswith("merged_input:") for material in request.context.materials)
+    speaker_id = getattr(getattr(getattr(context, "actor", None), "principal", None), "native_account_id", "")
+    native_streak = _native_same_speaker_streak(recent, speaker_id, at, rounds) if native and not merged else 0
     if merged:
         instruction += (f"本轮已合并当前成员 {merged + 1} 条输入，说明对方正在连续补话；"
             f"兴趣插话倾向相对降低 {wakeup['group_wakeup_debounce_pending_penalty']}%，"
             "先理解合并后的完整意思，再决定是否回应；补充内容不是多次唤醒，明确呼唤和实质问题不受该参考限制。")
+    elif native_streak:
+        instruction += (f"连发防抖参考：当前成员在近 20 秒内已连续发出 {native_streak + 1} 条尚未被新回复隔开的消息；"
+            f"兴趣插话倾向相对降低 {wakeup['group_wakeup_debounce_pending_penalty']}%。"
+            "若当前句明显只是前半句铺垫、单发称呼或话音未落（如无句末终结标点且语意悬空），"
+            "优先调用 group.participation.choose 选择 skip 暂作等待；"
+            "若连同前几条已构成完整表达，请将这几条连续发言合并为一个整体一次性回应，避免逐条拆开作答。")
+    burst_msgs, burst_speakers = _recent_member_pressure(recent, at)
+    if burst_msgs >= 3 or burst_speakers >= 2:
+        instruction += (f"群聊高压分流参考：近 20 秒内群里密集出现 {burst_msgs + 1} 条消息（涉及至少 {max(1, burst_speakers)} 位成员），"
+            "当前处于高频刷屏或多人并发唤醒环境。请按拟人化群聊策略主动分流降频："
+            "（1）哪些要回：优先回应明确 @、直接点名或指向你的实质问题；"
+            "（2）哪些不回：对泛泛感叹、多人互相接话、边缘起哄或已有人解答的内容果断选择 skip；"
+            "（3）哪些一起回：若同一成员连发多条或多位成员围绕同一问题连续发问，在一次回复里合并抓重点简短作答，不要拆成多段长气泡刷屏。")
     if wakeup["group_wakeup_question_enabled"]:
         instruction += ("对没有点名的提问，默认旁听；只考虑尚无人回答且明确向群里求助的实质问题。先结合群里是否已有回答、问题是否适合原人格、"
             f"以及参与是否会打断他人来判断；求助强度参考 {wakeup['group_wakeup_question_threshold']}/100，"

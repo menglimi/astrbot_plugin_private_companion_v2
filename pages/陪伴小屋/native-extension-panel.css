@@ -43,9 +43,9 @@
   border-radius: 50%;
   background: var(--muted);
 }
-.native-extension-status.ready::before { background: var(--t-status-success, #348664); }
-.native-extension-status.pending::before { background: var(--t-status-warning, #ab7b35); }
-.native-extension-status.error::before { background: var(--t-status-error, #b14d54); }
+.native-extension-status.ready::before { background: var(--t-status-success); }
+.native-extension-status.pending::before { background: var(--t-status-warning); }
+.native-extension-status.error::before { background: var(--t-status-error); }
 .native-extension-lifecycle {
   display: flex;
   justify-content: space-between;
@@ -98,10 +98,10 @@
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
-.native-extension-nav button:hover { background: var(--t-surface-hover, var(--bg)); }
+.native-extension-nav button:hover { background: var(--t-surface-hover); }
 .native-extension-nav button[aria-pressed="true"] {
   color: var(--accent-dark);
-  background: var(--t-accent-soft, var(--bg));
+  background: var(--t-accent-soft);
   border-color: var(--line);
 }
 .native-extension-settings { min-width: 0; }
@@ -152,7 +152,7 @@
   height: 22px;
   border: 1px solid var(--line);
   border-radius: var(--r-pill);
-  background: var(--t-surface-hover, var(--bg));
+  background: var(--t-surface-hover);
   pointer-events: none;
 }
 .native-extension-switch-track::after {
@@ -165,7 +165,7 @@
   background: var(--muted);
 }
 .native-extension-switch input:checked + span { background: var(--accent); border-color: var(--accent); }
-.native-extension-switch input:checked + span::after { transform: translateX(12px); background: var(--t-on-accent, #fff); }
+.native-extension-switch input:checked + span::after { transform: translateX(12px); background: var(--t-on-accent); }
 .native-extension-switch input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 3px; }
 .native-extension-panel input:focus-visible, .native-extension-panel textarea:focus-visible,
 .native-extension-panel select:focus-visible, .native-extension-panel button:focus-visible {
@@ -200,7 +200,7 @@
   z-index: 1;
 }
 .native-extension-savebar p { margin: 0; color: var(--muted); font-size: var(--fs-micro); line-height: 1.7; }
-.native-extension-savebar p.is-error { color: var(--t-status-error, #b14d54); }
+.native-extension-savebar p.is-error { color: var(--t-status-error); }
 .native-extension-savebar > div { display: flex; gap: var(--sp-2); flex-shrink: 0; }
 .native-extension-empty { display: flex; flex-direction: column; align-items: flex-start; gap: var(--sp-3); padding: var(--sp-5) 0; line-height: 1.8; }
 .native-extension-empty p { margin: 0; color: var(--muted); }
@@ -249,7 +249,7 @@
 .native-management-reminders span { flex: 1; overflow-wrap: anywhere; }
 .native-management-bottom { display: flex; align-items: center; gap: var(--sp-3); margin-top: var(--sp-4); }
 .native-management-bottom > p { color: var(--secondary); font-size: var(--fs-micro); line-height: 1.8; margin: 0; }
-.native-management-bottom > p.is-error { color: var(--t-status-error, #b14d54); }
+.native-management-bottom > p.is-error { color: var(--t-status-error); }
 @media (max-width: 680px) {
   .detail-dialog.detail-dialog-native-extension { width: 100%; max-width: 100%; }
   .native-extension-workspace { grid-template-columns: 1fr; gap: var(--sp-4); }

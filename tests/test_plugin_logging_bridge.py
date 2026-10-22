@@ -20,7 +20,7 @@ class Capture(logging.Handler):
 
 class PluginLoggingBridgeTests(unittest.TestCase):
     def setUp(self):
-        self.entry = "data.plugins.astrbot_plugin_private_companion_v2.main"
+        self.entry = "data.plugins.astrbot_plugin_private_companion.main"
         # A previous real entry test may have installed a bridge in this process.
         # Establish the clean lifecycle state whose restoration is asserted here.
         retire_logging_bridge(self.entry)

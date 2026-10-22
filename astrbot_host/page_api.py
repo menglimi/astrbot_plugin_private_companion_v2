@@ -15,7 +15,7 @@ from .identity_derivation import role_display_name
 from .settings import HostControlError
 
 
-PREFIX = "/astrbot_plugin_private_companion_v2"
+PREFIX = "/astrbot_plugin_private_companion"
 
 
 class PageWebAPI:
@@ -165,6 +165,8 @@ class PageWebAPI:
                                  "role_name": role.get("role_name") or role_display_name(
                                      role["role_id"], role.get("persona_ids", [])),
                                  **({"group_memory_api": role["group_memory_api"]} if role.get("group_memory_api") else {}),
+                                 **({"legacy_group_data_api": role["legacy_group_data_api"]}
+                                    if role.get("legacy_group_data_api") else {}),
                                  **{name + "_api": role.get(name + "_api") for name in
                                     ("memory", "state", "life", "relationships", "growth", "reply", "model",
                                      "config", "perception_native", "reality_access", "screen_access", "game_access", "persona", "legacy",

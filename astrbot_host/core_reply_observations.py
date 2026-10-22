@@ -14,21 +14,6 @@ from companion_v2.conversation.native_observations import NativeConversationObse
 logger = logging.getLogger(__name__)
 INTERVENTION_DEBOUNCE_SECONDS = 6
 INTERVENTION_INPUT_WINDOW = timedelta(minutes=3)
-INTERVENTION_TOPIC_HINTS = (
-    "日程", "日历", "计划", "安排", "行程", "作息", "睡觉", "睡眠", "起床", "休息",
-    "早睡", "熬夜", "状态", "精力", "疲惫", "疲倦", "累", "忙",
-)
-INTERVENTION_TARGET_HINTS = ("你", "角色", "自己")
-INTERVENTION_ACTION_HINTS = (
-    "改", "调", "换", "挪", "推迟", "提前", "取消", "别", "不要", "不安排",
-    "应该", "建议", "可以", "把",
-)
-
-
-def may_be_intervention(text):
-    return (any(topic in text for topic in INTERVENTION_TOPIC_HINTS)
-            and (any(target in text for target in INTERVENTION_TARGET_HINTS)
-                 or any(action in text for action in INTERVENTION_ACTION_HINTS)))
 
 
 class CoreReplyObservations:
@@ -116,18 +101,19 @@ class CoreReplyObservations:
                         schedule(context, turn_id)
                     except Exception as error:
                         logger.warning("[CompanionV2] 核心聊天语义观察调度降级 error_type=%s", type(error).__name__)
-                if intervention_ticket is not None:
+                if (intervention_ticket is not None
+                        and self._intervention_latest.get(context.key) is intervention_ticket):
                     self._queue_intervention(context, intervention_ticket)
             pending.add_done_callback(observed)
         return pending
 
-    def _queue_intervention(self, context, ticket):
+    def _queue_intervention(self, context, ticket, *, delay=INTERVENTION_DEBOUNCE_SECONDS):
         if self._closed or context.scope.kind is not ScopeKind.PRIVATE:
             return None
 
         async def observe():
             try:
-                await asyncio.sleep(INTERVENTION_DEBOUNCE_SECONDS)
+                await asyncio.sleep(delay)
                 lock = self._intervention_locks.setdefault(context.key, asyncio.Lock())
                 async with lock:
                     if self._closed or self._intervention_latest.get(context.key) is not ticket:
@@ -146,26 +132,13 @@ class CoreReplyObservations:
         return task
 
     def _intervention_inputs(self, context, at):
-        from companion_v2.conversation.native_observations import (
-            inbound_event, input_rows_for_context, validate_observation,
-        )
+        from companion_v2.conversation.native_history import dialogue
 
-        rows = input_rows_for_context(self.session.runtime, context,
-            start=stamp(at - INTERVENTION_INPUT_WINDOW), end=stamp(at), limit=8)
-        messages = []
-        for row in reversed(rows):
-            try:
-                event = inbound_event(row)
-                validate_observation(self.session.runtime, row, context, event.source)
-                source = self.session.application.messages._read_source(
-                    event.source, context, event.capability, at)
-            except Exception:
-                continue
-            if source.payload.strip():
-                messages.append((row["event_id"], source.content_hash, source.payload.strip()))
-        selected = messages[-6:]
-        text = "\n".join(item[2][:1600] for item in selected)[-8000:]
-        return selected, text
+        messages = dialogue(self.session.application.messages, context, at,
+                            start=stamp(at - INTERVENTION_INPUT_WINDOW), end=stamp(at),
+                            limit=16, max_chars=8000)
+        text = "\n".join(f"{item['speaker']}: {item['text']}" for item in messages)
+        return messages, text
 
     def _intervention_material(self, context, capabilities, at):
         if CALENDAR_INTERVENTION not in capabilities:
@@ -225,18 +198,22 @@ class CoreReplyObservations:
             messages, user_text = await asyncio.to_thread(self._intervention_inputs, context, self.session.now())
         except Exception:
             return
-        if not messages or not user_text or not may_be_intervention(user_text):
+        if not messages or not user_text:
             return
         if self._closed or self._intervention_latest.get(context.key) is not ticket:
             return
         input_epoch = app.state_maintenance._input_epochs.get(context.key, 0)
-        request_id = "role-intervention-" + digest([(item[0], item[1]) for item in messages])
+        request_id = "role-intervention-" + digest(
+            [(item["observation_id"], item["content_hash"]) for item in messages])
         intervention_material = await asyncio.to_thread(
             self._intervention_material, context, capabilities, self.session.now())
         if (self._closed or self._intervention_latest.get(context.key) is not ticket
                 or app.state_maintenance._input_epochs.get(context.key, 0) != input_epoch):
             return
-        facts = {"scope_kind": "private", "user_text": user_text, "allowed_domains": sorted(domains),
+        facts = {"scope_kind": "private", "user_text": user_text,
+            "conversation": messages, "assistant_reply_returned": any(
+                item["speaker"] == "assistant" for item in messages),
+            "allowed_domains": sorted(domains),
             "resting": resting, "rest_wake_allowed": REST_WAKE_INTERVENTION in capabilities,
             "intervention_material": intervention_material}
         resolver = getattr(app, "laya_decision_resolver", None)
@@ -314,8 +291,16 @@ class CoreReplyObservations:
 
         pending = self._schedule(record, context_key=context.key, before=prepared.get("native_source_future"))
         if pending is not None:
-            pending.add_done_callback(lambda done: self.session.application.notify()
-                if not done.cancelled() and done.exception() is None else None)
+            def observed(done):
+                if done.cancelled() or done.exception() is not None:
+                    return
+                self.session.application.notify()
+                if state == "send_returned" and context.scope.kind is ScopeKind.PRIVATE:
+                    if self._intervention_latest.get(context.key) is not None:
+                        ticket = object()
+                        self._intervention_latest[context.key] = ticket
+                        self._queue_intervention(context, ticket, delay=0.2)
+            pending.add_done_callback(observed)
         return pending
 
     def phase(self, prepared, state):

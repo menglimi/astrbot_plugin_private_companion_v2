@@ -33,7 +33,7 @@
  * 两者都要看（见 [[project_companion_v2_page_error_codes]]）。
  */
 window.CompanionBackupPage = (() => {
-  const HOST = "astrbot_plugin_private_companion_v2";
+  const HOST = "astrbot_plugin_private_companion";
   const PREFIX = "/" + HOST + "/";
   const ROUTE = "backup";
 

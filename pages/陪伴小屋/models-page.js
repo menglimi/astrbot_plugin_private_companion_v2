@@ -1,7 +1,7 @@
 /* Model configuration: task routing, voice, image generation and optional Laya decisions. */
 "use strict";
 window.CompanionModelsPage = (() => {
-  const PREFIX = "/astrbot_plugin_private_companion_v2/";
+  const PREFIX = "/astrbot_plugin_private_companion/";
   const routing = ["provider", "fallback", "max_output_tokens"];
   const fields = ["provider", "fallback", "prompt", "max_output_tokens", "timeout_seconds", "replacement_rules", "fallback_on_refusal", "refusal_terms", "replacement_scope"];
   const fieldLabel = { provider: "主模型提供方", fallback: "备用模型提供方", prompt: "附加提示词",
@@ -81,10 +81,21 @@ window.CompanionModelsPage = (() => {
   const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const failure = (code, confirmed = false, details = {}) => Object.assign(new Error(code), { code, confirmed, ...details });
   const states = new Map();
+  const EXPAND_KEY = "companion-model-expanded.v1";
+  function expandStorageKey(scopeKey) { return EXPAND_KEY + ":" + scopeKey; }
+  function restoreExpanded(scopeKey) {
+    try { const raw = localStorage.getItem(expandStorageKey(scopeKey)); const parsed = raw ? JSON.parse(raw) : null;
+      return parsed && typeof parsed === "object" ? parsed : {}; } catch { return {}; }
+  }
+  function rememberExpanded(state, key) {
+    try { const scopeKey = state.__scopeKey; if (!scopeKey) return;
+      localStorage.setItem(expandStorageKey(scopeKey), JSON.stringify(state.expOpen || {})); } catch { }
+  }
   let root = null, path = null, key = null, state = null, version = 0;
   const current = (ticket, s) => ticket === version && state === s && root?.isConnected;
   const taskOf = (s, kind) => s.status?.tasks.find(task => task.kind === kind) || null;
   const configSource = source => ({ default: "插件默认", host_conversation: "AstrBot 会话", installation: "安装级", role: "角色级", window: "当前对象" }[source] || "上级配置");
+  const windowLabel = s => s.status?.scope_kind === "group" ? "当前群聊微调" : "当前私聊微调";
   const adoption = state => ({ applied: "已采用", next_task: "下次任务", consumer_not_started: "尚未运行", failed: "采用失败", pending: "等待采用", restart_required: "需重启" }[state] || state);
   const taskName = kind => names.get(kind) || { group: "其他任务", label: "其他模型任务", description: "V2 注册任务" };
   const taskGroups = s => {
@@ -241,7 +252,7 @@ window.CompanionModelsPage = (() => {
   function toolbar(s) { const count = selected(s).length;
     return `<div class="model-toolbar"><label class="model-search"><span>搜索任务</span>
         <input type="search" data-model-search value="${esc(s.query)}" placeholder="名称、用途或任务键"></label>
-      <div class="model-switches" role="group" aria-label="配置作用域">${[["role", "角色默认"], ["window", "当前私聊微调"]].map(([layer, label]) => `<button type="button" data-model-layer="${layer}" aria-pressed="${s.layer === layer}" class="${s.layer === layer ? "active" : ""}" ${s.busy || s.loading ? "disabled" : ""}>${label}</button>`).join("")}</div>
+      <div class="model-switches" role="group" aria-label="配置作用域">${[["role", "角色默认"], ["window", windowLabel(s)]].map(([layer, label]) => `<button type="button" data-model-layer="${layer}" aria-pressed="${s.layer === layer}" class="${s.layer === layer ? "active" : ""}" ${s.busy || s.loading ? "disabled" : ""}>${label}</button>`).join("")}</div>
       <label class="model-provider-filter"><span>模型提供方</span><select data-model-provider-filter aria-label="按模型提供方筛选">
         <option value="" ${s.providerFilter ? "" : "selected"}>全部提供方</option>${(s.status?.providers || []).map(provider => `<option value="${esc(provider.id)}" ${s.providerFilter === provider.id ? "selected" : ""}>${esc(providerLabel(provider))}</option>`).join("")}</select></label>
       <div class="model-switches" role="group" aria-label="视图">${[["tasks", "按任务"], ["providers", "按提供方"]].map(([id, label]) => `<button type="button" data-model-view="${id}" aria-pressed="${s.view === id}" class="${s.view === id ? "active" : ""}">${label}</button>`).join("")}</div>
@@ -274,7 +285,7 @@ window.CompanionModelsPage = (() => {
       ${selected && !providers.some(p => p.id === selected) ? `<option value="${esc(selected)}" selected>${esc(selected)} · 当前不可用</option>` : ""}`; }
   function sourceCell(s, task, draft) { const field = task.fields.provider;
     if (draft.inherited.provider) return `<span class="model-source inherit">跟随 ${esc(configSource(field.inherited_source || "default"))}</span>`;
-    if (field.explicit) return `<span class="model-source own">${draft.layer === "role" ? "角色单独设置" : "当前私聊单独设置"}</span>`;
+    if (field.explicit) return `<span class="model-source own">${draft.layer === "role" ? "角色单独设置" : windowLabel(s) + "单独设置"}</span>`;
     return `<span class="model-source pending">待保存</span>`; }
   /* Design: precise config uses one card per task (sc.fn), not a table. */
   function coreReplyCard(s, task) {
@@ -307,7 +318,7 @@ window.CompanionModelsPage = (() => {
     const testing = main && s.testing.has(main), result = main ? s.providerTests[main] : null;
     return `<article class="model-fncard${open ? " open" : ""}${waiting ? " dirty" : ""}${picked ? " picked" : ""}" data-fncard="${esc(task.kind)}">
       <div class="model-sc-tp">
-        <div class="model-eb">${draft.layer === "role" ? "角色默认" : "当前私聊微调"} · ${esc(info.group)}<span class="st">${own ? '<span class="model-tag a">单独设置</span>' : '<span class="model-tag n">跟随上级</span>'}</span></div>
+        <div class="model-eb">${draft.layer === "role" ? "角色默认" : windowLabel(s)} · ${esc(info.group)}<span class="st">${own ? '<span class="model-tag a">单独设置</span>' : '<span class="model-tag n">跟随上级</span>'}</span></div>
         <div class="model-ti">${icon(groupIcon(info.group))}<b>${esc(info.label)}</b>
           <label class="model-pick"><input type="checkbox" data-model-pick="${esc(task.kind)}" ${picked ? "checked" : ""} aria-label="选择 ${esc(info.label)}"></label>
           <span class="model-tag ${task.lane === "foreground" ? "g" : "n"}">${task.lane === "foreground" ? "前台" : "后台"}</span></div>
@@ -473,7 +484,7 @@ window.CompanionModelsPage = (() => {
     const goto = event.target.closest("[data-drawer-goto]");
     if (goto) { s.drawer = null; s.sub = "cfg"; s.cm = "precise"; s.view = "tasks"; s.providerFilter = goto.dataset.drawerGoto; render(); return; }
     const exp = event.target.closest("[data-model-exp]");
-    if (exp) { const key = exp.dataset.modelExp; s.expOpen[key] = !s.expOpen[key]; render(); return; }
+    if (exp) { const key = exp.dataset.modelExp; s.expOpen[key] = !s.expOpen[key]; rememberExpanded(s, key); render(); return; }
     const gpick = event.target.closest("[data-model-gpick]");
     if (gpick) { const key = gpick.dataset.modelGpick;
       const kinds = key.startsWith("lane:") ? snapshot(s).filter(t => t.lane === key.slice(5)).map(t => t.kind)
@@ -956,7 +967,7 @@ window.CompanionModelsPage = (() => {
   function layaPane(s) { const l = s.laya; if (!l.data) return `<div class="model-card"><p class="model-empty">${esc(l.notice || "正在读取 Laya 配置…")}</p></div>`;
     const dirty = layaDirty(l), installed = l.data.package_installed, mode = l.draft?.mode || l.data.mode;
     return `<div class="model-subpane model-laya-pane">
-      <div class="model-card"><div class="model-phead"><div class="model-grow"><span class="model-eb">可选能力 · 语义决策</span><h3>Laya 决策模型</h3><p class="model-note">在回复前判断是否接话、等待、沉默及表达形式。配置全局生效；仅群聊候选进入 Laya 判断，私聊始终走 AstrBot 核心回复。模型不输出时间、段数等数值；执行遵循宿主配置和权限。</p></div><button type="button" class="button small" data-laya-refresh ${l.loading || l.busy ? "disabled" : ""}>刷新</button></div>
+      <div class="model-card"><div class="model-phead"><div class="model-grow"><span class="model-eb">可选能力 · 语义决策</span><h3>Laya 决策模型</h3><p class="model-note">在回复前判断是否接话、等待、沉默及表达形式。配置全局生效；仅群聊候选进入 Laya 判断，私聊始终走 AstrBot 核心回复，另由回复页的私聊收尾判断在纯道别时安静。模型不输出时间、段数等数值；执行遵循宿主配置和权限。</p></div><button type="button" class="button small" data-laya-refresh ${l.loading || l.busy ? "disabled" : ""}>刷新</button></div>
         <div class="model-kpis">${kpi(!l.data.enabled ? "未启用" : mode === "local" && l.data.local_runtime_state === "warming" ? "正在预热" : "已启用", "运行状态", l.data.enabled ? "g" : "a")}${kpi(mode === "remote" ? "远程模式" : installed ? `已安装 ${l.data.package_version || ""}` : "待安装", "Python 包")}${kpi(mode === "remote" ? "远程管理" : l.data.model_cache_ready ? "已缓存" : "首次调用下载", "模型权重")}${kpi(mode === "local" ? "本地 Python" : "远程 HTTP", "接入方式")}</div>
         <div class="model-laya-fields">${layaField(l, "enabled", "启用 Laya", "关闭时调用会跳过", "bool")}${layaSelect(l, "mode", "接入方式", "选择 AstrBot 本地 Python 或官方服务接口", [["local", "本地 Python 包"], ["remote", "远程 HTTP 服务"]])}${mode === "remote" ? layaField(l, "endpoint", "SystemOne 服务地址", "可填服务根地址、/v1 或完整 /v1/systemone") : ""}${mode === "remote" ? layaField(l, "api_key", "API Key", l.data.api_key_set ? "已配置；留空保留现有密钥" : "可选，按远程服务配置", "password") : ""}${layaField(l, "timeout_seconds", "调用超时（秒）", "用于本地推理或远程连接，不参与语义判断", "number")}</div>
         ${mode === "local" ? `<div class="model-laya-fields">${layaField(l, "local_model_path", "本地检查点目录", "可选择微调模型；留空使用官方多语言模型。所有会话共用此选择。")}</div>` : ""}
@@ -1021,9 +1032,29 @@ window.CompanionModelsPage = (() => {
     if (["auto", "sd_webui"].includes(selected)) routes.push("sd_webui");
     return {generate: [...routes], edit: [...routes]};
   };
+  const IMAGE_PLATFORMS = {auto: "自动识别", openai: "OpenAI 兼容", openrouter: "OpenRouter", agnes: "Agnes", sensenova: "商汤日日新", minimax: "MiniMax", bailian: "阿里云百炼", modelscope: "魔搭社区", doubao: "火山引擎 / 豆包", gemini: "Google Gemini"};
+  const IMAGE_PROTOCOL_SUPPORT = {auto: "根据地址识别协议", openai: "文生图 · 改图", openrouter: "文生图 · 改图", agnes: "文生图 · 改图", sensenova: "文生图 · 改图", minimax: "仅文生图", doubao: "文生图 · 改图", bailian: "已保留配置 · 需异步协议适配", modelscope: "已保留配置 · 需协议适配", gemini: "已保留配置 · 需协议适配"};
+  function imageEffectivePlatform(endpoint) {
+    if (endpoint?.platform !== "auto") return endpoint?.platform;
+    const url = String(endpoint?.base_url || "").toLowerCase(), model = String(endpoint?.model || "").toLowerCase();
+    if (url.includes("minimax") || ["image-01", "image-01-live"].includes(model)) return "minimax";
+    if (url.includes("openrouter.ai")) return "openrouter";
+    if (url.includes("agnes-ai.com") || model.startsWith("agnes-image-")) return "agnes";
+    if (url.includes("sensenova.cn") || model.startsWith("senova-")) return "sensenova";
+    if (url.includes("volces.com") || url.includes("volcengine")) return "doubao";
+    if (url.includes("dashscope.aliyuncs.com")) return "bailian";
+    if (url.includes("modelscope.cn")) return "modelscope";
+    if (url.includes("generativelanguage.googleapis.com")) return "gemini";
+    return "openai";
+  }
   const imageNormalized = config => {
     const value = JSON.parse(JSON.stringify(config));
     value.endpoints = Array.isArray(value.endpoints) ? value.endpoints : [];
+    for (const endpoint of value.endpoints) {
+      endpoint.quality ??= "standard";
+      endpoint.max_reference_images ??= 1;
+      endpoint.size_label ??= `${endpoint.width || 1024}x${endpoint.height || 1024}`;
+    }
     value.comfyui = value.comfyui && typeof value.comfyui === "object" ? value.comfyui : {};
     value.sd_webui = value.sd_webui && typeof value.sd_webui === "object" ? value.sd_webui : {};
     if (!value.operation_routes || typeof value.operation_routes !== "object") value.operation_routes = imageDefaultRoutes(value);
@@ -1040,7 +1071,8 @@ window.CompanionModelsPage = (() => {
     const workflows = config.comfyui?.workflows || {};
     return {"sd.generate": stringify(opParams("generate")), "sd.edit": stringify(opParams("edit")),
       "comfy.generate": stringify(workflows.generate), "comfy.edit": stringify(workflows.edit),
-      "comfy.mask_edit": stringify(workflows.mask_edit)};
+      "comfy.mask_edit": stringify(workflows.mask_edit), "legacy.options": stringify(config.legacy_options),
+      ...Object.fromEntries((config.endpoints || []).map(item => [`headers.${item.id}`, ""]))};
   }
   function imageConfigSet(s, data) {
     const i = s.image, normalized = imageNormalized(data.settings);
@@ -1062,7 +1094,7 @@ window.CompanionModelsPage = (() => {
     } catch (err) { if (!current(ticket, s)) return; i.configBad = true; i.configNotice = fail(err, "无法读取生图模型配置。"); }
     finally { i.configLoading = false; if (current(ticket, s)) render(); }
   }
-  async function imageRefresh(s) { const i = s.image, ticket = version; if (i.loading) return; i.loading = true; i.notice = "正在读取内置生图能力…"; render();
+  async function imageRefresh(s) { const i = s.image, ticket = version; if (i.loading) return; void loadImageSchema(s); i.loading = true; i.notice = "正在读取内置生图能力…"; render();
     try { const data = await api("GET", path + "/image"); if (!current(ticket, s)) return;
       if (!Array.isArray(data.actions) || !data.enabled || Object.keys(IMAGE_LABELS).some(action => typeof data.enabled[action] !== "boolean")) throw failure("invalid_response");
       if (!imageDirty(i)) i.draft = {...data.enabled}; i.data = data; i.loaded = true; i.bad = false; i.notice = "已读取当前内置动作状态。"; }
@@ -1111,13 +1143,31 @@ window.CompanionModelsPage = (() => {
     const baseText = i.configTextBase || {};
     for (const operation of ["generate", "edit"]) {
       if (i.configText[`sd.${operation}`] !== baseText[`sd.${operation}`]) {
-        value.sd_webui.parameters ||= {}; value.sd_webui.parameters[operation] = parse(`sd.${operation}`);
+        const parsed = parse(`sd.${operation}`);
+        const edited = value.sd_webui.parameters?.[operation] || {};
+        const baseline = i.configBase.sd_webui?.parameters?.[operation] || {};
+        for (const name of Object.keys(imageSchema?.sd_webui?.fields || {})) {
+          if (JSON.stringify(edited[name]) !== JSON.stringify(baseline[name]) && Object.hasOwn(edited, name)) {
+            parsed[name] = edited[name];
+          }
+        }
+        value.sd_webui.parameters ||= {}; value.sd_webui.parameters[operation] = parsed;
       }
     }
     for (const key of ["generate", "edit", "mask_edit"]) {
       const name = `comfy.${key}`;
       if (i.configText[name] !== baseText[name]) {
         value.comfyui.workflows ||= {}; value.comfyui.workflows[key] = parse(name);
+      }
+    }
+    if (i.configText["legacy.options"] !== baseText["legacy.options"])
+      value.legacy_options = parse("legacy.options");
+    for (const endpoint of value.endpoints || []) {
+      const key = `headers.${endpoint.id}`;
+      if (i.configText[key] !== baseText[key] && i.configText[key]?.trim()) {
+        const parsed = parse(key);
+        endpoint.custom_headers = parsed;
+        endpoint.clear_custom_headers = false;
       }
     }
     return value;
@@ -1140,15 +1190,24 @@ window.CompanionModelsPage = (() => {
   function imageRouteAvailable(config, route, operation) {
     if (route.startsWith("online:")) {
       const endpoint = config.endpoints.find(item => item.id === route.slice(7));
-      const platform = endpoint?.platform === "auto" ? (/minimax/i.test(endpoint?.base_url || "") ? "minimax" : "openai") : endpoint?.platform;
-      return !endpoint ? "模型配置缺失" : !endpoint.enabled ? "已停用" : !endpoint.base_url || !endpoint.model ? "待补齐连接" :
-        operation === "edit" && platform === "minimax" ? "此协议仅支持文生图" : platform === "minimax" ? "文生图" : "文生图 · 改图";
+      if (!endpoint) return "模型配置缺失";
+      const platform = imageEffectivePlatform(endpoint);
+      if (["bailian", "modelscope", "gemini"].includes(platform)) return "协议未接入 · 当前不可调用";
+      if (operation === "edit" && platform === "minimax") return "仅支持文生图";
+      if (operation === "edit" && Number(endpoint.max_reference_images) < 1) return "未启用参考图改图";
+      if (!endpoint.base_url || !endpoint.model) return "待补齐连接";
+      if (!endpoint.enabled) return "模型已停用";
+      if (!config.enabled) return "生图后端已关闭";
+      return operation === "generate" ? "可用于文生图" : "可用于改图";
     }
-    if (route === "sd_webui") return config.sd_webui?.base_url ? "支持文生图 · 改图 · 蒙版局部改图" : "待配置地址";
+    if (route === "sd_webui") return !config.sd_webui?.base_url ? "待配置地址" :
+      config.enabled ? "可用于文生图 · 改图 · 蒙版局部改图" : "生图后端已关闭";
     if (route === "comfyui") {
       const flows = config.comfyui?.workflows || {};
-      const support = [flows.generate ? "文生图" : "", flows.edit ? "改图" : "", flows.mask_edit ? "蒙版局部改图" : ""].filter(Boolean);
-      return support.join(" · ") || "待配置工作流";
+      if (!config.comfyui?.base_url) return "待配置地址";
+      const support = operation === "generate" ? (flows.generate ? ["文生图"] : [])
+        : [flows.edit ? "改图" : "", flows.mask_edit ? "蒙版局部改图" : ""].filter(Boolean);
+      return !support.length ? "此功能未绑定工作流" : config.enabled ? "可用于" + support.join(" · ") : "生图后端已关闭";
     }
     return "";
   }
@@ -1156,8 +1215,23 @@ window.CompanionModelsPage = (() => {
     const disable = disabled ? " disabled" : "";
     return `<label class="model-img-field"><span>${label}</span><input type="${type}" data-img-config-field="${esc(field)}" value="${esc(value ?? "")}" ${attrs}${disable}>${help ? `<small>${help}</small>` : ""}</label>`;
   }
+  function imageEndpointConnectionFields(i, item, base, disabled) {
+    const option = value => `<option value="${value}"${item.platform === value ? " selected" : ""}>${IMAGE_PLATFORMS[value]}</option>`;
+    const options = `<optgroup label="已接入协议">${["auto", "openai", "openrouter", "agnes", "sensenova", "minimax", "doubao"].map(option).join("")}</optgroup><optgroup label="待适配 · 可保留原配置">${["bailian", "modelscope", "gemini"].map(option).join("")}</optgroup>`;
+    const headerKey = `headers.${item.id}`;
+    const headerCount = item.custom_header_names?.length || 0;
+    const headerPlaceholder = item.custom_headers_set ? `已保存 ${headerCount} 个请求头 · 留空保留` : "可选：填写服务商要求的自定义请求头";
+    const keyField = `${imageConfigField("API Key", `${base}.api_key`, "", "password",
+      `autocomplete="new-password" placeholder="${item.api_key_set ? "已保存 · 留空保留" : "按服务商要求填写"}"`,
+      item.api_key_set ? "输入新密钥会替换当前密钥。" : "不要求鉴权时可留空。", disabled)}${item.api_key_set ?
+      `<label class="model-img-field model-img-inline"><span>密钥</span><span><input type="checkbox" data-img-config-field="${base}.clear_api_key"${item.clear_api_key ? " checked" : ""}${disabled ? " disabled" : ""}>清除已保存密钥</span></label>` : ""}`;
+    const headersField = `<label class="model-img-field model-img-json"><span>自定义请求头（JSON）</span><textarea rows="3" spellcheck="false" data-img-config-json="${esc(headerKey)}" placeholder="${esc(headerPlaceholder)}"${disabled ? " disabled" : ""}>${esc(i.configText?.[headerKey] || "")}</textarea><small>${item.custom_headers_set ? `已保存：${esc((item.custom_header_names || []).join("、"))}。` : "可留空。"}填写新对象会替换现有自定义请求头。</small></label>${item.custom_headers_set ?
+      `<label class="model-img-field model-img-inline"><span>请求头</span><span><input type="checkbox" data-img-config-field="${base}.clear_custom_headers"${item.clear_custom_headers ? " checked" : ""}${disabled ? " disabled" : ""}>清除已保存请求头</span></label>` : ""}`;
+    return `<label class="model-img-field"><span>协议</span><select data-img-config-field="${base}.platform"${disabled ? " disabled" : ""}>${options}</select><small>${esc(IMAGE_PROTOCOL_SUPPORT[item.platform] || "请按服务商文档选择")}</small></label>${imageConfigField("API 根地址", `${base}.base_url`, item.base_url, "url", 'placeholder="https://api.example.com/v1"', "", disabled)}${imageConfigField("超时秒数", `${base}.timeout_seconds`, item.timeout_seconds, "number", 'min="1" max="1800" step="1"', "", disabled)}${keyField}${headersField}`;
+  }
   function imageRouteCard(i, ref, index, config) {
     const disabled = i.configSaving || i.configLoading || !!i.endpointTesting;
+    const expanded = i.expandedImageRoutes?.[ref] ?? index === 0;
     const controls = `<div class="model-img-route-tools"><button type="button" class="output-icon-button" data-img-route-move="up" data-img-route-index="${index}" aria-label="上移优先级"${disabled || index === 0 ? " disabled" : ""}><i data-lucide="arrow-up" aria-hidden="true"></i></button><button type="button" class="output-icon-button" data-img-route-move="down" data-img-route-index="${index}" aria-label="下移优先级"${disabled || index === (config.operation_routes[imageCurrentOperation(i)] || []).length - 1 ? " disabled" : ""}><i data-lucide="arrow-down" aria-hidden="true"></i></button><button type="button" class="output-icon-button" data-img-route-remove="${esc(ref)}" aria-label="从当前功能移除" title="从当前功能移除"${disabled ? " disabled" : ""}><i data-lucide="x" aria-hidden="true"></i></button></div>`;
     if (ref.startsWith("online:")) {
       const endpointId = ref.slice(7), endpointIndex = config.endpoints.findIndex(item => item.id === endpointId), item = config.endpoints[endpointIndex];
@@ -1169,19 +1243,30 @@ window.CompanionModelsPage = (() => {
         : test?.status === "unknown" ? `结果未知 · ${test.error || "请先核对服务商记录"}`
         : test?.status === "pending" ? "请求已提交，结果待确认"
         : test?.status === "error" ? `测试未完成 · ${test.error || "未知错误"}` : "";
-      const testDisabled = disabled || imageConfigDirty(i) || !item.enabled;
-      return `<article class="model-img-route"><header><span class="model-img-priority">${index + 1}</span><div class="model-img-route-title"><strong>${esc(item.name || item.model || "未命名图片模型")}</strong><small>${esc(item.model || "未设置模型 ID")} · ${esc(item.platform || "auto")}</small></div><span class="model-img-route-support">${esc(imageRouteAvailable(config, ref, imageCurrentOperation(i)))}</span>${controls}<button type="button" class="button small danger" data-img-endpoint-remove="${esc(item.id)}"${disabled ? " disabled" : ""}>删除模型</button></header>
+      const testDisabled = disabled || imageConfigDirty(i) || !config.enabled || !item.enabled ||
+        ["bailian", "modelscope", "gemini"].includes(imageEffectivePlatform(item));
+      const connectionFields = imageEndpointConnectionFields(i, item, base, disabled);
+      const modelFields = `${imageConfigField("模型 ID", `${base}.model`, item.model, "text", 'maxlength="240" placeholder="服务商提供的模型 ID"', "")}${imageConfigField("尺寸标签", `${base}.size_label`, item.size_label || `${item.width}x${item.height}`, "text", 'maxlength="64" placeholder="如 1024x1024、1K、auto"', "服务商接受标签时保留原值；宽高用于通用协议")}${imageConfigField("宽度", `${base}.width`, item.width, "number", 'min="64" max="8192" step="64"', "像素")}${imageConfigField("高度", `${base}.height`, item.height, "number", 'min="64" max="8192" step="64"', "像素")}${item.platform === "minimax" ? "" : `<label class="model-img-field"><span>图片质量</span><select data-img-config-field="${base}.quality"${disabled ? " disabled" : ""}>${[["auto", "自动"], ["low", "低"], ["medium", "中"], ["high", "高"], ["standard", "标准"], ["hd", "高清"]].map(([value, label]) => `<option value="${value}"${item.quality === value ? " selected" : ""}>${label}</option>`).join("")}</select></label>${imageConfigField("最多参考图", `${base}.max_reference_images`, item.max_reference_images, "number", 'min="0" max="8" step="1"', "设为 0 时此模型仅用于文生图")}`}${imageConfigField("端点名称", `${base}.name`, item.name, "text", 'maxlength="240"', "")}<label class="model-img-field model-img-inline"><span>启用模型</span><input type="checkbox" data-img-config-field="${base}.enabled"${item.enabled ? " checked" : ""}${disabled ? " disabled" : ""}></label>`;
+      return `<article class="model-img-route"><header><span class="model-img-priority">${index + 1}</span><div class="model-img-route-title"><strong>${esc(item.name || item.model || "未命名图片模型")}</strong><small>${esc(item.model || "未设置模型 ID")} · ${esc(IMAGE_PLATFORMS[item.platform] || item.platform || "自动识别")}</small></div><span class="model-img-route-support">${esc(imageRouteAvailable(config, ref, imageCurrentOperation(i)))}</span>${controls}</header>
+        <details class="model-img-route-details"${expanded ? " open" : ""}><summary data-img-route-expand="${esc(ref)}">连接与生图参数</summary>
         <div class="model-img-endpoint-test"><button type="button" class="button small" data-img-endpoint-test="${esc(item.id)}"${testDisabled ? " disabled" : ""}>${testing ? "生成中…" : "生成测试图"}</button><span role="status" data-state="${esc(test?.status || "")}">${esc(testLabel)}</span></div>
-        <div class="model-img-route-grid"><label class="model-img-field"><span>协议</span><select data-img-config-field="${base}.platform"${disabled ? " disabled" : ""}><option value="openai"${item.platform === "openai" ? " selected" : ""}>OpenAI 兼容</option><option value="minimax"${item.platform === "minimax" ? " selected" : ""}>MiniMax</option><option value="auto"${item.platform === "auto" ? " selected" : ""}>自动识别</option></select></label>${imageConfigField("模型 ID", `${base}.model`, item.model, "text", 'maxlength="240" placeholder="服务商提供的模型 ID"', "")}${imageConfigField("API 根地址", `${base}.base_url`, item.base_url, "url", 'placeholder="https://api.example.com/v1"', "")}${imageConfigField("宽度", `${base}.width`, item.width, "number", 'min="64" max="8192" step="64"', "像素")}${imageConfigField("高度", `${base}.height`, item.height, "number", 'min="64" max="8192" step="64"', "像素")}${imageConfigField("超时秒数", `${base}.timeout_seconds`, item.timeout_seconds, "number", 'min="1" max="1800" step="1"', "")}${imageConfigField("端点名称", `${base}.name`, item.name, "text", 'maxlength="240"', "")}${imageConfigField("API Key", `${base}.api_key`, "", "password", `autocomplete="new-password" placeholder="${item.api_key_set ? "已保存 · 留空保留" : "按服务商要求填写"}"`, item.api_key_set ? "输入新密钥会替换当前密钥。" : "不要求鉴权时可留空。", disabled)}<label class="model-img-field model-img-inline"><span>启用模型</span><input type="checkbox" data-img-config-field="${base}.enabled"${item.enabled ? " checked" : ""}${disabled ? " disabled" : ""}></label>${item.api_key_set ? `<label class="model-img-field model-img-inline"><span>密钥</span><span><input type="checkbox" data-img-config-field="${base}.clear_api_key"${item.clear_api_key ? " checked" : ""}${disabled ? " disabled" : ""}>清除已保存密钥</span></label>` : ""}</div></article>`;
+        <fieldset class="model-schema-group"><legend>连接</legend><div class="model-img-route-grid">${connectionFields}</div></fieldset>
+        <fieldset class="model-schema-group"><legend>生图参数</legend><div class="model-img-route-grid">${modelFields}</div></fieldset><div class="model-img-route-delete"><button type="button" class="button small danger" data-img-endpoint-remove="${esc(item.id)}"${disabled ? " disabled" : ""}>删除此模型</button></div></details></article>`;
     }
     const name = IMAGE_LOCAL_LABELS[ref], item = config[ref] || {}, workflows = item.workflows || {};
     const op = imageCurrentOperation(i), disable = disabled;
     const flowFields = ref === "comfyui" ? (op === "generate" ? ["generate"] : ["edit", "mask_edit"]).map(operation => {
       const title = operation === "mask_edit" ? "蒙版局部改图工作流" : operation === "edit" ? "普通改图工作流" : "文生图工作流";
       const key = `comfy.${operation}`;
-      return `<label class="model-img-field model-img-json"><span>${title}</span><textarea rows="6" spellcheck="false" data-img-config-json="${key}"${disable ? " disabled" : ""}>${esc(i.configText?.[key] || JSON.stringify(workflows[operation] || {}, null, 2))}</textarea></label>`;
-    }).join("") : `<label class="model-img-field model-img-json"><span>${op === "generate" ? "文生图参数" : "改图参数"}（JSON）</span><textarea rows="6" spellcheck="false" data-img-config-json="sd.${op}"${disable ? " disabled" : ""}>${esc(i.configText?.[`sd.${op}`] || "{}")}</textarea><small>只覆盖当前功能的参数；改图队列同时用于普通改图和蒙版局部改图。</small></label>`;
-    return `<article class="model-img-route"><header><span class="model-img-priority">${index + 1}</span><div class="model-img-route-title"><strong>${name}</strong><small>${esc(item.base_url || "尚未配置连接地址")}</small></div><span class="model-img-route-support">${esc(imageRouteAvailable(config, ref, op))}</span>${controls}</header><div class="model-img-route-grid">${imageConfigField("API 地址", `${ref}.base_url`, item.base_url, "url", 'placeholder="http://127.0.0.1:8188"', "")}${imageConfigField("超时秒数", `${ref}.timeout_seconds`, item.timeout_seconds || 300, "number", 'min="1" max="1800" step="1"', "")}${imageConfigField("API Key", `${ref}.api_key`, "", "password", `autocomplete="new-password" placeholder="${item.api_key_set ? "已保存 · 留空保留" : "可选"}"`, item.api_key_set ? "输入新密钥会替换当前密钥。" : "", disabled)}${item.api_key_set ? `<label class="model-img-field model-img-inline"><span>密钥</span><span><input type="checkbox" data-img-config-field="${ref}.clear_api_key"${item.clear_api_key ? " checked" : ""}${disabled ? " disabled" : ""}>清除已保存密钥</span></label>` : ""}${flowFields}</div></article>`;
+      const flow = workflows[operation], nodes = flow?.workflow && typeof flow.workflow === "object" ? Object.keys(flow.workflow).length : 0;
+      const summary = nodes ? `已绑定 · ${nodes} 个节点` : "未绑定";
+      return `<details class="model-img-workflow"><summary><span>${title}</span><small>${summary}</small></summary><label class="model-img-field model-img-json"><span>工作流图与输入映射（JSON）</span><textarea rows="8" spellcheck="false" data-img-config-json="${key}"${disable ? " disabled" : ""}>${esc(i.configText?.[key] || JSON.stringify(flow || {}, null, 2))}</textarea></label></details>`;
+    }).join("") : `<details class="model-img-field model-img-json model-img-advanced"><summary>高级 JSON 参数</summary><textarea rows="6" spellcheck="false" data-img-config-json="sd.${op}"${disable ? " disabled" : ""}>${esc(i.configText?.[`sd.${op}`] || "{}")}</textarea></details>`;
+    const connectionFields = `${imageConfigField("API 地址", `${ref}.base_url`, item.base_url, "url", 'placeholder="http://127.0.0.1:8188"', "")}${imageConfigField("超时秒数", `${ref}.timeout_seconds`, item.timeout_seconds || 300, "number", 'min="1" max="1800" step="1"', "")}${imageConfigField("API Key", `${ref}.api_key`, "", "password", `autocomplete="new-password" placeholder="${item.api_key_set ? "已保存 · 留空保留" : "可选"}"`, item.api_key_set ? "输入新密钥会替换当前密钥。" : "", disabled)}${item.api_key_set ? `<label class="model-img-field model-img-inline"><span>密钥</span><span><input type="checkbox" data-img-config-field="${ref}.clear_api_key"${item.clear_api_key ? " checked" : ""}${disabled ? " disabled" : ""}>清除已保存密钥</span></label>` : ""}`;
+    const workflowSection = ref === "comfyui"
+      ? `<fieldset class="model-schema-group"><legend>工作流</legend><div class="model-img-route-grid">${flowFields}</div></fieldset>`
+      : flowFields;
+    return `<article class="model-img-route"><header><span class="model-img-priority">${index + 1}</span><div class="model-img-route-title"><strong>${name}</strong><small>${esc(item.base_url || "尚未配置连接地址")}</small></div><span class="model-img-route-support">${esc(imageRouteAvailable(config, ref, op))}</span>${controls}</header><details class="model-img-route-details"${expanded ? " open" : ""}><summary data-img-route-expand="${esc(ref)}">连接与工作流</summary><fieldset class="model-schema-group"><legend>连接</legend><div class="model-img-route-grid">${connectionFields}</div></fieldset>${workflowSection}</details></article>`;
   }
   function imageConfigEditor(s) {
     const i = s.image, config = i.configDraft;
@@ -1191,13 +1276,27 @@ window.CompanionModelsPage = (() => {
     const choices = [...config.endpoints.filter(item => !current.has(`online:${item.id}`)).map(item => [`online:${item.id}`, `${item.name || item.model || "图片模型"} · ${item.model || item.id}`]),
       ...Object.entries(IMAGE_LOCAL_LABELS).filter(([key]) => !current.has(key)).map(([key, label]) => [key, label])];
     const dirty = imageConfigDirty(i), locked = i.configSaving || i.configLoading || !!i.endpointTesting;
+    const legacyOptions = config.legacy_options || {}, selectedWorkflows = legacyOptions.image_companion_selected_workflows || {};
+    const extraWorkflows = legacyOptions.image_companion_extra_workflows || [];
+    const workflowLabels = {generate: "文生图", edit: "改图", mask_edit: "蒙版局部改图"};
+    const legacyWorkflows = Object.entries(selectedWorkflows).map(([key, name]) =>
+      `<span><b>${workflowLabels[key] || esc(key)}</b>${esc(name)}</span>`).join("");
+    const legacySummary = legacyWorkflows || extraWorkflows.length
+      ? `<div class="model-img-legacy-list">${legacyWorkflows}${extraWorkflows.length ? `<span><b>其他工作流</b>${esc(extraWorkflows.join("、"))}</span>` : ""}</div>` : "";
+    const legacyLabels = {sdgen: "SDGen", tool_call: "自定义工具", nai: "NovelAI", anima_master: "Anima Master"};
+    const legacyLabel = legacyLabels[config.legacy_backend];
+    const migrationBanner = legacyLabel && !config.enabled && !routes.length
+      ? `<div class="model-img-migration" role="status"><strong>旧版 ${legacyLabel} 方式待接入</strong><span>旧配置已保留。请在下方添加可用模型并补齐连接，再启用生图后端。</span></div>`
+      : "";
     return `<section class="model-img-route-editor" aria-label="生图模型与优先级">
+      ${migrationBanner}
       <header class="model-imgconfig-head"><div><span class="model-eb">${operation === "generate" ? "文本提示生成图片" : "参考图片编辑"}</span><h3>${IMAGE_VIEWS[i.view || "generate"].label}模型与优先级</h3><p>${operation === "generate" ? "按列表顺序选择文生图模型；首个成功执行的模型结束本次尝试。" : "普通改图与蒙版局部改图共用模型队列；不支持当前操作的模型会跳过。"}</p></div><label class="model-img-enable"><input type="checkbox" data-img-config-field="enabled"${config.enabled ? " checked" : ""}${locked ? " disabled" : ""}>启用 V2 生图后端</label></header>
       <div class="model-img-main"><div class="model-img-sectionhead"><div><b>当前功能的模型顺序</b><span>数字越小越先尝试 · 使用上下移按钮调整优先级</span></div><span class="model-tag">${routes.length} 个模型</span></div>
         <div class="model-img-routes">${routes.map((route, index) => imageRouteCard(i, route, index, config)).join("") || '<div class="model-img-empty">此功能尚未配置模型。添加在线图片模型或本地后端后，调用会按此列表顺序尝试。</div>'}</div>
         <div class="model-img-addbar"><label><span>添加已配置模型</span><select data-img-route-choice aria-label="选择要加入当前功能的模型"${locked || !choices.length ? " disabled" : ""}><option value="">选择模型或后端</option>${choices.map(([value, label]) => `<option value="${esc(value)}">${esc(label)}</option>`).join("")}</select></label><button type="button" class="button small" data-img-route-add${locked || !choices.length ? " disabled" : ""}>添加</button><button type="button" class="button small primary" data-img-model-add${locked || config.endpoints.length >= (i.config.limits?.max_endpoints || 24) ? " disabled" : ""}>新增在线模型</button></div>
+        <details class="model-img-advanced"><summary>旧版工作流与网络选项</summary>${legacySummary}<div class="model-img-route-grid"><label class="model-img-field"><span>图片下载代理</span><input type="url" data-img-config-field="network.download_proxy" value="" placeholder="${config.network?.download_proxy_set ? "已保存 · 留空保留" : "可选，例如 http://127.0.0.1:7890"}"${locked ? " disabled" : ""}><small>留空保留已保存代理</small></label><label class="model-img-field model-img-inline"><span>继承环境代理</span><input type="checkbox" data-img-config-field="network.use_environment_proxy"${config.network?.use_environment_proxy ? " checked" : ""}${locked ? " disabled" : ""}></label>${config.network?.download_proxy_set ? `<label class="model-img-field model-img-inline"><span>代理</span><span><input type="checkbox" data-img-config-field="network.clear_download_proxy"${config.network?.clear_download_proxy ? " checked" : ""}${locked ? " disabled" : ""}>清除已保存代理</span></label>` : ""}</div>${config.legacy_backend ? `<p class="model-note">旧版生图方式：${esc(config.legacy_backend)}</p>` : ""}${Object.keys(legacyOptions).length ? `<details class="model-img-workflow model-img-legacy-raw"><summary><span>查看旧版兼容参数</span></summary><pre>${esc(JSON.stringify(legacyOptions, null, 2))}</pre></details>` : ""}</details>
         <div class="model-img-savebar"><span role="status" class="${i.configBad ? "is-error" : ""}">${esc(i.configNotice || (dirty ? "有未保存的改动" : "已保存"))}</span><div><button type="button" class="button small" data-img-config-refresh${locked || dirty ? " disabled" : ""}>重新读取</button><button type="button" class="button small primary" data-img-config-save${locked || !dirty ? " disabled" : ""}>${i.configSaving ? "保存中…" : "保存模型配置"}</button></div></div>
-        <p class="model-note">普通改图与蒙版局部改图共用此模型顺序；不支持当前操作的模型会跳过。密钥留空保留原值。测试会发送真实文生图请求，可能产生费用；结果只显示状态，不会发到聊天。</p></div></section>`;
+        <p class="model-note">普通改图与蒙版局部改图共用此模型顺序；不支持当前操作的模型会跳过。密钥留空保留原值。测试会发送真实文生图请求，可能产生费用；结果只显示状态，不会发到聊天。</p>${imageSchemaBlock(i, i.configDraft)}</div></section>`;
   }
   function imageActionRow(i, action, index) {
     const item = i.data.actions.find(value => value.action === action);
@@ -1233,13 +1332,17 @@ window.CompanionModelsPage = (() => {
       for (const key of keys.slice(0, -1)) { target[key] ??= {}; target = target[key]; }
       const key = keys.at(-1), value = t.type === "checkbox" ? t.checked : t.type === "number" ? (t.value === "" ? "" : Number(t.value)) : t.value;
       target[key] = value;
+      i.configBad = false; i.configNotice = "";
       if (key === "clear_api_key" && value) target.api_key = "";
       if (key === "api_key" && value) target.clear_api_key = false;
+      if (key === "clear_download_proxy" && value) target.download_proxy = "";
+      if (key === "download_proxy" && value) target.clear_download_proxy = false;
       if (event.type === "change") render(); else imageConfigSaveState(i);
       return;
     }
     if (t.matches("[data-img-config-json]") && i.configText && !i.configSaving) {
-      i.configText[t.dataset.imgConfigJson] = t.value; imageConfigSaveState(i);
+      i.configText[t.dataset.imgConfigJson] = t.value;
+      i.configBad = false; i.configNotice = ""; imageConfigSaveState(i);
     }
   }
   function imageConfigSaveState(i) {
@@ -1247,10 +1350,77 @@ window.CompanionModelsPage = (() => {
     root?.querySelectorAll("[data-img-config-save]").forEach(button => { button.disabled = i.configSaving || !dirty; });
     root?.querySelectorAll(".model-img-savebar [role=status]").forEach(node => { node.textContent = i.configNotice || (dirty ? "有未保存的改动" : "已保存"); });
   }
+  let imageSchema = null, imageSchemaState = "idle";
+  async function loadImageSchema(s) {
+    if (imageSchemaState !== "idle") return;
+    imageSchemaState = "loading";
+    try {
+      const data = await api("GET", path + "/image-schema");
+      imageSchema = data?.image_provider_group || null;
+    } catch { imageSchema = null; }
+    imageSchemaState = imageSchema ? "done" : "failed";
+    if (imageSchema && s) render();
+  }
+
+  /* 生图参数表单直接写入已有配置草稿；高级 JSON 用于声明外参数。 */
+  function imageSchemaKinds(i) {
+    const config = i?.configDraft;
+    if (!config) return [];
+    const operation = imageCurrentOperation(i);
+    const routes = config.operation_routes?.[operation] || [];
+    const kinds = [];
+    for (const ref of routes) {
+      if (IMAGE_LOCAL_LABELS[ref]) kinds.push(ref);
+      else if (ref.startsWith("online:")) kinds.push("openai_images");
+    }
+    return [...new Set(kinds)];
+  }
+  function imageSchemaBlock(i, config = null) {
+    if (!imageSchema?.sd_webui || !config?.sd_webui) return "";
+    const active = imageSchemaKinds(i);
+    const ordered = active.includes("sd_webui") ? ["sd_webui"] : [];
+    const rows = ordered.map(kind => {
+      const entry = imageSchema[kind];
+      const groups = new Map();
+      for (const [name, spec] of Object.entries(entry.fields || {})) {
+        if (spec.storage !== "parameters" || !["integer", "number", "text", "select"].includes(spec.kind)) continue;
+        const group = spec.group || "sampling";
+        if (!groups.has(group)) groups.set(group, []);
+        groups.get(group).push([name, spec]);
+      }
+      const groupLabels = {connection: "连接", workflow: "工作流", sampling: "采样参数"};
+      const operation = imageCurrentOperation(i);
+      const forms = [...groups].map(([group, fields]) => `<fieldset class="model-schema-group"><legend>${groupLabels[group] || esc(group)}</legend>
+        <div class="model-img-route-grid">${fields.map(([name, spec]) => {
+          const path = `sd_webui.parameters.${operation}.${name}`;
+          const current = config.sd_webui.parameters?.[operation]?.[name]
+            ?? config.sd_webui.parameters?.[name] ?? spec.default ?? "";
+          const attrs = `${spec.min !== undefined ? ` min="${spec.min}"` : ""}${spec.max !== undefined ? ` max="${spec.max}"` : ""}${spec.step !== undefined ? ` step="${spec.step}"` : spec.kind === "integer" ? ' step="1"' : ""}`;
+          if (spec.kind === "select") return `<label class="model-img-field"><span>${esc(spec.label || name)}</span><select data-img-config-field="${esc(path)}">${(spec.choices || []).map(choice => `<option value="${esc(choice)}"${current === choice ? " selected" : ""}>${esc(choice)}</option>`).join("")}</select><code>${esc(name)}</code></label>`;
+          const type = spec.kind === "integer" || spec.kind === "number" ? "number" : "text";
+          return imageConfigField(spec.label || name, path, current, type, attrs, `<code>${esc(name)}</code>`);
+        }).join("")}</div></fieldset>`).join("");
+      return forms ? `<section class="model-schema-provider"><h4>${esc(entry.label || kind)}</h4>${forms}</section>` : "";
+    }).join("");
+    return rows ? `<section class="model-schema" aria-label="生图参数">${rows}</section>` : "";
+  }
+
   function imageClick(s, event) {
     const i = s.image, t = event.target;
     const view = t.closest("[data-img-view]");
-    if (view && IMAGE_VIEWS[view.dataset.imgView]) { i.view = view.dataset.imgView; render(); return; }
+    if (view && IMAGE_VIEWS[view.dataset.imgView]) {
+      i.view = view.dataset.imgView;
+      render(); return;
+    }
+    const expand = t.closest("[data-img-route-expand]");
+    if (expand) {
+      event.preventDefault?.();
+      const ref = expand.dataset.imgRouteExpand;
+      const index = i.configDraft?.operation_routes?.[imageCurrentOperation(i)]?.indexOf(ref) ?? -1;
+      i.expandedImageRoutes ||= {};
+      i.expandedImageRoutes[ref] = !(i.expandedImageRoutes[ref] ?? (index === 0));
+      render(); return;
+    }
     if (t.closest("[data-img-refresh]")) { imageRefresh(s); return; }
     if (t.closest("[data-img-save]")) { imageSave(s); return; }
     if (t.closest("[data-img-config-refresh]")) { void imageConfigRefresh(s); return; }
@@ -1285,6 +1455,8 @@ window.CompanionModelsPage = (() => {
       const id = `image-${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
       i.configDraft.endpoints.push({id, name: imageCurrentOperation(i) === "generate" ? "文生图模型" : "改图模型", enabled: false,
         platform: "openai", model: "", width: 1024, height: 1024, base_url: "", api_key_set: false, timeout_seconds: 180});
+      i.expandedImageRoutes ||= {};
+      i.expandedImageRoutes["online:" + id] = true;
       i.configDraft.operation_routes[imageCurrentOperation(i)].push(`online:${id}`); render(); return;
     }
     const testBtn = t.closest("[data-img-test]"); if (testBtn) imageTest(s, testBtn.dataset.imgTest);
@@ -1804,10 +1976,26 @@ window.CompanionModelsPage = (() => {
       laya: { data: null, draft: null, logs: [], loaded: false, loading: false, busy: false, stale: false, bad: false, notice: "", test: null, preview: null, previewText: "" },
       search: { data: null, draft: null, loaded: false, loading: false, busy: false, stale: false, bad: false, notice: "" },
       loading: false, busy: false, bad: false, denied: false, notice: "" };
-    state.layer ||= "role"; state.providerTests ||= {}; state.testing ||= new Set(); state.expOpen ||= {}; state.voice.lastTest ||= null; state.voice.editorValues ||= {}; state.voice.ttsTestResults ||= {}; state.voice.ttsTesting ||= false; state.voice.createDraft ||= { type: "", id: "" }; state.image.endpointTests ||= {}; state.image.endpointTesting ||= null; state.configDraft ||= null; state.peak ||= { on: true, provider: "", start: "09:00", end: "12:00" }; state.testing ||= new Set(); state.peak.windows ||= "09:00-12:00\n14:00-18:00"; state.laya ||= { data: null, draft: null, loaded: false, loading: false, busy: false, stale: false, bad: false, notice: "", test: null, preview: null, previewText: "" }; state.search ||= { data: null, draft: null, loaded: false, loading: false, busy: false, stale: false, bad: false, notice: "" }; state.hoverProvider = "";
+    state.layer ||= "role"; state.providerTests ||= {}; state.testing ||= new Set();
+    /* 展开状态按对象保存：刷新、切任务、切页回来都保持上次展开的分组，
+       不再每次回到“全收起”或“全展开”。 */
+    state.expOpen = { ...restoreExpanded(key), ...(state.expOpen || {}) }; state.voice.lastTest ||= null; state.voice.editorValues ||= {}; state.voice.ttsTestResults ||= {}; state.voice.ttsTesting ||= false; state.voice.createDraft ||= { type: "", id: "" }; state.image.endpointTests ||= {}; state.image.endpointTesting ||= null; state.configDraft ||= null; state.peak ||= { on: true, provider: "", start: "09:00", end: "12:00" }; state.testing ||= new Set(); state.peak.windows ||= "09:00-12:00\n14:00-18:00"; state.laya ||= { data: null, draft: null, loaded: false, loading: false, busy: false, stale: false, bad: false, notice: "", test: null, preview: null, previewText: "" }; state.search ||= { data: null, draft: null, loaded: false, loading: false, busy: false, stale: false, bad: false, notice: "" }; state.hoverProvider = "";
     states.set(key, state);
     root.addEventListener("input", input); root.addEventListener("change", input); root.addEventListener("click", click); root.addEventListener("pointerover", providerHover); root.addEventListener("pointerout", providerHover); render();
     if (state.tab && state.tab !== "fn") { if (state.tab === "voice" && !state.voice.loaded) voiceRefresh(state); else if (state.tab === "image" && !state.image.loaded) imageRefresh(state); else if (state.tab === "search" && !state.search.loaded) searchRefresh(state); else if (state.tab === "laya" && !state.laya.loaded) layaRefresh(state); }
     else { refresh().catch(() => {}); } }
-  return { mount, unmount };
+  /* 页面级未保存守卫（page-guards.js）：模型页的草稿分散在任务草稿表、
+     语音配置、识图配置、Laya 配置里，逐个用页面自己的脏判定。
+     任何一项算不出来就跳过这一项，不让守卫本身把页面卡住。 */
+  function isDirty() {
+    for (const s of states.values()) {
+      if (!s) continue;
+      try { if (pendingCount(s) > 0) return true; } catch { }
+      try { if (s.voice && voiceDirty(s.voice)) return true; } catch { }
+      try { if (s.image && imageConfigDirty(s.image)) return true; } catch { }
+      try { if (s.laya && layaDirty(s.laya)) return true; } catch { }
+    }
+    return false;
+  }
+  return { mount, unmount, isDirty };
 })();

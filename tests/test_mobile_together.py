@@ -98,7 +98,7 @@ class MobileTogetherBridgeTests(unittest.IsolatedAsyncioTestCase):
                 }),
             "together": SimpleNamespace(companion_v2_status=lambda: {
                 "schema": "companion.provider-status.v1",
-                "plugin_id": "astrbot_plugin_private_companion_v2.together",
+                "plugin_id": "astrbot_plugin_private_companion.together",
                 "enabled": True,
                 "runtime_ready": False,
             }),
@@ -131,7 +131,7 @@ class MobileTogetherBridgeTests(unittest.IsolatedAsyncioTestCase):
     def test_disabled_room_service_is_distinct_from_missing_create_consent(self):
         self.apis['together'].companion_v2_status = lambda: {
             'schema': 'companion.provider-status.v1',
-            'plugin_id': 'astrbot_plugin_private_companion_v2.together',
+            'plugin_id': 'astrbot_plugin_private_companion.together',
             'enabled': False, 'runtime_ready': False}
         disabled = self.bridge.status('valid-session-token-123456')
         self.assertFalse(disabled['enabled'])
@@ -139,7 +139,7 @@ class MobileTogetherBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(disabled['reason'], 'mobile_together_disabled')
         self.apis['together'].companion_v2_status = lambda: {
             'schema': 'companion.provider-status.v1',
-            'plugin_id': 'astrbot_plugin_private_companion_v2.together',
+            'plugin_id': 'astrbot_plugin_private_companion.together',
             'enabled': True, 'runtime_ready': True}
         self.allowed.remove('together.room.create')
         denied = self.bridge.status('valid-session-token-123456')

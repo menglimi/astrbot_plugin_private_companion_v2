@@ -21,11 +21,38 @@ from companion_v2.execution.models import TaskError
 from companion_v2.foundation.clock import DeterministicClock
 from companion_v2.foundation.refs import RoleOwnerRef
 from companion_v2.legacy.archive import verify_v1_archive
+from companion_v2.legacy.data_migration import build_data_plan
 from companion_v2.legacy.migration import LegacyMigration
 from companion_v2.role_work.journal import JournalKey, JournalKind
 from tests.multi_host_support import MultiNativeContext, multi_config
 from tests.native_adapter_support import FakeEvent, FakeProvider, FakeReverseApi
 from tests.test_management_access import NOW
+
+
+class LegacyDataPlanTokenTests(unittest.TestCase):
+    def test_group_selection_order_preserves_plan_but_binding_changes_invalidate_it(self):
+        api = LegacyMigrationWebAPI.__new__(LegacyMigrationWebAPI)
+        data = SimpleNamespace(source_fingerprint="source", reaction_assets=())
+        scope = SimpleNamespace(installation_id="installation", platform="qq", bot_id="bot",
+            account_id="100", kind="private", native_scope_id="200")
+        context = SimpleNamespace(scope=scope,
+            role_binding=SimpleNamespace(role=SimpleNamespace(subject_id="role")))
+        service = SimpleNamespace(reaction_owner=lambda _context: "reaction-owner")
+        mappings = [{"owner_id": "b" * 64, "target_id": "group-b", "role_id": "role-b"},
+                    {"owner_id": "a" * 64, "target_id": "group-a", "role_id": "role-a"}]
+
+        def token(selected):
+            return api._data_plan_token(data, context, service, "", "",
+                memory_group_mappings=selected)
+
+        preview_token = token(mappings)
+        self.assertEqual(preview_token, token(list(reversed(mappings))))
+        self.assertNotEqual(preview_token, token(mappings[:1]))
+        for field, value in (("owner_id", "c" * 64), ("target_id", "another-group"),
+                             ("role_id", "another-role")):
+            with self.subTest(changed_binding=field):
+                changed = [{**mappings[0], field: value}, mappings[1]]
+                self.assertNotEqual(preview_token, token(changed))
 
 
 class LegacyJournalMigrationHostTests(unittest.IsolatedAsyncioTestCase):
@@ -400,6 +427,14 @@ class LegacyJournalMigrationHostTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(first["journal_derivatives_remaining"], 1)
             self.assertTrue(first["journal_errors"])
 
+            # Changing an unrelated source must not strand a committed diary
+            # whose derivative write needs to resume.
+            profile_path = v1_root / "companions.json"
+            changed_source = json.loads(profile_path.read_text(encoding="utf-8"))
+            changed_source["unrelated_metadata"] = {"revision": 2}
+            profile_path.write_text(json.dumps(changed_source, ensure_ascii=False) + "\n",
+                                    encoding="utf-8", newline="\n")
+
             retry_preview = api._data_plan(v1_migration, v1_root, session).unwrap()
             self.assertEqual(retry_preview["journals"]["derivative_retry_count"], 1)
             retried = (await api._data_apply(v1_migration, v1_root, session,
@@ -417,6 +452,14 @@ class LegacyJournalMigrationHostTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(journal_service.derivatives(key).material.dream_fragments,
                              ("迁移片段一", "迁移片段二"))
 
+            # Older releases used the whole catalog hash in their operation ID.
+            # Identical retained content is recognized without forging a receipt.
+            with patch.object(LegacyMigrationWebAPI, "_legacy_journal_operation_id",
+                              return_value="legacy-journal-older-source"):
+                heads = api._journal_heads(build_data_plan(v1_root), session, context)
+            self.assertTrue(heads[("diary", "2026-09-20")]["content_matches"])
+            self.assertFalse(heads[("diary", "2026-09-20")]["imported"])
+
             journal_service.save(replace(entry.draft, body="人工更新内容。"),
                 expected_revision=entry.reference.revision, operation_id="manual-journal-edit",
                 observed_at=clock.now())
@@ -427,6 +470,8 @@ class LegacyJournalMigrationHostTests(unittest.IsolatedAsyncioTestCase):
                 after_edit["plan_token"], "", "", False, False, False, True, True, False)).unwrap()
             self.assertEqual(unchanged["journal_created"], 0)
             self.assertEqual(journal_service.get(key).draft.body, "人工更新内容。")
+            edited_heads = api._journal_heads(build_data_plan(v1_root), session, context)
+            self.assertFalse(edited_heads[("diary", "2026-09-20")]["content_matches"])
         finally:
             await controller.terminate()
 

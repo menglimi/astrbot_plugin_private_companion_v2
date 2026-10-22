@@ -127,15 +127,15 @@ def laya_intent_matches(applicability, decision):
         compatible = compatible | {"play", "tease", "intimacy", "casual"}
     return target in compatible
 
-INSTRUCTION = """只观察可借鉴的表达形式：句长、节奏、标点、措辞、直接程度和排版。区分明确反馈与偶然写法，不从少量样本推断身份、性格、情绪、健康、关系或稳定偏好；证据不足就不提候选，一次说法不概括为长期习惯。
-每项引用输入中的真实 evidence_handle，写清可复用形式及使用条件；这里只提出待审核候选，不宣称已学习或保存。
+INSTRUCTION = """只观察可借鉴的表达形式：句长、节奏、标点、措辞、直接程度和排版，捕捉长期相处中自然耳濡目染的呼吸节拍、软化语气的小助词或熟稔接话方式。区分明确反馈与偶然写法，不从少量样本推断身份、性格、情绪、健康、关系或稳定偏好；证据不足就不提候选，一次说法不概括为长期习惯。
+每项引用输入中的真实 evidence_handle，写清可复用形式及使用条件；proposal 写成角色能以自身性格底色自然化用的表达习惯，而非机械复读；这里只提出待审核候选，不宣称已学习或保存。
 填写 applicability：channels 选 private/group/proactive/qzone/tts，必须包含来源频道；relationship_stages 选 stranger/familiar/close/any，emotion_gates 选 normal/positive/low/guarded/any，intent 选 acknowledgement/question/request/help/comfort/play/tease/intimacy/boundary/emotion/casual/proactive/any，keywords 最多 8 个简短情境词。其他条件依据不足时用 any 或空关键词，不猜身份、关系或心情。条件是建议的使用范围，不是事实声明，应用时缺失不等于匹配。
 仅输出符合给定 JSON Schema 的 JSON，不附推理过程。"""
 
 MODE_INSTRUCTIONS = {
-    "light": "轻量学习：只提炼跨情境通用的句长、节奏、标点和排版习惯，最多提出3条。不要提取场景短语或口头禅。",
-    "balanced": "均衡学习：兼顾稳定语法习惯和有重复证据的情境表达，最多提出6条；保留角色自己的表达，不模仿用户身份。",
-    "aggressive": "深入学习：可提出最多12条细分的情境表达和句法模板，明确使用条件；不因强度提高而降低证据要求。",
+    "light": "轻量学习：只提炼跨情境通用的句长、停顿呼吸感、标点和排版习惯，最多提出3条。不要提取场景短语或口头禅。",
+    "balanced": "均衡学习：兼顾稳定语法习惯和有重复证据的情境表达与接话节奏，最多提出6条；保留角色自己的表达底色，自然化用而不模仿用户身份。",
+    "aggressive": "深入学习：可提出最多12条细分的情境表达、熟稔语气和句法模板，明确使用条件；不因强度提高而降低证据要求。",
 }
 
 SCHEMA = {

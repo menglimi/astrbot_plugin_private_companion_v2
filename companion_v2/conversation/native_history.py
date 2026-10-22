@@ -86,6 +86,48 @@ def body(messages, ref, context, at, *, historical=False):
                 else "native_send_return" if sent else "source_observation", **origin}
 
 
+def dialogue(messages, context, at, *, start=None, end=None, limit=32, max_chars=8000,
+             include_turns=False):
+    """Read a bounded, validated private native dialogue in chronological order.
+
+    Only input observations and actual assistant send returns are exposed.  The
+    returned rows intentionally contain no mutable source object so callers can
+    safely place the material in an asynchronous model request.
+    """
+    if max_chars <= 0:
+        return ()
+    result = []
+    remaining = max_chars
+    # Apply the text budget from the latest messages backwards. Reading in
+    # chronological order first could spend the whole budget on older inputs
+    # and silently omit the assistant's latest care/recovery feedback.
+    for row in rows(messages.runtime, context, start=start, end=end, limit=limit):
+        if remaining <= 0:
+            break
+        try:
+            item = body(messages, reference(row), context, at)
+        except (TaskError, ValueError, KeyError, TypeError):
+            continue
+        text = str(item.get("text", "")).strip()
+        if not text or remaining <= 0:
+            continue
+        text = text[:min(1600, remaining)]
+        if not text:
+            continue
+        entry = {
+            "speaker": item["role"],
+            "text": text,
+            "at": item.get("received_at") or item.get("delivered_at") or row["observed_at"],
+            "observation_id": row["observation_id"],
+            "content_hash": row["content_hash"],
+        }
+        if include_turns:
+            entry.update(turn_id=row["turn_id"], event_id=row["event_id"])
+        result.append(entry)
+        remaining -= len(text)
+    return tuple(reversed(result))
+
+
 def latest_input(messages, context, at):
     for row in rows(messages.runtime, context, end=stamp(at), kind="input", limit=32):
         try:

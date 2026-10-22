@@ -45,7 +45,9 @@ class ComfyUIService:
             headers = {}
             if self.config.get("api_key"):
                 headers["Authorization"] = "Bearer " + str(self.config["api_key"])
-            self._session = aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=30), trust_env=False)
+            timeout = int(self.config.get("timeout_seconds", 300))
+            self._session = aiohttp.ClientSession(headers=headers,
+                timeout=aiohttp.ClientTimeout(total=timeout), trust_env=False)
         return self._session
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:

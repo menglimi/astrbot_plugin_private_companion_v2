@@ -17,7 +17,7 @@ from quart import request
 
 from .page_config import PageConfigManager
 
-PLUGIN_NAME = "astrbot_plugin_private_companion_v2.live"
+PLUGIN_NAME = "astrbot_plugin_private_companion.live"
 PAGE_API_PREFIX = f"/{PLUGIN_NAME}/page"
 
 SMART_EXPRESSION_TEMPLATES: tuple[dict[str, Any], ...] = (

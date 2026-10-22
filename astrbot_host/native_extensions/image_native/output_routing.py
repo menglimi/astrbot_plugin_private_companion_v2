@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 from dataclasses import replace
 from pathlib import Path
+from urllib.request import getproxies, proxy_bypass
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -14,14 +16,56 @@ from .backends import NativeTransportBackend
 from .owner import checked
 from .types import BackendResult, NativeImageError, fingerprint
 
+OPENAI_COMPATIBLE_PLATFORMS = frozenset({"openai", "openrouter", "agnes", "sensenova", "doubao"})
+
+
+def resolve_platform(config):
+    platform = config.get("platform", "auto")
+    if platform != "auto":
+        return platform
+    base = config.get("base_url", "").lower()
+    model = config.get("model", "").lower()
+    host = urlsplit(base).hostname or ""
+    if "minimax" in host or model in {"image-01", "image-01-live"}:
+        return "minimax"
+    if "openrouter.ai" in host:
+        return "openrouter"
+    if "agnes-ai.com" in host or model.startswith("agnes-image-"):
+        return "agnes"
+    if "sensenova.cn" in host or model.startswith("senova-"):
+        return "sensenova"
+    if "volces.com" in host or "volcengine" in host:
+        return "doubao"
+    if host == "dashscope.aliyuncs.com" or host.endswith(".dashscope.aliyuncs.com"):
+        return "bailian"
+    if host == "modelscope.cn" or host.endswith(".modelscope.cn"):
+        return "modelscope"
+    if host == "generativelanguage.googleapis.com":
+        return "gemini"
+    return "openai"
+
 
 class Rejected(NativeImageError):
     """A definitive rejection allows trying the next configured endpoint."""
 
 
 class OnlineImageBackend:
-    def __init__(self, config):
+    def __init__(self, config, network=None):
         self.config = config
+        self.network = network if isinstance(network, dict) else {}
+
+    def _request_options(self, url):
+        proxy = str(self.network.get("download_proxy", "") or "").strip()
+        if proxy:
+            return {"proxy": proxy}
+        if self.network.get("use_environment_proxy"):
+            host = urlsplit(url).hostname or ""
+            if host and not proxy_bypass(host):
+                proxies = getproxies()
+                proxy = proxies.get(urlsplit(url).scheme) or proxies.get("all") or ""
+                if proxy:
+                    return {"proxy": proxy}
+        return {}
 
     @property
     def operations(self):
@@ -32,43 +76,61 @@ class OnlineImageBackend:
                 or parsed.scheme not in {"http", "https"} or not parsed.hostname
                 or parsed.username or parsed.password or parsed.fragment):
             return ()
-        platform = config.get("platform", "auto")
-        if platform == "auto":
-            platform = "minimax" if "minimax" in parsed.hostname.lower() else "openai"
-        return ("generate",) if platform == "minimax" else ("generate", "edit") if platform == "openai" else ()
+        platform = resolve_platform(config)
+        if platform == "minimax":
+            return ("generate",)
+        if platform in OPENAI_COMPATIBLE_PLATFORMS:
+            return (("generate", "edit") if config.get("max_reference_images", 1) > 0
+                    else ("generate",))
+        return ()
 
     async def execute(self, invocation, references, before_dispatch):
         config = self.config
         base = config.get("base_url", "").rstrip("/")
         if not base or not config.get("model"):
             raise NativeImageError("native_endpoint_unconfigured")
-        platform = config["platform"]
-        if platform == "auto":
-            platform = "minimax" if "minimax" in urlsplit(base).hostname.lower() else "openai"
+        platform = resolve_platform(config)
         if invocation.operation == "mask_edit" or (platform == "minimax" and invocation.operation != "generate"):
             raise NativeImageError("unsupported_image_operation")
+        if platform != "minimax" and platform not in OPENAI_COMPATIBLE_PLATFORMS:
+            raise NativeImageError("unsupported_image_platform")
         suffix = "/image_generation" if platform == "minimax" else (
             "/images/edits" if invocation.operation == "edit" else "/images/generations")
         url = base if base.endswith(suffix) else base + suffix
         size = f"{config['width']}x{config['height']}"
+        if platform == "agnes" and config.get("size_label") in {"1K", "2K", "3K", "4K"}:
+            size = config["size_label"]
         body = {"model": config["model"], "prompt": invocation.prompt,
                 "n": 1, "size": size, "response_format": "b64_json"}
         if platform == "minimax":
+            divisor = math.gcd(config["width"], config["height"])
+            ratio = config.get("ratio") or f"{config['width'] // divisor}:{config['height'] // divisor}"
             body = {"model": config["model"], "prompt": invocation.prompt,
-                    "n": 1, "aspect_ratio": f"{config['width']}:{config['height']}", "response_format": "base64"}
+                    "n": 1, "aspect_ratio": ratio,
+                    "response_format": "base64"}
+        elif config.get("quality"):
+            body["quality"] = config["quality"]
         if invocation.operation == "edit":
-            if len(references) != 1:
-                raise NativeImageError("native_edit_reference_unsupported")
+            max_reference_images = config.get("max_reference_images", 1)
+            if (type(max_reference_images) is not int or max_reference_images < 1
+                    or len(references) > max_reference_images):
+                raise Rejected("backend_rejected")
             form = aiohttp.FormData()
             for key,value in body.items():
                 if key != "response_format":
                     form.add_field(key, str(value))
-            form.add_field("image", references[0].data, filename="reference.png", content_type="image/png")
+            field_name = "image" if len(references) == 1 else "image[]"
+            for index, reference in enumerate(references, start=1):
+                form.add_field(field_name, reference.data, filename=f"reference-{index}.png",
+                               content_type="image/png")
             kwargs = {"data":form}
         else:
             kwargs = {"json":body}
         headers = ({"Authorization": "Bearer " + config["api_key"]}
                    if config.get("api_key") else {})
+        custom_headers = config.get("custom_headers")
+        if isinstance(custom_headers, dict):
+            headers.update(custom_headers)
         timeout = aiohttp.ClientTimeout(total=config.get("timeout_seconds", 180))
         async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
             await checked(before_dispatch)
@@ -99,7 +161,8 @@ class OnlineImageBackend:
                 if remote.scheme not in {"http", "https"} or not remote.hostname or remote.username or remote.password:
                     raise NativeImageError("backend_image_url_invalid")
                 await checked(getattr(before_dispatch, "read", before_dispatch))
-                async with session.get(entry["url"], allow_redirects=False) as response:
+                async with session.get(entry["url"], allow_redirects=False,
+                                       **self._request_options(entry["url"])) as response:
                     if response.status != 200:
                         raise NativeImageError("backend_result_unconfirmed")
                     image = await self._read(response)
@@ -150,7 +213,7 @@ class OutputRoutingBackend:
                 if route.startswith("online:"):
                     endpoint = endpoints.get(route[7:])
                     if endpoint and endpoint.get("enabled"):
-                        yield OnlineImageBackend(endpoint)
+                        yield OnlineImageBackend(endpoint, self.config.get("network", {}))
                     continue
                 if route in {"comfyui", "sd_webui"}:
                     try:

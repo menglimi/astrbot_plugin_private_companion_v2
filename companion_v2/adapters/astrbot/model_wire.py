@@ -38,6 +38,11 @@ REPLY_CONTRACT = (
     "JSON 和证据句柄仅供内部处理，text 中不要向用户讲这些格式要求。"
 )
 
+BACKGROUND_OUTPUT_NOTES = {
+    "role_state": "本轮是后台状态维护。只输出包含 energy、hunger、health、sleep、busy、mood、location、cycle、presence、online_mode、conditions 的完整 JSON 对象；字段类型遵循本轮状态协议，不写聊天回复。",
+    "calendar_planning": "本轮是后台日程规划。仅输出本轮模式要求的 JSON 对象：daily/horizon 使用 items，refine 使用 detail，intervention 使用 changes；不写聊天回复或额外说明。",
+}
+
 
 def strict_json(text):
     def pairs(items):
@@ -148,7 +153,7 @@ def build_wire(envelope, *, model_name=""):
             "只有本轮提供图片选择协议时才增加 images。每条 claim 使用唯一 id，"
             "statement 必须是 text 的逐字连续原文，observed 使用提供的 evidence 句柄，"
             "subjective/question 的 evidence 为 null。" + stream_contract
-            if request.output_format == "conversation" else ""))
+            if request.output_format == "conversation" else BACKGROUND_OUTPUT_NOTES.get(request.output_format, "")))
     messages = [*composition.system_messages,
                 {"role": "user", "content": encode({"materials": materials,
                     "deferred": [{"owner": c.owner, "purpose": c.purpose} for c in request.context.deferred],

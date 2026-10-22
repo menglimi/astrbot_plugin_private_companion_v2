@@ -71,7 +71,7 @@ class ImageExtensionAPI:
         endpoint = next((item for item in source["endpoints"] if item["id"] == endpoint_id), None)
         if endpoint is None or not endpoint["enabled"]:
             raise NativeImageError("native_endpoint_unconfigured")
-        backend = OnlineImageBackend(endpoint)
+        backend = OnlineImageBackend(endpoint, source.get("network", {}))
         owner = NativeImageOwner(self.data_dir / "endpoint_tests", backend,
                                  identity_key="v2-image-output-endpoint-tests-v1")
         started = monotonic()

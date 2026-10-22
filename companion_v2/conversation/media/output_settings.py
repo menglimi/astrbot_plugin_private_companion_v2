@@ -96,12 +96,22 @@ def parse_scene_presets(value):
 
 
 def prompt_instruction(values):
+    if not values["allow_user_requests"] or values["trigger_mode"] == "off":
+        return "当前角色已关闭用户请求生图和改图；按本轮话题自然回应，图片请求可简短说明暂不能执行。"
     formats = {"traditional": "使用简洁的英文画面标签，以逗号分隔",
                "natural": "使用连贯的自然语言描述构图、人物与场景",
                "nai": "使用 NAI 标签格式，可用花括号表达强调，避免聊天句式"}
-    trigger = {"tool": "用户明确要求图片或自拍时调用图片工具，不把普通闲聊当成生图请求。",
-               "rules": "只在本轮有明确的生成图片、自拍、拍照或改图请求时调用图片工具；模糊暗示先询问。",
-               "off": "本轮不主动调用生图工具。"}[values["trigger_mode"]]
+    trigger = (
+        "用户用自然语言要新图片、画图、自拍、头像或改图时，使用本轮开放的图片工具完成，无需特定指令。"
+        "“来张自拍看看”“想看你现在的穿搭”已经表达了看图需求；承接尚未完成的同一请求时，"
+        "结合最近对话理解“看看”“当然”“继续”“再来一张”，不要求对方重复整句。"
+        "需求清楚时可自然接话并执行；确实缺少影响画面的关键信息时再问一句。"
+        "玩笑、讨论摄影或泛泛问近况仍按普通聊天理解，已完成的请求不因后续应声重复生图。"
+        "角色本人出镜时，按当前人设与已知对话展开外观、穿搭、动作和场景；"
+        "近期明确换装或换景优先，缺少的细节可自然创作，不把生成画面说成现实观测。"
+        "自拍画面在 prompt 中写明 selfie，以便应用角色的自拍提示词。"
+        "图片请求以实际图片工具结果接续，不用反复确认、只说稍等或改邀其他活动代替。"
+    )
     presets = parse_scene_presets(values.get("scene_presets_json", DEFAULTS["scene_presets_json"]))
     scene = ("可用场景预设：" + "、".join(item["name"] + "（ID:" + item["id"] + "）" for item in presets)
              + "。场景与用户要求吻合时，可在图片工具 prompt 中标记 [场景预设:名称]；"

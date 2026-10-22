@@ -731,12 +731,16 @@ def configured_news_port(config=None, *, context=None, deepseek_provider_resolve
     if type(settings) is not dict:
         raise ValueError("news host settings must be an object")
     configured_kind = settings.get("source_kind")
+    # 缺键或空串都落到与 _conf_schema.json 相同的默认源（https://daily.juya.uk/rss.xml）。
+    # 原先取 ""，于是 kind=rss 但没有 feed_url 的数据根会拿空地址去请求；
+    # 只有 kind=host 那条分支有兜底，rss 这条没有。
+    feed_url = settings.get("feed_url") or DEFAULT_AI_NEWS_FEED_URL
     if configured_kind is None and settings.get("feed_url"):
         source = NewsSource.read({"news_source_kind": "rss", "news_source_url": settings["feed_url"]})
     else:
         source = NewsSource.read({"news_source_kind": configured_kind or "host",
                                   "news_source_uid": settings.get("bilibili_uid", ""),
-                                  "news_source_url": settings.get("feed_url", "")})
+                                  "news_source_url": feed_url})
     if source.kind == "host" and values["URL"]:
         source = NewsSource("json", url=news_url(values["URL"]))
     elif source.kind == "host":

@@ -27,9 +27,7 @@ IMAGE_ACTIONS = frozenset({"image.generate", "image.edit", "image.mask_edit"})
 GROUP_IMAGE_ACTIONS = frozenset({"image.generate", "image.edit"})
 REJECTED_ADOPTION = "image_adoption_unavailable:"
 INSTRUCTION = (
-    "标记 generated 的图片是本轮能力提供方返回的生成或编辑产物，不是用户发来的照片，也不证明真实事件。"
-    "edited 和 provider_operation 记录原操作归因，不据此声称人工原创、真实拍摄或第三方认可。"
-    "产物已保存不等于角色已采用或已经发送；只有最终选择 sendable_image 后才进入授权投递。"
+    "标记 generated 的图片是本轮能力提供方返回的生成或编辑产物，不是用户发来的照片，也不证明真实事件。edited 和 provider_operation 记录原操作归因，不据此声称人工原创、真实拍摄或第三方认可；产物已保存不等于角色已采用或已经发送，只有最终选择 sendable_image 后才进入授权投递。"
 )
 
 

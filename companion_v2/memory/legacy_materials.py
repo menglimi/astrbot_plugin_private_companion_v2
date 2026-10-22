@@ -19,6 +19,8 @@ from threading import RLock
 from companion_v2.execution.models import TaskError, digest, encode
 from companion_v2.execution.service import outcome
 from companion_v2.foundation.refs import ScopeKind
+from companion_v2.legacy.sqlite_snapshot import open_readonly_sqlite_snapshot
+from companion_v2.storage.sqlite_path import readonly_uri
 from .legacy_policy import evaluate_legacy_memory_access
 
 
@@ -187,7 +189,7 @@ def _safe_database(path: str | Path):
 
 
 def _readonly(path: Path):
-    connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=10)
+    connection = open_readonly_sqlite_snapshot(path, timeout=10)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA query_only=ON")
     connection.execute("BEGIN")
@@ -373,7 +375,7 @@ def _utc(value):
     if not value:
         return ""
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(value.replace("Z", "+00:00"))
         if parsed.utcoffset() is None:
             return ""
         return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds")
@@ -702,7 +704,7 @@ class LegacyMemoryMaterials:
             connection.close()
 
     def import_snapshot(self, snapshot_path, *, source_fingerprint, bindings=(), owner_ids=(),
-                        target=None, lineage_id=None, preview=False):
+                        target=None, lineage_id=None, preview=False, destination_scoped=False):
         """Project governed private or group materials from an immutable snapshot.
 
         ``bindings`` is a tuple of ``LegacyMemoryBinding`` values or their strict
@@ -718,6 +720,13 @@ class LegacyMemoryMaterials:
         normalized_bindings = tuple(_binding(item) for item in bindings)
         selected_ids = _selected_owner_ids(owner_ids)
         target_binding = _target_document(target) if selected_ids else None
+        source_lineage_id = lineage_id
+        destinations = ([target_binding] if target_binding else []) + [b.target_document() for b in normalized_bindings]
+        destinations = list({encode(d): d for d in destinations}.values())
+        if destination_scoped:
+            destination_key = sorted(encode(d) for d in destinations)
+            source_fingerprint = digest([source_fingerprint, destination_key])
+            lineage_id = digest([lineage_id, destination_key])
         if selected_ids and target_binding is None:
             raise ValueError("legacy_memory_target_selector_invalid")
         by_source = {}
@@ -891,6 +900,25 @@ class LegacyMemoryMaterials:
                                                 ((fingerprint,) for fingerprint in fingerprints))
                     database_target.executemany("DELETE FROM legacy_memory_imports WHERE source_fingerprint=?",
                                                 ((fingerprint,) for fingerprint in fingerprints))
+                if destination_scoped:
+                    # Upgrade old shared projections without deleting another role's rows.
+                    for imported in database_target.execute(
+                            "SELECT source_fingerprint,lineage_id,stats_json FROM legacy_memory_imports").fetchall():
+                        old_stats = json.loads(imported["stats_json"])
+                        if old_stats.get("source_lineage_id", imported["lineage_id"]) != source_lineage_id:
+                            continue
+                        for destination in destinations:
+                            columns = {"installation_id": "target_installation_id", "bot_id": "target_bot_id",
+                                "role_id": "target_role_id", "actor_id": "target_actor_id",
+                                "platform": "target_platform", "account_id": "target_account_id",
+                                "scope_kind": "target_scope_kind"}
+                            conditions = " AND ".join(column + "=?" for column in columns.values())
+                            database_target.execute("DELETE FROM legacy_memory_materials WHERE source_fingerprint=? AND " + conditions,
+                                (imported["source_fingerprint"], *(destination[key] for key in columns)))
+                        if not database_target.execute("SELECT 1 FROM legacy_memory_materials WHERE source_fingerprint=? LIMIT 1",
+                                (imported["source_fingerprint"],)).fetchone():
+                            database_target.execute("DELETE FROM legacy_memory_imports WHERE source_fingerprint=?", (imported["source_fingerprint"],))
+                    stats["source_lineage_id"] = source_lineage_id
                 database_target.execute("INSERT INTO legacy_memory_imports(source_fingerprint,snapshot_sha256,binding_sha256,imported_at,stats_json,lineage_id) VALUES (?,?,?,?,?,?)",
                                (source_fingerprint, snapshot_sha256, binding_sha256,
                                 datetime.now(timezone.utc).isoformat(), encode(stats), lineage_id))
@@ -911,14 +939,15 @@ class LegacyMemoryMaterials:
             source.close()
 
     def plan_snapshot(self, snapshot_path, *, source_fingerprint, bindings=(), owner_ids=(), target=None,
-                      lineage_id=None):
+                      lineage_id=None, destination_scoped=False):
         return self.import_snapshot(snapshot_path, source_fingerprint=source_fingerprint,
                                     bindings=bindings, owner_ids=owner_ids, target=target,
-                                    lineage_id=lineage_id, preview=True)
+                                    lineage_id=lineage_id, preview=True, destination_scoped=destination_scoped)
 
     @outcome
     def query(self, context, *, query_intent="", material_kind="all", limit=None,
-              cursor=None, time_start=None, time_end=None, group_read_authorized=False):
+              cursor=None, time_start=None, time_end=None, group_read_authorized=False,
+              lexical=False, max_result_chars=None):
         scope_kind = getattr(context.scope.kind, "value", context.scope.kind)
         if scope_kind == ScopeKind.PRIVATE.value:
             self.writer.access.check(context, "memory.read")
@@ -930,6 +959,10 @@ class LegacyMemoryMaterials:
             max_items, max_chars = 5, 8192
         else:
             raise TaskError("memory_conversation_context_required", "legacy memory requires a private or group conversation")
+        if max_result_chars is not None:
+            if type(max_result_chars) is not int or not 256 <= max_result_chars <= 48000:
+                raise ValueError("legacy memory result budget invalid")
+            max_chars = min(max_chars, max_result_chars)
         _bounded(query_intent, "query_intent", MAX_QUERY_CHARS)
         if material_kind not in ("all", "memories", "timeline"):
             raise ValueError("legacy material kind invalid")
@@ -960,7 +993,7 @@ class LegacyMemoryMaterials:
                 AND m.{native_scope_match} AND m.target_actor_id=?
                 AND m.target_platform=? AND m.target_account_id=?) ORDER BY i.source_fingerprint""",
                 target).fetchall()
-            query_hash = digest([context.key, query_intent, material_kind, start, end,
+            query_hash = digest([context.key, query_intent, material_kind, start, end, lexical,
                                  [tuple(row) for row in generations]])
             after = None
             offset = 0
@@ -987,9 +1020,22 @@ class LegacyMemoryMaterials:
                 where.append("occurred_at!='' AND occurred_at>=?")
                 params.append(start)
             if end:
-                where.append("occurred_at!='' AND occurred_at<=?")
+                where.append("occurred_at!='' AND occurred_at<?")
                 params.append(end)
-            if query_intent:
+            rank, rank_params = "CAST(0 AS INTEGER)", []
+            if query_intent and lexical:
+                from .search import terms
+                words = {bytes.fromhex(t[1:]).decode("utf-8") for t in terms(query_intent)}
+                words -= {"记得", "还记", "什么", "我们", "之前", "以前", "那天", "了吗", "的吗", "说过", "时候"}
+                words = sorted((w for w in words if len(w) >= 2), key=lambda w: (-len(w), w))[:32]
+                if not words:
+                    return {"profile": PROFILE, "items": [], "next_cursor": None,
+                            "source": "v1_historical_materials", "historical_only": True}
+                where.append("(" + " OR ".join("instr(lower(text_content),?)>0" for _ in words) + ")")
+                params.extend(words)
+                rank = "(" + "+".join("(instr(lower(text_content),?)>0)" for _ in words) + ")"
+                rank_params = words
+            elif query_intent:
                 where.append("instr(lower(text_content),lower(?))>0")
                 params.append(query_intent)
             continuation = None
@@ -1004,12 +1050,14 @@ class LegacyMemoryMaterials:
                     continuation = connection.execute("SELECT material_id,material_kind,occurred_at,text_content,attributes_json "
                         "FROM legacy_memory_materials WHERE material_id=? AND " + " AND ".join(where),
                         [after, *params]).fetchone()
-                where.append("(occurred_at<? OR (occurred_at=? AND material_id<?))")
-                params.extend((previous["occurred_at"], previous["occurred_at"], after))
+                prior_rank = sum(word in previous["text_content"].lower() for word in rank_params)
+                where.append(f"({rank}<? OR ({rank}=? AND (occurred_at<? OR (occurred_at=? AND material_id<?))))")
+                params.extend((*rank_params, prior_rank, *rank_params, prior_rank,
+                               previous["occurred_at"], previous["occurred_at"], after))
             statement = ("SELECT material_id,material_kind,occurred_at,text_content,attributes_json "
                          "FROM legacy_memory_materials WHERE " + " AND ".join(where) +
-                         " ORDER BY occurred_at DESC,material_id DESC LIMIT ?")
-            rows = connection.execute(statement, (*params, page_limit + 1)).fetchall()
+                         f" ORDER BY {rank} DESC,occurred_at DESC,material_id DESC LIMIT ?")
+            rows = connection.execute(statement, (*params, *rank_params, page_limit + 1)).fetchall()
         finally:
             connection.close()
 
@@ -1075,7 +1123,7 @@ class LegacyMemoryMaterials:
         path = self.runtime.data_root / DATABASE_FILENAME
         if not path.exists():
             raise TaskError("legacy_memory_result_changed", "historical result is no longer available")
-        connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=5)
+        connection = sqlite3.connect(readonly_uri(path), uri=True, timeout=5)
         connection.row_factory = sqlite3.Row
         try:
             tables = {row[0] for row in connection.execute(

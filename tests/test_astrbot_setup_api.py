@@ -60,7 +60,7 @@ class AstrBotSetupFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_setup_api_has_no_runtime_mode_endpoint_or_status_field(self):
         routes = {route for route, *_ in self.api.routes()}
-        self.assertNotIn("/astrbot_plugin_private_companion_v2/setup/mode", routes)
+        self.assertNotIn("/astrbot_plugin_private_companion/setup/mode", routes)
         status = await self.call("status")
         self.assertEqual(status["status"], "ok", status)
         self.assertNotIn("mode", status["data"])

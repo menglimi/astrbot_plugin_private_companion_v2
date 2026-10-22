@@ -13,9 +13,6 @@ from companion_v2.foundation.refs import ScopeKind
 from .reply_settings import group_wakeup_settings
 
 
-COMPLETE_SHORT = re.compile(r"(?:好+|嗯+|哦+|啊+|哈+|草+|在|早|晚|是|不|行|可|对|谢谢|谢了|"
-                            r"摸摸|贴贴|抱抱|亲亲|捏捏|早安|晚安|你好|在吗|好呀|好的|笑死)")
-
 # Repeat following keeps V1's bounds: one short signature, one bounded window,
 # and a hard ceiling on how much either tendency may grow.
 REPEAT_VERSION = "group_repeat.v1"
@@ -174,8 +171,7 @@ def short_input_wait(event, text, values):
     if not settings["group_wakeup_enabled"]:
         return 0
     compact = "".join(text.replace("[提及机器人]", "").split())
-    if (not 1 <= len(compact) <= 2 or compact[-1] in "?？。.!！~～…"
-            or COMPLETE_SHORT.fullmatch(compact)):
+    if not 1 <= len(compact) <= 2 or compact[-1] in "?？。.!！~～…":
         return 0
     # All admitted fragments may need a follow-up; participation stays with the role.
     return settings["group_wakeup_short_text_wait_ms"] / 1000

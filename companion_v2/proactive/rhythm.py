@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 
 from companion_v2.execution.models import digest, stamp
 
-from .configuration import INTENSITY_PRESETS, hour_activity_curve, intensity_preset
+from .configuration import CURVE_CEILING, CURVE_FLOOR, INTENSITY_PRESETS, hour_activity_curve, intensity_preset
 
 
 # An unclaimed burst slot is gone, exactly like an unclaimed ordinary slot: the
@@ -28,6 +28,7 @@ SLOT_WINDOW = timedelta(minutes=5)
 # Only role-share candidates (activity and journal sharing) answer to the share
 # probability; reminders, alerts and weather keep their own event authorization.
 SHARE_PURPOSES = frozenset({"life", "creation"})
+BURST_ORIGIN_PURPOSES = frozenset({"chat", "life", "creation", "affection", "care", "play", "followup"})
 
 
 def sample(parts):
@@ -115,7 +116,7 @@ class ContactRhythm:
     body_chars = staticmethod(body_chars)
 
     # ---- hourly activity curve ------------------------------------------
-    def hour_allows(self, context, preferences, opened_at, *, observed_at=None):
+    def hour_allows(self, context, preferences, opened_at, *, observed_at=None, curve=None):
         """Voluntary opportunity weighting by the relationship's local hour.
 
         The curve is opt-in: an unconfigured deployment keeps the exact slot grid
@@ -127,7 +128,10 @@ class ContactRhythm:
         """
         if not preferences.values["proactive_hour_activity_enabled"]:
             return True
-        weights = hour_activity_curve(preferences.values["proactive_hour_activity_curve"])
+        if isinstance(curve, (tuple, list)) and len(curve) == 24:
+            weights = tuple(max(CURVE_FLOOR, min(CURVE_CEILING, float(value))) for value in curve)
+        else:
+            weights = hour_activity_curve(preferences.values["proactive_hour_activity_curve"])
         zone = ZoneInfo(preferences.values["quiet_timezone"])
         weight = weights[(observed_at or opened_at).astimezone(zone).hour]
         share = min(1.0, weight / max(weights))
@@ -136,15 +140,21 @@ class ContactRhythm:
     # ---- burst rounds ----------------------------------------------------
     def last_contact(self, context):
         """The newest sealed contact of this window with its recorded purpose."""
-        row = self.runtime.read_one("""SELECT contact_id, created_at, record_json FROM proactive_contacts
-            WHERE origin_key = ? ORDER BY created_at DESC, contact_id DESC LIMIT 1""", (context.key,))
+        row = self.runtime.read_one("""SELECT c.contact_id, c.created_at, c.record_json,
+                (SELECT MAX(d.delivered_at) FROM background_deliveries d
+                 WHERE d.owner = 'proactive.contact' AND d.state = 'delivered'
+                   AND json_extract(d.request_json, '$.source_ref') = c.contact_id) AS delivered_at
+            FROM proactive_contacts c
+            WHERE c.origin_key = ? ORDER BY c.created_at DESC, c.contact_id DESC LIMIT 1""", (context.key,))
         if row is None:
             return None
         try:
             purpose = json.loads(row["record_json"]).get("purpose")
         except (TypeError, ValueError):
             return None
+        reference_at = datetime.fromisoformat(row["delivered_at"] or row["created_at"])
         return {"contact_id": row["contact_id"], "created_at": datetime.fromisoformat(row["created_at"]),
+                "delivered_at": reference_at,
                 "purpose": purpose if isinstance(purpose, str) else ""}
 
     @staticmethod
@@ -155,8 +165,8 @@ class ContactRhythm:
         """The next message of an open burst round, bounded by the tier and the gaps.
 
         A round is a run of confirmed voluntary contacts after the last accepted
-        input. It only continues from a voluntary ``chat`` contact, so reminders,
-        alerts, greetings and shares never drag a burst behind them, and it never
+        input. It continues from a conversational or share contact, so reminders,
+        alerts and scheduled greetings never drag a burst behind them, and it never
         stacks behind an unresolved delivery: an unconfirmed message ends the round
         instead of adding another one.
         """
@@ -166,10 +176,11 @@ class ContactRhythm:
             return None
         if interaction and interaction.get("unresolved_contacts"):
             return None
-        if last_contact is None or last_contact["purpose"] != "chat":
+        if last_contact is None or last_contact["purpose"] not in BURST_ORIGIN_PURPOSES:
             return None
         gap = self.burst_gap(context, preferences, last_contact["contact_id"])
-        opened = last_contact["created_at"] + timedelta(seconds=gap)
+        anchor_at = last_contact.get("delivered_at") or last_contact["created_at"]
+        opened = anchor_at + timedelta(seconds=gap)
         expires = opened + min(timedelta(seconds=gap), SLOT_WINDOW)
         if at < opened or at >= expires:
             return None
@@ -198,21 +209,30 @@ class ContactRhythm:
             return False
         if interaction and interaction.get("unresolved_contacts"):
             return False
-        row = self.runtime.read_one("""SELECT contact_id, created_at, record_json FROM proactive_contacts
-            WHERE contact_id = ? AND origin_key = ?""", (marker["origin_contact_id"], context.key))
+        row = self.runtime.read_one("""SELECT c.contact_id, c.created_at, c.record_json,
+                (SELECT MAX(d.delivered_at) FROM background_deliveries d
+                 WHERE d.owner = 'proactive.contact' AND d.state = 'delivered'
+                   AND json_extract(d.request_json, '$.source_ref') = c.contact_id) AS delivered_at
+            FROM proactive_contacts c
+            WHERE c.contact_id = ? AND c.origin_key = ?""", (marker["origin_contact_id"], context.key))
         if row is None:
             return False
         try:
             purpose = json.loads(row["record_json"]).get("purpose")
         except (TypeError, ValueError):
             return False
-        if purpose != "chat":
+        if purpose not in BURST_ORIGIN_PURPOSES:
             return False
         gap = self.burst_gap(context, preferences, row["contact_id"])
-        opened = datetime.fromisoformat(row["created_at"]) + timedelta(seconds=gap)
-        expires = opened + min(timedelta(seconds=gap), SLOT_WINDOW)
-        return (gap == marker["gap_seconds"] and stamp(opened) == marker["opened_at"]
-                and stamp(expires) == marker["expires_at"] and opened <= at < expires)
+        if gap != marker["gap_seconds"]:
+            return False
+        for base_iso in {row["delivered_at"] or row["created_at"], row["created_at"]}:
+            opened = datetime.fromisoformat(base_iso) + timedelta(seconds=gap)
+            expires = opened + min(timedelta(seconds=gap), SLOT_WINDOW)
+            if (stamp(opened) == marker["opened_at"]
+                    and stamp(expires) == marker["expires_at"] and opened <= at < expires):
+                return True
+        return False
 
     # ---- closing silence -------------------------------------------------
     def closing_hold(self, preferences, at, *, interaction, last_contact):

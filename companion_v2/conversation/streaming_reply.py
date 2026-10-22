@@ -255,7 +255,7 @@ async def send_stream_part(delivery, runner, run, part_id, settings):
     if previous is not None:
         if previous["state"] != "delivered":
             raise TaskError("message_previous_unconfirmed", "stream stops before any unconfirmed delivery is repeated")
-        gap = part_gap_seconds(settings, previous["text"], f"{part['batch_id']}:{part_id}")
+        gap = part_gap_seconds(settings, part["text"] or previous["text"], f"{part['batch_id']}:{part_id}")
         due = max(due, datetime.fromisoformat(previous["delivered_at"]) + timedelta(seconds=gap))
     if due >= run.task.spec.deadline_at:
         raise TaskError("conversation_delivery_deadline", "stream spacing exceeds the original deadline")

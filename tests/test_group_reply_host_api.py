@@ -26,7 +26,7 @@ from tests.test_group_participation import command
 from tests.staging_bootstrap_support import wait_for_batch
 
 
-PREFIX = "/astrbot_plugin_private_companion_v2"
+PREFIX = "/astrbot_plugin_private_companion"
 
 
 class GroupReplyHostAPITests(GroupFixture, unittest.IsolatedAsyncioTestCase):

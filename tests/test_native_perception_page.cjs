@@ -36,7 +36,7 @@ function harness() {
   const requests = [];
   const window = {
     CompanionProduct: {hosted:() => true, scopeKey:() => "role-1",
-      role:() => ({perception_native_api:"/astrbot_plugin_private_companion_v2/perception-native"}),
+      role:() => ({perception_native_api:"/astrbot_plugin_private_companion/perception-native"}),
       /* 页面取桥先问 bridgeNow()，没有再 await bridgeFor()。 */
       bridgeNow:() => window.AstrBotPluginPage,
       bridgeFor:() => ({then:resolve => resolve(window.AstrBotPluginPage)})},

@@ -5,7 +5,7 @@ const fs=require('node:fs');
 const vm=require('node:vm');
 const path=require('node:path');
 const source=fs.readFileSync(path.join(__dirname,'..','pages','陪伴小屋','behavior-page.js'),'utf8');
-const api='/astrbot_plugin_private_companion_v2/host/targets/first/roles/role-a/config';
+const api='/astrbot_plugin_private_companion/host/targets/first/roles/role-a/config';
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 function fixture({failure=false,late=false}={}){
   let enabled=true,resolveGet;

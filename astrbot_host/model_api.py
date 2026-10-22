@@ -36,7 +36,7 @@ from .voice import _read_audio
 from .fish_audio import MODEL_OPTIONS as FISH_AUDIO_MODEL_OPTIONS
 
 
-PREFIX = "/astrbot_plugin_private_companion_v2/model"
+PREFIX = "/astrbot_plugin_private_companion/model"
 VOICE_FIELDS = {"zh": "voice_zh_provider_id", "ja": "voice_ja_provider_id", "en": "voice_en_provider_id"}
 VOICE_CHANGES = frozenset((*VOICE_FIELDS.values(), "voice_timeout_seconds"))
 LANGUAGES = {"zh": "中文", "ja": "日语", "en": "英语"}
@@ -285,6 +285,64 @@ def _document_optional(raw, required, optional=(), *, limit=32000):
     return data
 
 
+# 生图 provider 的字段声明。AstrBot 的 CONFIG_METADATA_2.provider_group 只覆盖
+# TTS/ASR，生图没有对应元数据，所以这里自己声明一组，供页面按 provider 类型渲染，
+# 不再让用户填自由文本。
+# kind: text | integer | boolean | select | textarea
+# 注意：超时不在这里声明——它由后端自己的配置（NativeClient.config）读取，
+# 写进生图参数只会被服务端忽略，宁可不在页面上给假控件。
+IMAGE_PROVIDER_GROUP = {
+    "comfyui": {
+        "label": "ComfyUI",
+        "fields": {
+            "endpoint": {"kind": "text", "group": "connection", "label": "服务地址",
+                         "help": "ComfyUI 的 HTTP 地址，例如 http://127.0.0.1:8188"},
+            "workflow": {"kind": "textarea", "group": "workflow", "label": "工作流 JSON",
+                         "help": "导出 API 格式的工作流；留空则使用内置模板"},
+            "steps": {"kind": "integer", "group": "sampling", "label": "采样步数",
+                      "default": 24, "min": 1, "max": 150},
+        },
+    },
+    "sd_webui": {
+        "label": "SD WebUI",
+        "fields": {
+            # Connection fields are edited from the same saved connection object above;
+            # only declare values that NativeTransportBackend accepts as request parameters.
+            "sampler_name": {"kind": "text", "group": "sampling", "storage": "parameters", "label": "采样器"},
+            "steps": {"kind": "integer", "group": "sampling", "storage": "parameters", "label": "采样步数",
+                      "default": 28, "min": 1, "max": 150},
+            "cfg_scale": {"kind": "number", "group": "sampling", "storage": "parameters", "label": "CFG",
+                          "default": 7, "min": 1, "max": 30, "step": 0.1},
+            "width": {"kind": "integer", "group": "sampling", "storage": "parameters", "label": "宽度",
+                      "default": 768, "min": 64, "max": 8192, "step": 64},
+            "height": {"kind": "integer", "group": "sampling", "storage": "parameters", "label": "高度",
+                       "default": 768, "min": 64, "max": 8192, "step": 64},
+            "batch_size": {"kind": "integer", "group": "sampling", "storage": "parameters", "label": "批量数量",
+                           "default": 1, "min": 1, "max": 4},
+            "seed": {"kind": "integer", "group": "sampling", "storage": "parameters", "label": "随机种子",
+                     "default": -1, "min": -1, "max": 4294967295},
+            "denoising_strength": {"kind": "number", "group": "sampling", "storage": "parameters", "label": "重绘幅度",
+                                   "default": 0.75, "min": 0, "max": 1, "step": 0.01},
+        },
+    },
+    "openai_images": {
+        "label": "OpenAI 兼容生图",
+        "fields": {
+            "api_base": {"kind": "text", "group": "connection", "label": "接口地址"},
+            "api_key": {"kind": "text", "group": "connection", "label": "密钥引用",
+                        "help": "填写环境变量名，不写明文密钥"},
+            "model": {"kind": "text", "group": "sampling", "label": "模型"},
+            "size": {"kind": "text", "group": "sampling", "label": "尺寸", "default": "1024x1024"},
+            "quality": {"kind": "select", "group": "sampling", "label": "质量",
+                        "choices": ["standard", "hd"], "default": "standard"},
+            "max_reference_images": {"kind": "integer", "group": "sampling",
+                                     "label": "最多参考图张数", "default": 1, "min": 0, "max": 8},
+        },
+    },
+}
+
+
+
 class ModelWebAPI:
     def __init__(self, controller):
         self.controller = controller
@@ -299,6 +357,8 @@ class ModelWebAPI:
             (PREFIX + "/memory", self.memory_diagnostic, ["GET"], "Read current AstrBot process memory"),
             (PREFIX + "/balance", self.balance, ["GET"], "Read the configured upstream account balance"),
             (PREFIX + "/test/storage", self.storage_test, ["POST"], "Run read-only SQLite integrity diagnostics"),
+            (PREFIX + "/image-schema", self.image_schema, ["GET"],
+             "Read the declared image provider field groups"),
             (PREFIX + "/configure", self.configure, ["POST"], "Save one model task configuration"),
             (PREFIX + "/test", self.test, ["POST"], "Probe one registered text provider"),
             (PREFIX + "/laya", self.laya_status, ["GET"], "Read optional Laya decision model configuration"),
@@ -369,7 +429,7 @@ class ModelWebAPI:
         if type(username) is not str or not username.strip() or username.startswith("api_key:"):
             raise TaskError("dashboard_identity_required", "sign in to the AstrBot Dashboard")
         if layer not in ("role", "window"):
-            raise TaskError("model_request_invalid", "select role defaults or this private window")
+            raise TaskError("model_request_invalid", "select role defaults or this conversation window")
         if request.query and (set(request.query.keys()) != {"layer"} or request.query.get("layer") != layer
                 or callable(getattr(request.query, "getlist", None)) and len(request.query.getlist("layer")) != 1):
             raise TaskError("model_request_invalid", "model routes do not accept target overrides")
@@ -677,6 +737,20 @@ class ModelWebAPI:
                 "timeout_seconds": settings["voice_timeout_seconds"],
                 "voice_enabled": settings["voice_enabled"], "edit_token": status["edit_token"]}
 
+    async def image_schema(self):
+        """按 provider 类型返回生图字段声明（只读，不涉及凭证）。
+
+        页面用它在生图配置旁渲染“该服务支持哪些字段、默认值是什么”，
+        让用户不必靠猜键名；真正的保存仍走既有配置接口。
+        """
+        try:
+            async with self.controller._control_lock:
+                self._authorized()
+                return self._response(Outcome.success({
+                    "image_provider_group": IMAGE_PROVIDER_GROUP}))
+        except TaskError as error:
+            return self._response(Outcome.failed(error.code, str(error)))
+
     async def voice(self):
         try:
             async with self.controller._control_lock:
@@ -973,7 +1047,8 @@ class ModelWebAPI:
             templates.append(template)
             by_type[provider_type] = template
         templates.sort(key=lambda item: (item["name"].lower(), item["type"]))
-        return {"templates": templates, "by_type": by_type}
+        return {"templates": templates, "by_type": by_type,
+                "image_provider_group": IMAGE_PROVIDER_GROUP}
 
     def _tts_templates(self):
         bundle = self._tts_schema_bundle()

@@ -49,7 +49,8 @@ class HostOptionsSchemaTests(unittest.TestCase):
         self.assertTrue(schema["service_balance"]["items"]["api_key"]["invisible"])
         runtime = schema["runtime"]["items"]
         self.assertTrue(all(runtime[name]["invisible"] for name in (
-            "forward_max_forwards", "forward_max_nodes", "forward_max_depth")))
+            "forward_max_forwards", "forward_max_nodes", "forward_max_depth", "forward_parse_nested")))
+        self.assertEqual(runtime["forward_max_nodes"]["max"], 300)
 
 
 class HostOptionsWebAPITests(unittest.IsolatedAsyncioTestCase):
@@ -72,6 +73,7 @@ class HostOptionsWebAPITests(unittest.IsolatedAsyncioTestCase):
                 max_forwards=runtime.get("forward_max_forwards", 4),
                 max_nodes=runtime.get("forward_max_nodes", 32),
                 max_depth=runtime.get("forward_max_depth", 4),
+                parse_nested=runtime.get("forward_parse_nested", True),
             )
             self.controller.settings = (NS(common=NS(forward_intake=self.policy)) if self.multi_mode
                                         else NS(forward_intake=self.policy))
@@ -303,12 +305,25 @@ class HostOptionsWebAPITests(unittest.IsolatedAsyncioTestCase):
             "forward_max_forwards": 2, "forward_max_nodes": 8, "forward_max_depth": 2,
         })
         self.assertEqual(response["data"]["forward_intake"], {
-            "max_forwards": 2, "max_nodes": 8, "max_depth": 2,
+            "max_forwards": 2, "max_nodes": 8, "max_depth": 2, "parse_nested": True,
         })
         self.assertEqual(self.config["model"]["provider_id"], "fixture-provider")
         self.assertEqual(self.config["multi_host"]["targets"][0]["target_id"], "friend-1")
         self.assertEqual(self.controller.session.bridge.forward_intake, self.policy)
         self.assertEqual(self.refreshed, 1)
+
+    async def test_nested_forward_switch_persists_and_updates_the_live_bridge(self):
+        current = await self.snapshot()
+        response = await self.call("forward_intake", {
+            "edit_token": current["edit_tokens"]["forward_intake"],
+            "changes": {"max_nodes": 300, "parse_nested": False},
+        })
+
+        self.assertEqual(response["status"], "ok", response)
+        self.assertEqual(self.config["runtime"], {"forward_max_nodes": 300, "forward_parse_nested": False})
+        self.assertEqual(response["data"]["forward_intake"]["max_nodes"], 300)
+        self.assertFalse(self.controller.session.bridge.forward_intake.parse_nested)
+        self.assertEqual(self.controller.session.bridge.forward_intake.max_nodes, 300)
 
     async def test_forward_intake_limits_apply_to_a_staging_bridge(self):
         self.config["runtime"] = {"foreground_slots": 3}
@@ -328,7 +343,8 @@ class HostOptionsWebAPITests(unittest.IsolatedAsyncioTestCase):
 
     async def test_forward_intake_rejects_nonintegers_and_structural_overflow(self):
         current = await self.snapshot()
-        for changes in ({"max_forwards": 5}, {"max_nodes": True}, {"max_depth": 0}):
+        for changes in ({"max_forwards": 5}, {"max_nodes": 301}, {"max_nodes": True},
+                        {"max_depth": 0}, {"parse_nested": 1}):
             response = await self.call("forward_intake", {
                 "edit_token": current["edit_tokens"]["forward_intake"], "changes": changes,
             })

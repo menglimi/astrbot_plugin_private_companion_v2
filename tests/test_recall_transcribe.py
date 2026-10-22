@@ -45,6 +45,13 @@ class RecallTranscribeTests(HostFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_transcript_returns_the_withdrawn_text_only_when_enabled(self):
         app, context = await self.withdrawn_batch()
+        # 撤回感知默认开启：核心管理员无需先去页面找开关就能读到撤回内容。
+        self.settings(app, {"transcribe_window_minutes": 60}).unwrap()
+        default_on = RecallManagement(app, context).transcribe(self.core).unwrap()
+        self.assertEqual(default_on["state"], "ok")
+        self.assertTrue(default_on["enabled"])
+        # 关掉之后必须拒绝；边界仍然是"这一窗口的开关"。
+        self.settings(app, {"transcribe_enabled": False}).unwrap()
         self.assertEqual(RecallManagement(app, context).transcribe(self.core).failure.code,
                          "recall_transcribe_disabled")
         self.settings(app, {"transcribe_enabled": True, "transcribe_window_minutes": 60}).unwrap()

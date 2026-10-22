@@ -69,12 +69,9 @@ class GroupHostTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(HostControlError):
                 MultiHostSettings.parse(invalid)
         private = MultiHostSettings.parse(multi_config())
-        old = asdict(private)
-        old.pop("group_targets")
-        old.pop("group_delivery_mode")
-        old["common"].pop("streaming")
-        old["common"].pop("segmentation")
-        self.assertEqual(private.fingerprint, digest(old))
+        compatible = MultiHostSettings.parse(multi_config(group_delivery_mode="preview"))
+        self.assertEqual(private.group_delivery_mode, "onebot_group")
+        self.assertEqual(private.fingerprint, compatible.fingerprint)
 
     async def test_group_speakers_audience_and_mentions_retain_native_attribution(self):
         app = await self.start_host()
@@ -101,7 +98,10 @@ class GroupHostTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         app = await self.start_host()
         contexts = [(await self.accept_group(target))[0] for target in ("group-a", "group-b", "group-c")]
         self.assertEqual(len({c.scope.key for c in contexts}), 3)
-        self.native.selections["qq-main:GroupMessage:300"] = "second"
+        umo = "qq-main:GroupMessage:300"
+        conversation_id = await self.native.conversation_manager.get_curr_conversation_id(umo)
+        self.controller.session_topology.update_persona_selection_snapshot(
+            umo, "100", "bot-a", "second", "role-b", conversation_id)
         self.clock.advance(timedelta(seconds=1))
         changed, _ = await self.accept_group(identifier="changed-role")
         self.assertNotEqual(changed.scope, contexts[0].scope)
@@ -109,8 +109,8 @@ class GroupHostTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
             observed_at=self.clock.now()).failure.code, "role_binding_changed")
         self.assertTrue(app.tasks.check_context_access(contexts[1], action="conversation.reply",
             observed_at=self.clock.now()).is_success)
-        self.native.selections["qq-main:GroupMessage:200_300"] = "original"
-        self.native.selections["qq-main:GroupMessage:201_300"] = "second"
+        self.window_personas["qq-main:GroupMessage:200_300"] = "original"
+        self.window_personas["qq-main:GroupMessage:201_300"] = "second"
         first, _ = await self.accept_group(identifier="member-one", unique=True)
         second, _ = await self.accept_group(identifier="member-two", sender="201", unique=True)
         self.assertNotEqual(first.scope, second.scope)
@@ -153,9 +153,16 @@ class GroupHostTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         event.message_obj.message = [NS(type="Forward")]
         self.assertEqual((await self.controller.receive_claimed(event)).failure.code, "host_group_media_unsupported")
         self.assertEqual(database_contents(app.runtime), before)
-        self.native.selections["qq-main:GroupMessage:300"] = "unmapped"
+        umo = "qq-main:GroupMessage:300"
+        self.window_personas[umo] = None
+        self.controller.session.bridge.groups.persona_window_snapshot_lookup = lambda *_: None
+        self.controller.session.bridge.groups.persona_selection_lookup = (
+            lambda _context, current_umo, _conversation_persona:
+                self.native.selections.get(current_umo, self.native.selections[current_umo.split(":")[0]])
+        )
+        self.native.selections[umo] = "unmapped"
         self.assertEqual((await self.controller.receive_claimed(self.group_event(sender="777"))).failure.code,
-                         "host_persona_unmapped")
+                         "host_persona_window_unbound")
         self.assertEqual(database_contents(app.runtime), before)
 
     async def test_group_file_is_retained_as_an_explicit_unread_attachment(self):
@@ -205,15 +212,16 @@ class GroupHostTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
             'perception', 'important_dates'}))
         self.assertFalse(any(binding[0].scope.kind is ScopeKind.GROUP for binding in app.state_maintenance.bindings.values()))
 
-    async def test_private_authorization_never_sends_group_messages(self):
+    async def test_private_delivery_authorization_does_not_control_group_messages(self):
         self.controller = self.make_controller(group_config(delivery_mode="onebot_private"))
         await self.start_host()
         self.assertTrue((await self.controller.authorize_delivery("first")).is_success)
         self.assertEqual((await self.controller.authorize_delivery("group-a")).failure.code, "host_group_authorization_required")
         await self.accept_group()
-        self.assertEqual(self.native.platform.client._api._wsr_api.calls, [])
+        self.assertEqual([action for action, _ in self.native.platform.client._api._wsr_api.calls], ["send_group_msg"])
         await self.accepted()
-        self.assertEqual([action for action, _ in self.native.platform.client._api._wsr_api.calls], ["send_private_msg"])
+        self.assertEqual([action for action, _ in self.native.platform.client._api._wsr_api.calls],
+                         ["send_group_msg", "send_private_msg"])
 
     async def test_revoked_group_grant_is_not_restored_on_intake_or_restart(self):
         app = await self.start_host()
@@ -243,7 +251,7 @@ class GroupHostTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         with patch("astrbot_host.multi_api.request", request):
             preview = await routes[PREFIX + "/preview"]()
             self.assertTrue(preview["data"]["preview_ready"])
-            self.assertFalse(preview["data"]["sent"])
+            self.assertTrue(preview["data"]["sent"])
             request.query = Query(target_id="group-a")
             inventory = await routes[PREFIX + "/batches"]()
             self.assertEqual([item["batch_id"] for item in inventory["data"]["items"]], [batch])
@@ -259,15 +267,27 @@ class GroupHostTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.controller.claims(self.group_event()))
         preview = self.controller.preview("group-a", batch).unwrap()
         self.assertTrue(preview["preview_ready"])
-        self.assertFalse(preview["sent"])
+        self.assertTrue(preview["sent"])
         self.assertTrue((await self.controller.start()).is_success)
         self.assertEqual((await self.controller.receive_claimed(self.group_event())).unwrap(), batch)
         self.assertEqual(len(self.native.provider.client.state.calls), 1)
-        self.assertEqual(self.native.platform.client._api._wsr_api.calls, [])
+        self.assertEqual([action for action, _ in self.native.platform.client._api._wsr_api.calls], ["send_group_msg"])
 
     async def test_capture_freezes_speaker_and_checks_replaced_client_after_await(self):
         app = await self.start_host()
         event = self.group_event(sender="777")
+        umo = event.unified_msg_origin
+        self.window_personas[umo] = None
+        group_bridge = self.controller.session.bridge.groups
+        group_bridge.persona_window_snapshot_lookup = lambda *_: None
+
+        async def resolve_persona(current_umo):
+            self.native.role_lookups += 1
+            if self.native.before_resolve:
+                await self.native.before_resolve(self.native.role_lookups)
+            return self.native.selections.get(current_umo, "original")
+
+        group_bridge.session_persona_override_lookup = resolve_persona
         original_client = event.bot
         async def replace_client(_):
             self.native.platform.client = object()
@@ -309,8 +329,20 @@ class GroupHostTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
             entered.set()
             await release.wait()
         self.native.before_resolve = paused
+        event = self.group_event(sender="777")
+        self.window_personas[event.unified_msg_origin] = None
+        group_bridge = self.controller.session.bridge.groups
+        group_bridge.persona_window_snapshot_lookup = lambda *_: None
+
+        async def resolve_persona(current_umo):
+            self.native.role_lookups += 1
+            if self.native.before_resolve:
+                await self.native.before_resolve(self.native.role_lookups)
+            return self.native.selections.get(current_umo, "original")
+
+        group_bridge.session_persona_override_lookup = resolve_persona
         before = database_contents(app.runtime)
-        pending = asyncio.create_task(self.controller.receive_claimed(self.group_event(sender="777")))
+        pending = asyncio.create_task(self.controller.receive_claimed(event))
         try:
             await asyncio.wait_for(entered.wait(), 2)
             self.assertTrue((await self.controller.stop()).is_success)
@@ -350,14 +382,14 @@ class GroupHostTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         await wait_for_batch(self.controller.session, batch)
         preview = self.controller.preview("group-a", batch).unwrap()
         self.assertTrue(preview["preview_ready"])
-        self.assertFalse(preview["sent"])
+        self.assertTrue(preview["sent"])
         context = TaskContext.restore(json.loads(app.messages.batch(batch)["context_json"]))
         self.assertEqual(context.actor.principal.native_account_id, "777")
         self.assertEqual(context.scope.session_id, "777_300")
         messages = self.native.provider.client.state.calls[0][0]["messages"]
         material = json.loads(next(message["content"] for message in messages if message["role"] == "user"))
         self.assertEqual(material["materials"][0]["text"], "[提及机器人]大家好[提及全体成员]")
-        self.assertEqual(self.native.platform.client._api._wsr_api.calls, [])
+        self.assertEqual([action for action, _ in self.native.platform.client._api._wsr_api.calls], ["send_group_msg"])
 
 
 if __name__ == "__main__":

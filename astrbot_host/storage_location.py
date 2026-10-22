@@ -11,11 +11,66 @@ import sqlite3
 import tempfile
 from uuid import uuid4
 
+from companion_v2.storage.sqlite_path import readonly_uri
+
 
 PLUGIN_NAME = "astrbot_plugin_private_companion_v2"
 POINTER_NAME = ".companion-v2-storage-location.json"
 OWNER_NAME = ".companion-v2-storage-owner.json"
 _FORMAT = "companion-v2.storage-location.v1"
+# 这个产品在 7.0.0 之前一直用带 _v2 的插件名；收编成 V1 的 7.0.0 之后，
+# StarTools 会算出 V1 的数据目录，老用户的数据却还在下面这个目录里。
+LEGACY_DATA_NAMES = ("astrbot_plugin_private_companion_v2",)
+# 覆盖式更新（V2 顶替 V1 的插件身份）时，默认数据根就是 V1 的目录；
+# V2 不能把库建在 V1 用户的数据里，改用这个子目录。
+V2_SUBDIRECTORY = "companion-7"
+# V1 的数据目录特征：它把全部陪伴数据放在这几个文件里。
+_V1_MARKERS = ("companions.json", "companions.db", ".storage-backend-state.json")
+
+
+def _looks_like_data_root(path: Path) -> bool:
+    """目录里有没有本插件的数据（有 profiles、或者是带 ownership 指针的根）。"""
+    if not path.is_dir():
+        return False
+    if (path / OWNER_NAME).is_file() or (path / POINTER_NAME).is_file():
+        return True
+    if any((path / name).exists() for name in _V1_MARKERS):
+        return False
+    return (path / "profiles").is_dir()
+
+
+def _looks_like_v1_root(path: Path) -> bool:
+    """这是不是 V1 的数据目录。
+
+    覆盖式更新时 `PLUGIN_NAME` 等于 V1 的名字，StarTools 算出来的默认根正好是
+    V1 的目录。V2 绝不能把库建在那儿（那就改了 V1 用户数据），所以先认出来，
+    再换到它下面的 V2 专属子目录。
+    """
+    if not path.is_dir() or (path / OWNER_NAME).is_file() or (path / POINTER_NAME).is_file():
+        return False
+    return any((path / name).exists() for name in _V1_MARKERS)
+
+
+def resolve_data_root(default_root: Path, *, legacy_names=LEGACY_DATA_NAMES) -> Path:
+    """插件改名前后的数据根解析。
+
+    优先级：现在的默认目录（已有 V2 数据就用它）→ 同级的旧名字目录（改名后老用户
+    仍然能读到自己的库）→ V1 目录下的 V2 子目录（覆盖式更新，不写进 V1 的目录）
+    → 现在的默认目录（全新安装，交给 prepare_storage_root 去建）。两个候选都非空
+    时以现在的名字为准，避免改名后新旧目录各写一半。
+    """
+    default = Path(default_root).resolve()
+    if _looks_like_data_root(default):
+        return default
+    for name in legacy_names:
+        candidate = default.parent / name
+        if candidate == default:
+            continue
+        if _looks_like_data_root(candidate):
+            return candidate.resolve()
+    if _looks_like_v1_root(default):
+        return default / V2_SUBDIRECTORY
+    return default
 
 
 def _is_link(path: Path) -> bool:
@@ -96,7 +151,7 @@ def _runtime_root_for_installation(plugin_root: Path, installation_id: str) -> P
             continue
         connection = None
         try:
-            connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.25)
+            connection = sqlite3.connect(readonly_uri(database), uri=True, timeout=0.25)
             row = connection.execute(
                 "SELECT value FROM runtime_metadata WHERE key = 'installation_id'").fetchone()
             if row is not None and row[0] == installation_id:

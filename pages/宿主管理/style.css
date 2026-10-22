@@ -432,3 +432,13 @@ dialog::backdrop { background: rgba(25, 27, 45, .48); }
 .status-grid dd.is-updated { animation: value-pop .46s var(--ease-out) both; }
 dialog[open] { animation: rise .3s var(--ease-out) both; }
 dialog::backdrop { animation: fade .3s both; }
+
+/* Keep long role keys and session names inside the three-column topology. */
+.topology-node { box-sizing: border-box; min-width: 0; }
+.topology-node-head { min-width: 0; flex-wrap: wrap; gap: 5px 8px; }
+.topology-node-title { flex: 1 1 100%; overflow: visible; overflow-wrap: anywhere; text-overflow: clip; white-space: normal; }
+.topology-node-meta, .topology-node-detail { min-width: 0; overflow: visible; overflow-wrap: anywhere; text-overflow: clip; white-space: normal; }
+.role-binding-identity { display: grid; flex: 1 1 180px; min-width: 0; gap: 4px; }
+.role-binding-identity strong { color: var(--ink); font-size: 13px; }
+.role-binding-identity input { box-sizing: border-box; width: 100%; }
+.role-binding-identity small { color: var(--muted); font-size: 10px; }

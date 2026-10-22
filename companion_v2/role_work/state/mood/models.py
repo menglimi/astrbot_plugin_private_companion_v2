@@ -74,13 +74,21 @@ def baseline_of(mood, dynamics):
     return stored if type(stored) is int and MINIMUM <= stored <= MAXIMUM else DEFAULT_BASELINE
 
 
+def resting_target(axis, baseline):
+    """Joy relaxes toward the personal baseline; distress axes relax toward MINIMUM (1)."""
+    return float(baseline) if POLARITY[axis] > 0 else float(MINIMUM)
+
+
 def decayed(previous, baseline, at, half_life_minutes):
-    """Exponential regression toward the baseline; no axis ever leaves its range."""
+    """Exponential regression toward each axis's resting target; no axis ever leaves its range."""
     if previous is None:
-        return {name: float(baseline) for name in AXES}
+        return {name: resting_target(name, baseline) for name in AXES}
     minutes = max((at - previous["updated_at"]).total_seconds() / 60.0, 0.0)
     remaining = 0.5 ** (minutes / half_life_minutes)
-    return {name: round(previous[name] + (baseline - previous[name]) * (1 - remaining), 3) for name in AXES}
+    return {
+        name: round(previous[name] + (resting_target(name, baseline) - previous[name]) * (1 - remaining), 3)
+        for name in AXES
+    }
 
 
 def drift(previous, interest_level, max_delta):
@@ -90,8 +98,8 @@ def drift(previous, interest_level, max_delta):
     opposite direction. Weights are fixed and the step is capped, so one message can
     never swing an axis from one extreme to the other.
     """
-    values = axes(previous) or {name: float(DEFAULT_BASELINE) for name in AXES}
     baseline = previous["baseline"] if previous and "baseline" in previous else DEFAULT_BASELINE
+    values = axes(previous) or {name: resting_target(name, baseline) for name in AXES}
     level = max(int(interest_level or 0), 0)
     magnitude = min(level if level else 1, max_delta)
     shift = 1 if level else -1
@@ -103,9 +111,9 @@ def bounds(previous, *, at, half_life_minutes, max_delta):
     """Per-axis relaxation reference and the one window an observation may land in.
 
     Relaxation is never capped: an axis may always move toward, reach, or cross its
-    baseline, because that is what a half-life means. Acceleration is capped: beyond
+    resting target, because that is what a half-life means. Acceleration is capped: beyond
     the relaxed value an axis may move only one bounded step, and never away from the
-    baseline past it. That asymmetry is what keeps a single message from swinging an
+    resting target past it. That asymmetry is what keeps a single message from swinging an
     extreme, while still letting a strong episode fade within one round.
     """
     baseline = previous["baseline"] if previous and "baseline" in previous else DEFAULT_BASELINE
@@ -114,9 +122,10 @@ def bounds(previous, *, at, half_life_minutes, max_delta):
         return {"reference": reference, "allowed": {name: [MINIMUM, MAXIMUM] for name in AXES}}
     allowed = {}
     for name in AXES:
+        target = resting_target(name, baseline)
         relaxed = reference[name]
-        low = min(relaxed - max_delta, baseline + max_delta)
-        high = max(relaxed + max_delta, baseline - max_delta)
+        low = min(relaxed - max_delta, target + max_delta)
+        high = max(relaxed + max_delta, target - max_delta)
         allowed[name] = [round(max(low, MINIMUM), 3), round(min(high, MAXIMUM), 3)]
     return {"reference": reference, "allowed": allowed}
 

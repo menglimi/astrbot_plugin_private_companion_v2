@@ -41,7 +41,7 @@ except (ImportError, OSError, RuntimeError) as exc:
     _MIHOME_IMPORT_ERROR = str(exc)
 else:
     _MIHOME_IMPORT_ERROR = ''
-PLUGIN_NAME = 'astrbot_plugin_private_companion_v2.reality'
+PLUGIN_NAME = 'astrbot_plugin_private_companion.reality'
 PLUGIN_VERSION = PRODUCT_VERSION
 PAGE_API_PREFIX = f'/{PLUGIN_NAME}/page'
 MANAGED_PAGE_MESSAGE = '现实触及是 V2 内置能力，请在“陪伴小屋”继续操作。'
@@ -223,6 +223,44 @@ class RealityExtensionAPI:
 
     def mobile_context(self, user_id: str='') -> dict[str, Any]:
         return self._plugin.mobile_context(user_id)
+
+    def wakeup_snapshot(self, user_id: str='') -> dict[str, Any]:
+        """Return only the wake session state; never message bodies or feedback text."""
+        user = self._plugin._user(user_id, create=False)
+        if not isinstance(user, dict):
+            return {}
+        alarm = user.get('wakeup_alarm')
+        alarm = alarm if isinstance(alarm, dict) else {}
+        session = alarm.get('contact_session')
+        session = session if isinstance(session, dict) else {}
+        safe = {}
+        for key in ('id', 'status', 'attempt', 'max_attempts', 'triggered_at',
+                    'feedback_at', 'completed_at', 'next_attempt_at'):
+            value = session.get(key)
+            if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+                safe[key] = value
+        return {'enabled': bool(alarm.get('enabled')),
+                'time': _single_line(alarm.get('time'), 8),
+                'contact_session': safe}
+
+    def wakeup_snapshot(self, user_id: str='') -> dict[str, Any]:
+        """Return only the wake session state; never message bodies or feedback text."""
+        user = self._plugin._user(user_id, create=False)
+        if not isinstance(user, dict):
+            return {}
+        alarm = user.get('wakeup_alarm')
+        alarm = alarm if isinstance(alarm, dict) else {}
+        session = alarm.get('contact_session')
+        session = session if isinstance(session, dict) else {}
+        safe = {}
+        for key in ('id', 'status', 'attempt', 'max_attempts', 'triggered_at',
+                    'feedback_at', 'completed_at', 'next_attempt_at'):
+            value = session.get(key)
+            if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+                safe[key] = value
+        return {'enabled': bool(alarm.get('enabled')),
+                'time': _single_line(alarm.get('time'), 8),
+                'contact_session': safe}
 
     def snapshot_owner(self, host_api: Any) -> Any:
         """Bind the native RV-1 owner to the current trusted host authority."""

@@ -25,6 +25,7 @@ from companion_v2.identity_policy.models import AuthorizationTier, GrantState
 from companion_v2.proactive.management import GRANT_PREFIX as PROACTIVE_GRANT_PREFIX
 from companion_v2.proactive.configuration import GROUP as CONTACT_GROUP
 from companion_v2.expression.configuration import read_settings as expression_read_settings
+from companion_v2.foundation.outcome import Outcome
 from companion_v2.role_work.growth.configuration import skill_settings
 from companion_v2.role_profile.configuration import FIELD_LIMITS
 from companion_v2.screen.configuration import (ScreenSettings, ScreenConfigurationOwner,
@@ -100,7 +101,7 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         handlers, first, _ = await self.routes()
         try:
             status = (await call(handlers[first]))["data"]["sections"]
-            installation_route = "/astrbot_plugin_private_companion_v2/config"
+            installation_route = "/astrbot_plugin_private_companion/config"
             installation_status = (await call(handlers[installation_route]))["data"]["sections"]
             self.assertEqual(set(installation_status), {"budget", "proactive.contact", "reaction"})
             self.assertTrue({"budget", "proactive.contact", "reaction"}.isdisjoint(status))
@@ -115,6 +116,7 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
                                  # 于是 assertEqual 把"多了一个真分区"报成失败——这正是本会话
                                  # 反复出现的模式：新增能力却不更新按字面枚举的名单。
                                  "qzone",
+                                 "relay",
                                  "relationship_profile",
                                  "role_profile", "screen", "wardrobe", "proactive.contact"}
             expected_sections.add("image.output")
@@ -159,7 +161,7 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(status["quota"]["settings"]["private_owner_max_daily"], -1)
             self.assertEqual(status["reaction"]["settings"]["candidate_limit"], 6)
             self.assertFalse(status["budget"]["settings"]["enable_daily_token_soft_limit"])
-            self.assertFalse(status["recall"]["settings"]["transcribe_enabled"])
+            self.assertTrue(status["recall"]["settings"]["transcribe_enabled"])
             self.assertFalse(status["screen"]["settings"]["interpretation_enabled"])
             self.assertTrue(status["person"]["settings"]["acquaintance_enabled"])
             # 群聊参与：V1 的默认行为——跟读默认开、主动插话默认关。
@@ -207,9 +209,48 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         finally:
             self.controller.unregister_routes()
 
+    async def test_multi_section_status_isolates_failed_sections(self):
+        handlers, first, _ = await self.routes()
+        api = handlers[first].__self__
+
+        class RejectedSection:
+            def __init__(self, app, context):
+                pass
+
+            def status(self, operator):
+                return Outcome.failed("synthetic_section_unavailable", "private detail")
+
+        class BrokenSection:
+            def __init__(self, app, context):
+                pass
+
+            def status(self, operator):
+                raise RuntimeError("simulated corrupt section data")
+
+        try:
+            with patch.dict(api.sections, {"quota": RejectedSection, "image_review": BrokenSection}):
+                with self.assertLogs("astrbot_host.configuration_api", level="ERROR") as captured:
+                    result = await call(handlers[first], query={"sections": "quota,image_review,person"})
+                single = await call(handlers[first], query={"sections": "quota"})
+
+            self.assertEqual(result["status"], "ok", result)
+            self.assertEqual(result["data"]["section_errors"]["quota"]["code"],
+                             "synthetic_section_unavailable")
+            self.assertEqual(result["data"]["section_errors"]["image_review"]["code"],
+                             "configuration_section_read_failed")
+            self.assertNotIn("private detail", str(result["data"]))
+            self.assertIn("person", result["data"]["sections"])
+            self.assertNotIn("quota", result["data"]["sections"])
+            self.assertNotIn("image_review", result["data"]["sections"])
+            self.assertTrue(any("section=image_review" in line for line in captured.output))
+            self.assertEqual(single["status"], "error", single)
+            self.assertEqual(single["data"]["code"], "synthetic_section_unavailable")
+        finally:
+            self.controller.unregister_routes()
+
     async def test_global_contact_and_role_learning_settings_use_distinct_targets(self):
         handlers, first, second = await self.routes()
-        global_route = "/astrbot_plugin_private_companion_v2/config"
+        global_route = "/astrbot_plugin_private_companion/config"
         try:
             self.assertIn(global_route, handlers)
             status = await call(handlers[global_route], query={"sections": "proactive.contact"})
@@ -258,7 +299,7 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_reaction_retrieval_settings_are_shared_across_windows(self):
         handlers, first, second = await self.routes()
-        global_route = "/astrbot_plugin_private_companion_v2/config"
+        global_route = "/astrbot_plugin_private_companion/config"
         try:
             denied = await call(handlers[first], query={"sections": "reaction"})
             self.assertEqual(denied["data"]["code"], "configuration_request_invalid")
@@ -382,7 +423,7 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         from companion_v2.model_gateway.budget import GROUP, SOFT_FIELDS, effective_soft
 
         handlers, first, second = await self.routes()
-        global_route = "/astrbot_plugin_private_companion_v2/config"
+        global_route = "/astrbot_plugin_private_companion/config"
         try:
             denied = await call(handlers[first], query={"sections": "budget"})
             self.assertEqual(denied["data"]["code"], "configuration_request_invalid")
@@ -473,15 +514,16 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_the_contact_section_uses_one_window_daily_contact_quota(self):
         handlers, first, _ = await self.routes()
-        global_route = "/astrbot_plugin_private_companion_v2/config"
+        global_route = "/astrbot_plugin_private_companion/config"
         try:
             contact = (await call(handlers[global_route], query={"sections": "proactive.contact"}))[
                 "data"]["sections"]["proactive.contact"]
             self.assertEqual(contact["group_id"], "proactive.contact")
             self.assertEqual(contact["scope"], "installation")
             self.assertEqual(contact["layers"], ["installation"])
-            self.assertEqual(len(contact["settings"]), 160)
-            self.assertEqual(len(contact["provenance"]), 160)
+            self.assertEqual(set(contact["settings"]), set(contact["provenance"]))
+            self.assertTrue({"enabled", "interval_seconds", "quiet_timezone", "max_contacts_24h"}
+                            .issubset(contact["settings"]))
             self.assertFalse(contact["settings"]["enabled"])
             self.assertEqual(contact["settings"]["interval_seconds"], 3600)
             self.assertEqual(contact["settings"]["quiet_timezone"], "Asia/Shanghai")
@@ -521,7 +563,7 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         from astrbot_host.configuration_api import ConfigurationWebAPI
 
         handlers, first, _ = await self.routes()
-        global_route = "/astrbot_plugin_private_companion_v2/config"
+        global_route = "/astrbot_plugin_private_companion/config"
         try:
             initial = (await call(handlers[global_route], query={"sections": "proactive.contact"}))
             contact = initial["data"]["sections"]["proactive.contact"]
@@ -549,7 +591,7 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_contact_global_switch_saves_without_changing_any_participant_grant(self):
         handlers, first, _ = await self.routes()
-        global_route = "/astrbot_plugin_private_companion_v2/config"
+        global_route = "/astrbot_plugin_private_companion/config"
         try:
             identity = self.controller.session.application.tasks.identity
             contact = (await call(handlers[global_route], query={"sections": CONTACT_GROUP}))[
@@ -586,7 +628,7 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.controller = self.make_controller(config)
         await self.start_host()
 
-        global_route = "/astrbot_plugin_private_companion_v2/config"
+        global_route = "/astrbot_plugin_private_companion/config"
 
         def registered_paths():
             self.controller.register_routes()
@@ -632,7 +674,7 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_contact_replayed_global_save_never_reauthorizes_a_revoked_participant(self):
         handlers, first, _ = await self.routes()
-        global_route = "/astrbot_plugin_private_companion_v2/config"
+        global_route = "/astrbot_plugin_private_companion/config"
         try:
             app = self.controller.session.application
             context = self.controller.authority.context("first", "role-a")
@@ -668,7 +710,7 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_contact_switch_does_not_override_an_explicit_person_revocation(self):
         handlers, first, _ = await self.routes()
-        global_route = "/astrbot_plugin_private_companion_v2/config"
+        global_route = "/astrbot_plugin_private_companion/config"
         try:
             contact = (await call(handlers[global_route], query={"sections": CONTACT_GROUP}))[
                 "data"]["sections"][CONTACT_GROUP]
@@ -768,7 +810,7 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_window_and_role_configuration_editors_use_runtime_targets(self):
         handlers, first, _ = await self.routes()
-        global_route = "/astrbot_plugin_private_companion_v2/config"
+        global_route = "/astrbot_plugin_private_companion/config"
         try:
             screen = (await call(handlers[first], query={"sections": "screen"}))[
                 "data"]["sections"]["screen"]
@@ -896,7 +938,7 @@ class ConfigurationWebAPITests(MultiFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_requests_and_unknown_fields_are_refused(self):
         handlers, first, _ = await self.routes()
-        global_route = "/astrbot_plugin_private_companion_v2/config"
+        global_route = "/astrbot_plugin_private_companion/config"
         try:
             status = (await call(handlers[global_route]))["data"]["sections"]
             token = status["reaction"]["edit_token"]
@@ -942,8 +984,8 @@ class SingleHostConfigurationTests(unittest.IsolatedAsyncioTestCase):
         (await controller.authorize_delivery()).unwrap()
         controller.register_routes()
         routes = {route for route, _, _, _ in native.registered_web_apis}
-        self.assertIn("/astrbot_plugin_private_companion_v2/config", routes)
-        self.assertIn("/astrbot_plugin_private_companion_v2/config/configure", routes)
+        self.assertIn("/astrbot_plugin_private_companion/config", routes)
+        self.assertIn("/astrbot_plugin_private_companion/config/configure", routes)
         controller.unregister_routes()
         self.assertEqual(native.registered_web_apis, [])
 

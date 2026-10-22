@@ -11,6 +11,7 @@ import json
 
 from companion_v2.conversation.foreground import ContextContribution, ContributionState
 from companion_v2.execution.models import TaskError, encode, require, stamp
+from companion_v2.foundation.refs import ScopeKind
 from companion_v2.memory.models import text
 from .access import OWNER, card_id, owner_for_subject, owner_key, resolve_subject
 from .models import KIND, MAX_GROUP_CARDS, aggregate, bind_route, clean_name, count_input, display_name, empty_document
@@ -158,6 +159,24 @@ class PersonAcquaintance:
                                   budget=self.settings.read(context)["person.acquaintance_card_chars"])
         return ContextContribution("person-speaker-card", OWNER, "current_person_card",
                                    ContributionState.READY, encode(payload))
+
+    def private_contact(self, context, at):
+        """True when this group speaker also has a private context with the role.
+
+        This is a boolean identity link only.  Private text, private timing and
+        the relationship memory itself stay outside the group audience.
+        """
+        if context.scope.kind is not ScopeKind.GROUP or not self.available(context):
+            return False
+        try:
+            self.check(context, at=at)
+        except TaskError:
+            return False
+        row = self.row(owner_key(context))
+        if row is None or row["state"] != "active":
+            return False
+        document = json.loads(row["document_json"])
+        return bool(document.get("contexts", {}).get("private"))
 
     # -- model tool ----------------------------------------------------------
 

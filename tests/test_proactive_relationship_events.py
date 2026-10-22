@@ -294,6 +294,33 @@ class FollowupContactEventTests(ContactScheduleFixture, unittest.IsolatedAsyncio
         self.assertIsNone(app.contact_schedule._plan(self._latest_row(app, context), self.clock.now()))
 
 
+    async def test_recent_followup_receipt_blocks_a_second_followup_during_cooldown(self):
+        _host, app, context, _batch = await self._start_with_delivered_contact()
+        self.clock.advance(timedelta(minutes=10))
+        operation_id = "followup-cooldown-marker-operation"
+        operation = OperationRepository(app.runtime).reserve(OperationRef(
+            operation_id, "proactive.contact", context.scope, VersionRef(operation_id, 1), operation_id),
+            parameter_hash="followup-cooldown-marker", observed_at=self.clock.now()).unwrap()
+        with app.runtime.transaction() as connection:
+            connection.execute("""INSERT INTO proactive_contacts(contact_id, task_id, origin_key, record_json, body,
+                payload_hash, operation_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                ("followup-cooldown-marker", "followup-cooldown-marker-task", context.key,
+                 json.dumps({"purpose": "followup"}), "marker", "marker-hash",
+                 operation.operation.operation_id, self.clock.now().isoformat()))
+
+        self.clock.advance(timedelta(minutes=10))
+        self.assertIsNone(app.contact_schedule._plan(self._latest_row(app, context), self.clock.now()))
+
+    async def test_a_new_user_input_supersedes_an_unanswered_followup(self):
+        host, app, context, _batch = await self._start_with_delivered_contact()
+        self.clock.advance(timedelta(minutes=9))
+        batch = host.receive(self.event("followup-new-input", text="我回来继续聊了。")).unwrap()
+        await self.done(app, batch)
+        self.clock.advance(timedelta(minutes=1))
+        self.assertIsNone(app.contact_schedule._plan(self._latest_row(app, context), self.clock.now()))
+        self.assertEqual(len(self.contacts(app)), 1)
+
+
 class OpenLoopContactEventTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCase):
     def _latest_row(self, app, context):
         return app.runtime.read_one("""SELECT f.sequence, b.* FROM conversation_flows f
@@ -328,28 +355,33 @@ class OpenLoopContactEventTests(ContactScheduleFixture, unittest.IsolatedAsyncio
         self.assertIn("open_loop_event", plan[4])
         self.assertEqual(plan[1].expires_at, memo.expires_at)
 
-    async def test_recent_followup_receipt_blocks_a_second_followup_during_cooldown(self):
-        _host, app, context, _batch = await self._start_with_delivered_contact()
-        self.clock.advance(timedelta(minutes=10))
-        operation_id = "followup-cooldown-marker-operation"
-        operation = OperationRepository(app.runtime).reserve(OperationRef(
-            operation_id, "proactive.contact", context.scope, VersionRef(operation_id, 1), operation_id),
-            parameter_hash="followup-cooldown-marker", observed_at=self.clock.now()).unwrap()
-        with app.runtime.transaction() as connection:
-            connection.execute("""INSERT INTO proactive_contacts(contact_id, task_id, origin_key, record_json, body,
-                payload_hash, operation_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                ("followup-cooldown-marker", "followup-cooldown-marker-task", context.key,
-                 json.dumps({"purpose": "followup"}), "marker", "marker-hash",
-                 operation.operation.operation_id, self.clock.now().isoformat()))
-
-        self.clock.advance(timedelta(minutes=10))
-        self.assertIsNone(app.contact_schedule._plan(self._latest_row(app, context), self.clock.now()))
-
-    async def test_a_new_user_input_supersedes_an_unanswered_followup(self):
-        host, app, context, _batch = await self._start_with_delivered_contact()
-        self.clock.advance(timedelta(minutes=9))
-        batch = host.receive(self.event("followup-new-input", text="我回来继续聊了。")).unwrap()
+    async def test_skipped_open_loop_releases_followup_claim_for_later_revision(self):
+        host = await self.start(self.host(policy=ConversationPolicy(0, 0, 180, 0)))
+        app = host.application
+        app.contact_schedule.advance = lambda: None
+        self.settings(app, {"enabled": True, "automatic_enabled": True, "idle_seconds": 60,
+            "chat.enabled": False, "contact_followup_after_minutes": 10}).unwrap()
+        for capability in ("memo.create", "memo.list", "memo.read"):
+            self.grant(self.important, self.contact_context().scope, capability)
+        context = self.contact_context()
+        target = AgendaTarget(context.scope, context.role_binding.role, context.actor.subject)
+        memo_id = "skip-release-open-loop"
+        app.agenda.create_memo(context.actor, target=target, memo_id=memo_id, title="周末去书店",
+            body="看看那本画集", purpose="open_loop", operation=self.operation(target.scope, owner="agenda"),
+            expected_role_revision=context.role_binding.revision, observed_at=self.clock.now()).unwrap()
+        batch = host.receive(self.event("open-loop-skip-origin", text="先忙会儿")).unwrap()
         await self.done(app, batch)
-        self.clock.advance(timedelta(minutes=1))
-        self.assertIsNone(app.contact_schedule._plan(self._latest_row(app, context), self.clock.now()))
-        self.assertEqual(len(self.contacts(app)), 1)
+        with app.runtime.transaction() as connection:
+            connection.execute("DELETE FROM agenda_open_loop_activity WHERE memo_id = ?", (memo_id,))
+
+        async def skip(_envelope):
+            return answered('{"decision":"skip","text":"","skip_reason":"no_natural_opening"}')
+        self.model_behavior = skip
+        self.clock.advance(timedelta(minutes=10))
+        plan = app.contact_schedule._plan(self._latest_row(app, context), self.clock.now())
+        self.assertIsNotNone(plan)
+        result = await app.contact_schedule._run(plan)
+        self.assertTrue(result.is_success, getattr(result, "failure", None))
+        memo = app.agenda.read_memo(context.actor, target=target, memo_id=memo_id,
+            observed_at=self.clock.now()).unwrap()
+        self.assertEqual(memo.followup_count, 0)

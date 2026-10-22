@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from astrbot_host.laya_client import LayaDecisionClient
+from companion_v2.decision.prompt import intervention_question, render_intervention_state
 from companion_v2.decision.service import LayaDecisionService
 from companion_v2.decision.store import LayaSettingsStore
 from companion_v2.storage.runtime import StorageRuntime
@@ -25,6 +26,10 @@ class InterventionLayaTests(unittest.TestCase):
         client._post = post
         choice = asyncio.run(client.classify_intervention({
             "scope_kind": "private", "user_text": "你最近太累了，早点休息吧。",
+            "conversation": [
+                {"speaker": "user", "text": "你最近太累了，早点休息吧。", "at": "2026-10-18T10:00:00+08:00"},
+                {"speaker": "assistant", "text": "那我去躺一会儿。", "at": "2026-10-18T10:00:02+08:00"},
+            ],
             "allowed_domains": ["state"], "resting": False, "rest_wake_allowed": False,
         }))
 
@@ -32,6 +37,30 @@ class InterventionLayaTests(unittest.TestCase):
         self.assertEqual(set(captured["questions"]), {"intervention_need"})
         self.assertEqual(set(captured["questions"]["intervention_need"]["criteria"]), {"none", "state"})
         self.assertIn("你最近太累了", captured["state"])
+        self.assertIn("那我去躺一会儿", captured["state"])
+        instructions = captured["questions"]["intervention_need"]["instructions"]
+        self.assertIn("后台复核路由", instructions)
+        self.assertIn("不要求出现特定词句", instructions)
+        self.assertIn("下游维护者", instructions)
+        self.assertNotIn("建议、邀请和假设", instructions)
+
+    def test_classifier_routes_for_review_instead_of_declaring_a_change(self):
+        question = intervention_question({"allowed_domains": ["state", "calendar"]})["intervention_need"]
+
+        self.assertIn("both", question["criteria"])
+        self.assertIn("值得复核", question["criteria"]["both"])
+        self.assertIn("不代表两者最终都会发生变化", question["criteria"]["both"])
+        self.assertIn("没有新的、尚未反映", question["criteria"]["none"])
+
+    def test_intervention_state_marks_missing_role_reply_without_inventing_one(self):
+        state = json.loads(render_intervention_state({
+            "scope_kind": "private", "user_text": "你早点休息吧。",
+            "conversation": [{"speaker": "user", "text": "你早点休息吧。"}],
+            "allowed_domains": ["state"],
+        }))
+        facts = state["facts"]
+        self.assertFalse(facts["assistant_reply_returned"])
+        self.assertEqual(facts["conversation"], [{"speaker": "user", "at": "", "text": "你早点休息吧。"}])
 
     def test_intervention_diagnostics_do_not_store_message_or_model_response_bodies(self):
         with TemporaryDirectory(prefix="companion-v2-intervention-laya-") as directory:

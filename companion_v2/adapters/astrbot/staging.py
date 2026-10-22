@@ -49,11 +49,13 @@ from companion_v2.screen.interpretation import screen_interpretation_profile
 from companion_v2.conversation.media.image_narration import image_narration_profile
 from companion_v2.conversation.media.video.narration import video_narration_profile
 from companion_v2.conversation.media.understanding import intake_settings as file_intake_settings
+from companion_v2.conversation.relay_settings import configuration_fields as relay_configuration_fields
 from .presence import OneBotPresencePort
 from companion_v2.storage.models import OperationState
 from companion_v2.storage.repositories import OperationRepository
 
 from .application import AstrBotCompanionHost
+from .tools import CompositeAstrBotToolPort
 from .native import HostAccount, HostPersona, NativePrivateBridge, account_number, check_version, persona_instruction
 from .provider import AstrBotTextProvider, UsageTariff, provider_fingerprint
 from .provider_catalog import TextProviderSettings, assemble_providers, loaded_routing
@@ -218,7 +220,8 @@ class AstrBotStagingSession:
                  native_tool_port=None, now=None, voice=None, voice_policy=None, weather_port=None,
                  weather_alert_port=None, balance_port=None, news_port=None, solar_term_port=None, qzone_transport=None, additional_providers=(), fallback_provider_id="", replacement_rules="[]",
                  fallback_on_refusal=False, review_only=False, profile_field_shapes=None,
-                 bootstrap_receipt_validated=False, default_provider_resolver=None):
+                 bootstrap_receipt_validated=False, default_provider_resolver=None,
+                 relay_tool_port_factory=None):
         if runtime.installation_id != profile.target.scope.installation_id:
             raise ValueError("staging storage and target must have the same installation")
         self.runtime, self.profile, self.native_types = runtime, profile, native_types
@@ -292,7 +295,11 @@ class AstrBotStagingSession:
                     screen_interpretation_profile(profile.provider_id), *narration_profiles,
                     *native_video_profiles) + self.writing_profiles + (self.reading_profile,) + authoring_profiles(
                         profile.provider_id, draft_tokens=profile.max_output_tokens)
-        registry = FieldRegistry(version="astrbot-staging.v1", fields=configuration_fields(profiles))
+        registry_fields = configuration_fields(profiles)
+        registry_ids = {item.field_id for item in registry_fields}
+        registry_fields += tuple(field for field in relay_configuration_fields()
+                                 if field.field_id not in registry_ids)
+        registry = FieldRegistry(version="astrbot-staging.v1", fields=registry_fields)
         self.sender_binding = ProviderBinding("message.delivery", "astrbot-staging.onebot_private",
             native_types.version, digest([target.key, profile.persona, "onebot_private"]))
         if self._uses_local_sender:
@@ -304,13 +311,17 @@ class AstrBotStagingSession:
                 voice_delivery=VoiceReplyDelivery(runtime, now) if voice is not None else None,
                 reaction_image_format=lambda: self.application.semantics.store.settings()["reactions_image_format"]
                     if self.application.semantics is not None else "image").local_sender()
+        tool_port = native_tool_port
+        if relay_tool_port_factory is not None:
+            relay_port = relay_tool_port_factory(self.bridge)
+            tool_port = CompositeAstrBotToolPort(native_tool_port, relay_port)
         self.host = AstrBotCompanionHost(runtime, event_port=self.bridge.ports, identity_port=self.bridge.ports,
             role_port=self.bridge.ports, runtime_identity=profile.runtime_identity, registry=registry,
             profiles=profiles, providers=tuple(model.local_provider() for model in self.models), budget=profile.budget,
             budget_soft=profile.budget_soft,
             default_provider_resolver=default_provider_resolver,
             sender=sender, policy=profile.policy, limits=profile.limits, now=now,
-            tool_port=native_tool_port, segmentation=profile.segmentation, voice_policy=voice_policy,
+            tool_port=tool_port, segmentation=profile.segmentation, voice_policy=voice_policy,
             # 记忆归属读的是别家插件自己公开的声明；适配层的这一个函数是唯一的跨插件
             # 读取点（核心不能反向导入宿主包，见 companion_v2/capabilities/ownership.py）。
             # 写入端口与它共用同一条发现路径和同一个 context：日记、梦境与主动消息

@@ -1,4 +1,9 @@
-.rail{width:158px;padding:var(--sp-5) var(--sp-3) var(--sp-4);align-items:stretch}
+/* 左栏宽度由 shell.css 的栅格列决定（--shell-rail: 220px）。
+   这里曾写 width:158px，而栅格列仍是 220px：栅格项的宽度一旦确定，
+   justify-self:stretch 就退化成 start，于是 >1120px 时左栏只涂 158px，
+   右侧留一条 62px 的画布色竖条（1440px 下实测 158 vs 220）。
+   宽度交还给栅格，这里只保留内边距与对齐。 */
+.rail{padding:var(--sp-5) var(--sp-3) var(--sp-4);align-items:stretch}
 .brand{margin-bottom:var(--sp-3)}
 .rail-links{flex:1;min-height:0;overflow-y:auto;gap:1px;scrollbar-width:thin;scrollbar-color:#cbd2de transparent}
 .nav-group{display:grid;gap:2px;padding:var(--sp-1) 0 var(--sp-2);border-bottom:1px solid #e5e9f1}
@@ -9,8 +14,10 @@
 .rail-link svg{width:17px;height:17px;flex:none}
 .rail-bottom{padding-top:var(--sp-2);gap:var(--sp-1)}
 .shell{margin-left:calc(var(--sp-6) + var(--sp-8) + var(--sp-8) + var(--sp-5))}
-.mobile-nav{display:none}
-.navigation-dialog{position:fixed;inset:auto 12px 84px;z-index:40;width:min(460px,calc(100% - 24px));max-height:min(74vh,690px);margin:0 auto;padding:0;border:1px solid #dce4ed;border-radius:var(--r-sm);background:#f8fafc;color:#354253;box-shadow:0 16px 48px #283b5360;overflow:auto}
+/* 手机上左栏是顶部横条（shell.css 的 ≤760 规则），不是 76px 贴底栏。
+   这里原先把浮层抬到 bottom:84px 给底栏让位，于是手机上「全部功能」
+   无故悬空 84px；改成贴底的常规间距。 */
+.navigation-dialog{position:fixed;inset:auto 12px var(--sp-4);z-index:40;width:min(460px,calc(100% - 24px));max-height:min(74vh,690px);margin:0 auto;padding:0;border:1px solid #dce4ed;border-radius:var(--r-sm);background:#f8fafc;color:#354253;box-shadow:0 16px 48px #283b5360;overflow:auto}
 .navigation-dialog::backdrop{background:#1c2d4070}
 .navigation-dialog-head{position:sticky;top:0;z-index:1;display:flex;align-items:center;justify-content:space-between;padding:var(--sp-3) var(--sp-4);background:#f8fafcf2;border-bottom:1px solid #e0e6ee}
 .navigation-dialog-head h1{font-size:var(--fs-head);line-height:1.4;font-weight:600}
@@ -25,14 +32,8 @@
 .rail-link:focus-visible,.mobile-nav-link:focus-visible,.navigation-link:focus-visible{outline:2px solid #5c78a5;outline-offset:2px}
 /* 配置页外壳已迁到 console.css（.console / .console-section / .boundary）。
    原有的 .config-page / .config-jump / .config-section* / .config-provider-* 已无引用，删除。 */
+/* 手机断点统一到 760（外壳栅格的实际切换点）。此前这里是 650，
+   于是 651–760 区间两套手机布局都不生效：外壳已经按窄屏排，
+   左栏却还是 220px 的竖栏。真正的手机导航是 shell.js 的 #shellNav，
+   这里的 .mobile-nav / #mainNav 在 DOM 里从来不存在，已删除。 */
 @media(min-width:1740px){.shell{margin-left:auto}}
-@media(max-width:650px){
-  .rail{top:auto;bottom:0;left:0;right:0;width:100%;height:76px;padding:var(--sp-1) var(--sp-2) calc(var(--sp-1) + env(safe-area-inset-bottom));align-items:center}
-  #mainNav{display:none}
-  .mobile-nav{display:flex;width:100%;height:100%;gap:2px;justify-content:space-between}
-  .mobile-nav-link{display:flex;flex:1;min-width:0;min-height:52px;align-items:center;justify-content:center;flex-direction:column;gap:var(--sp-1);padding:var(--sp-1) 2px;border-radius:var(--r-xs);font-size:var(--fs-micro);line-height:1.2;color:#72788b;text-align:center}
-  .mobile-nav-link svg{width:18px;height:18px;flex:none}
-  .mobile-nav-link.active{background:#e8ebf9;color:#5864a7;font-weight:600}
-  .mobile-nav-link span{white-space:nowrap}
-  .shell{margin-left:0}
-}

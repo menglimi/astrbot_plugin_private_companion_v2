@@ -28,12 +28,7 @@ TERMINAL_UNAVAILABLE = frozenset({"source_revoked", "source_expired",
     "source_dependency_unavailable", "source_dependency_expired",
     "journal_unavailable", "journal_dependency_changed", "memory_evidence_forgotten"})
 PROMPT = (
-    "根据执行端已完成的活动或日记保存回执，判断当前已确认的成长目标是否有值得审阅的进展。"
-    "只能依据提供的回执和目标，不能把计划、时间经过、用户自述、日记或梦境正文当成实际完成事实。"
-    "日记回执只证明保存过主观文字；不能据此声称其中事件真实发生。"
-    "不要编造经验值、能力等级或现实世界的成绩。写简洁、审慎的定性进展说明，保留不确定性。"
-    "只输出 JSON 对象，精确包含 growth_id 和 progress_note 两个字段。"
-    "如果没有目标匹配回执，两个字段都用 null；有匹配时用原目标 ID 和非空进展说明。"
+    "根据执行端已完成的活动或日记保存回执，判断当前已确认的成长目标是否有值得审阅的进展。只能依据提供的回执和目标，不把计划、时间经过、用户自述、日记或梦境正文当成实际完成事实；日记回执只证明保存过主观文字，不据此声称其中事件真实发生。不编造经验值、能力等级或现实世界的成绩，用贴合角色口吻的简洁、审慎定性笔触写清进展说明（如某处细节摸索出的手感、比之前顺手的地方或仍待琢磨的生疏处），避免写成生硬的行政验收报告并保留不确定性。只输出 JSON 对象，精确包含 growth_id 和 progress_note 两个字段：若无目标匹配回执则均用 null，有匹配时用原目标 ID 和非空进展说明。"
 )
 
 

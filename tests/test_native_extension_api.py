@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace as NS
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from tests import test_astrbot_staging_host as support
 from astrbot.api.web import PluginRequest, bind_request_context
@@ -100,10 +100,67 @@ class NativeExtensionAPITests(unittest.IsolatedAsyncioTestCase):
                 "action": "consent_camera", "payload": {"user_id": user_id, "confirmed": confirmed}})
             self.assertEqual(result["status"], "ok", result)
             self.assertEqual(service._reality_touch_camera_consented(service._user(user_id)), confirmed)
+            rows = result["data"]["management"]["users"]
+            camera = next(row["camera"] for row in rows if row["user_id"] == user_id)
+            self.assertEqual(camera["consented"], confirmed)
+            self.assertEqual(camera["enabled"], confirmed)
         refused = await self.call(PREFIX + "/action", body={"extension_id": "reality",
             "action": "consent_camera", "payload": {"user_id": "999", "confirmed": True}})
         self.assertEqual(refused["status"], "error")
+        self.assertEqual(refused["message"], "camera_user_ineligible",
+                         "the real Dashboard bridge forwards only message on rejection")
         self.assertIsNone(service._user("999", create=False))
+
+    async def test_camera_only_user_policy_survives_snapshot_refresh_and_disk_reload(self):
+        service = await self.enable("reality")
+        service.authorized_user_ids.add("200")
+        granted = await self.call(PREFIX + "/action", body={"extension_id": "reality",
+            "action": "consent_camera", "payload": {"user_id": "200", "confirmed": True}})
+        self.assertEqual(granted["status"], "ok", granted)
+        user = service._load_data()["users"]["200"]
+        for field in ("umo", "reality_touch_consent", "reality_touch_policy", "wakeup_alarm"):
+            self.assertFalse(user.get(field), field)
+        saved = await self.call(PREFIX + "/action", body={"extension_id": "reality",
+            "action": "update_camera_policy", "payload": {"user_id": "200",
+                "camera_enabled": True, "proactive_mode": "auto", "proactive_max_daily": -1}})
+        self.assertEqual(saved["status"], "ok", saved)
+        service.data = service._load_data()
+        refreshed = await self.call()
+        rows = refreshed["data"]["extensions"]["reality"]["management"]["users"]
+        camera = next(row["camera"] for row in rows if row["user_id"] == "200")
+        self.assertTrue(camera["consented"])
+        self.assertTrue(camera["enabled"])
+        self.assertEqual(camera["proactive_mode"], "auto")
+        self.assertEqual(camera["proactive_max_daily"], -1)
+
+    async def test_camera_policy_errors_keep_codes_through_message_only_bridge(self):
+        service = await self.enable("reality")
+        service.authorized_user_ids.add("200")
+        command = {"extension_id": "reality", "action": "update_camera_policy",
+                   "payload": {"user_id": "200", "camera_enabled": True}}
+        missing = await self.call(PREFIX + "/action", body=command)
+        self.assertEqual(missing["message"], "camera_user_not_configured")
+        service._user("200")
+        refused = await self.call(PREFIX + "/action", body=command)
+        self.assertEqual(refused["message"], "camera_consent_required")
+        self.assertEqual(refused["data"]["code"], refused["message"])
+        self.assertFalse(service._reality_touch_camera_consented(service._user("200")))
+
+    async def test_missing_mihome_is_unavailable_and_camera_consent_still_succeeds(self):
+        service = await self.enable("reality")
+        service.authorized_user_ids.add("200")
+        with patch.object(service, "_mihome_api", return_value=None):
+            status = await self.call()
+            mi = status["data"]["extensions"]["reality"]["management"]["mihome"]
+            self.assertIs(mi["available"], False)
+            self.assertTrue(mi["reason"])
+            login = await self.call(PREFIX + "/action", body={"extension_id": "reality",
+                "action": "mihome_start_login", "payload": {}})
+            self.assertEqual(login["message"], "native_mihome_unavailable")
+            consent = await self.call(PREFIX + "/action", body={"extension_id": "reality",
+                "action": "consent_camera", "payload": {"user_id": "200", "confirmed": True}})
+            self.assertEqual(consent["status"], "ok", consent)
+            self.assertTrue(consent["data"]["management"]["users"][0]["camera"]["consented"])
 
     async def test_camera_page_test_returns_only_an_ephemeral_preview(self):
         service = await self.enable("reality")
@@ -175,6 +232,36 @@ class NativeExtensionAPITests(unittest.IsolatedAsyncioTestCase):
             "action": "select_audio", "payload": {
                 "device_id": "sd:unknown-device", "playback_volume": 24}})
         self.assertEqual(unknown["status"], "error")
+
+    async def test_management_errors_keep_codes_for_message_only_dashboard_bridge(self):
+        from astrbot_host.perception_api import PREFIX as perception_prefix
+        from astrbot_host.integration_api import PREFIX as integration_prefix
+
+        for path in (perception_prefix, integration_prefix + "/integration/manifest"):
+            for username in (None, "", "api_key:synthetic"):
+                denied = await self.call(path, username=username)
+                self.assertEqual(denied["message"], "dashboard_identity_required")
+                self.assertEqual(denied["data"]["code"], denied["message"])
+                self.assertTrue(denied["reason"])
+        invalid = await self.call(perception_prefix, body={"provider": "reality"})
+        self.assertEqual(invalid["message"], "perception_request_invalid")
+        invalid = await self.call(integration_prefix + "/integration/manifest", query="unexpected=1")
+        self.assertEqual(invalid["message"], "integration_request_invalid")
+
+    async def test_reminder_only_and_pending_consent_users_survive_snapshot_and_reload(self):
+        service = await self.enable("reality")
+        service.data["users"]["201"] = {"reality_touch_reminders": {"fixture-reminder": {
+            "id": "fixture-reminder", "status": "scheduled", "topic": "合成提醒"}}}
+        service.data["users"]["202"] = {"reality_touch_pending_consent": {
+            "capability": "local_audio", "expires_at": 1}}
+        service._save_data_sync()
+        service.data = service._load_data()
+        result = await self.call()
+        users = {row["user_id"]: row for row in result["data"]["extensions"]["reality"]["management"]["users"]}
+        self.assertIn("201", users)
+        self.assertIn("202", users)
+        self.assertEqual(users["201"]["custom_reminders"][0]["id"], "fixture-reminder")
+        self.assertFalse(users["202"]["consent"]["confirmed"])
 
     async def test_failed_reminder_cancel_does_not_report_completion(self):
         service = await self.enable("reality")

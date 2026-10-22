@@ -53,7 +53,8 @@ class PrivateCoreReplyAdmissionTests(MultiFixture, unittest.IsolatedAsyncioTestC
     async def test_role_change_between_admission_and_send_is_rejected(self):
         event = self.event(identifier="core-reply-role-change")
         prepared = (await self.controller.prepare_core_reply(event)).unwrap()
-        self.window_personas[event.unified_msg_origin] = "second"
+        self.controller.session_topology.update_persona_selection_snapshot(
+            event.unified_msg_origin, "100", "bot-a", "second", "role-b", "conversation-a")
 
         authorized = await self.controller.authorize_core_reply(event, prepared)
 
@@ -256,6 +257,48 @@ class PrivateCoreReplyAdmissionTests(MultiFixture, unittest.IsolatedAsyncioTestC
         prepared = (await self.controller.prepare_core_reply(
             self.event(identifier="core-drama-direction"))).unwrap()
         self.assertEqual(prepared["voice_provider_instruction"], DRAMA_DIRECTION)
+
+    async def test_untriggered_voice_configuration_still_reaches_model_perception(self):
+        from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
+        from astrbot_host.core_reply_perception import inject_core_reply_perception_context
+        from companion_v2.conversation.reply_settings import (
+            GROUP, ReplyConfigurationOwner, target_for, voice_settings,
+        )
+        from companion_v2.conversation.voice_reply import VoiceReplyPolicy
+        from tests.test_core_reply_perception import perception_payload
+
+        seed = (await self.controller.prepare_core_reply(self.event(identifier="voice-perception-seed"))).unwrap()
+        policy = VoiceReplyPolicy(trigger_mode="request", generation_mode="model_tag", language="ja",
+                                  ja_provider_id="fish-ja", foreign_text_mode="translation")
+        owner = ReplyConfigurationOwner(self.app.runtime)
+        target = target_for(seed["context"])
+        fields = self.app.configuration.registry.group(GROUP)
+        current = owner.read(target, fields)
+        owner.write(target, fields,
+                    changes={GROUP + "." + key: value for key, value in voice_settings(policy).items()},
+                    reset=(), expected_revision=current.revision, observed_at=self.clock.now())
+        voice = NS(provider_config={"id": "fish-ja", "type": "fishaudio_tts_api", "model": "drama-3"},
+                   get_audio=AsyncMock())
+        self.native.get_provider_by_id = lambda key: voice if key == "fish-ja" else self.native.provider
+        self.native.get_all_tts_providers = lambda: [voice]
+        event = self.event(identifier="core-untriggered-voice", text="现在用的Drama 3是什么？")
+
+        prepared = (await self.controller.prepare_core_reply(event)).unwrap()
+        self.assertIsNone(prepared["voice_reply_policy"])
+        self.assertEqual(prepared["configured_voice_reply_policy"], policy)
+        self.assertEqual(prepared["voice_provider_instruction"], "")
+        event.set_extra(CORE_REPLY_CONTEXT_EXTRA, {"prepared": prepared})
+        request = NS(extra_user_content_parts=[])
+        await inject_core_reply_perception_context(event, request, native_context=self.native)
+        route = perception_payload(request)["environment"]["tts_route"]
+        self.assertEqual(route["status"], "available")
+        self.assertEqual(route["provider_id"], "fish-ja")
+        self.assertEqual(route["model"], "drama-3")
+        self.assertEqual(route["language"], "ja")
+        self.assertTrue(route["companion_voice_enabled"])
+        self.assertFalse(route["companion_voice_active_this_turn"])
+        self.assertTrue(route["drama_3_directions"])
+        voice.get_audio.assert_not_awaited()
 
     async def test_effective_task_prompt_is_used_without_resolving_model_route(self):
         group = self.app.router.profiles["conversation.reply"].group

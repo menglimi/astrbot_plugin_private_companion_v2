@@ -41,6 +41,23 @@ class CoreGroupSegmentationTests(unittest.IsolatedAsyncioTestCase):
         prepare_core_reply_streaming_boundary(event)
         return event
 
+    async def test_concurrent_group_turns_skip_inter_segment_sleep_to_prevent_interleaving(self):
+        from unittest.mock import AsyncMock, patch
+        from astrbot_host.core_reply_tracking import CORE_REPLY_TRACKING_EXTRA
+
+        event = self.prepare(channel="group")
+        core = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
+        core["_reply_segmentation"]["settings"]["part_gap_ms"] = 800
+        admission = NS(has_concurrent_or_newer_core_turn=lambda ctx, eid: True)
+        event.set_extra(CORE_REPLY_TRACKING_EXTRA, {
+            "admission": admission, "context": object(), "event_id": "segmented-event",
+        })
+        activate_core_reply_delivery_guard(event)
+        with patch("astrbot_host.core_reply_segmentation.asyncio.sleep", new_callable=AsyncMock) as sleep_mock:
+            await event.send(MessageChain(chain=[Plain(FIRST + SECOND)]))
+            sleep_mock.assert_not_awaited()
+        self.assertEqual([args[0].get_plain_text() for args, _ in event.sent], [FIRST, SECOND])
+
     async def test_final_group_reply_is_split_and_checks_each_actual_send(self):
         checks = []
 

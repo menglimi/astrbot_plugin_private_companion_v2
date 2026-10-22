@@ -56,9 +56,13 @@ DECLARATION = re.compile(r"--([a-z0-9-]+)\s*:")
 HARDCODED_BASELINE = {
     "styles.css": 274,          # 外壳 + 未迁移旧页面的共用样式，最大一块，留到最后
     "product-page.css": 22,
-    "navigation.css": 20,
+    "navigation.css": 17,       # 死掉的 .mobile-nav/#mainNav 分支删除后从 20 降到 17
     "shell.css": 2,
     "contact-page.css": 1,
+    # 缓存分析图的数据序列色（绿/青/紫/金四色）。它们是图表数据编码，
+    # 不是界面色：换主题时数据序列必须保持同一套颜色，否则同一张图
+    # 在不同主题下会读成不同的东西。这是明确保留的例外，不是待还的债。
+    "maintenance-page.css": 8,
 }
 
 # tokens.css 本身是色值的唯一来源，不参与第 4 条。
@@ -72,7 +76,6 @@ SNAPSHOT_FILES = {
     "shell-preview.html",
     "theme-preview.html",
     "v2-surface-preview.html",
-    "_exp-no-home.html",   # 手工实验产物，无生成器；已知过期，见 README
 }
 
 HEX = re.compile(r"#[0-9a-fA-F]{3,8}\b")

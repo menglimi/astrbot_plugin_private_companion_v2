@@ -668,7 +668,7 @@ class RealityHostGlueTests(unittest.IsolatedAsyncioTestCase):
     async def test_shared_host_exposes_native_settings_and_unregisters_them(self):
         registered = self.native.registered_web_apis
         self.controller.web_api.register()
-        expected = {"/astrbot_plugin_private_companion_v2/extensions" + suffix
+        expected = {"/astrbot_plugin_private_companion/extensions" + suffix
                     for suffix in ("", "/configure", "/action")}
         self.assertTrue(expected <= {entry[0] for entry in registered})
         await self.controller.terminate()

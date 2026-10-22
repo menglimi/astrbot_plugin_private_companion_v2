@@ -78,7 +78,7 @@ class MemoryContext:
             snapshot["core_ids"] = [item["atom_id"] for item in core]
             snapshot["core_omitted"] = omitted
             # The habit profile is read again when the prompt is built; only this
-            # turn's own question about eating is sealed here. Read-only, so it
+            # turn's availability is sealed here. Read-only, so it
             # stays valid inside the sealing transaction.
             snapshot["habits"] = habit_capture(self.memory, context, "\n".join(current_text))
         except TaskError as error:
@@ -403,10 +403,9 @@ class MemoryContext:
             materials.append(ContextContribution("memory:" + record["atom_id"], "memory", "current_memory",
                 ContributionState.READY, payload))
         # One more bounded private material on the existing contribution channel:
-        # evidence-backed habits, and the recorded eating preferences when this
-        # turn actually asks what to eat. Additive only.
-        habit = habit_contribution(self.memory, context,
-                                   meal_query=bool((snapshot.get("habits") or {}).get("meal_query")))
+        # repeated original utterances; the reply model interprets their meaning
+        # against the current input rather than a keyword-derived question flag.
+        habit = habit_contribution(self.memory, context)
         if habit is not None:
             materials.append(habit)
         if core_omitted:

@@ -23,13 +23,13 @@ addEventListener('message',async event=>{
   if(event.source!==frame.contentWindow||m.channel!=='astrbot-plugin-page')return;
   const send=v=>frame.contentWindow.postMessage({channel:'astrbot-plugin-page',...v},location.origin);
   if(m.kind==='ready'){
-    send({kind:'context',context:{pluginName:'astrbot_plugin_private_companion_v2',pageName:'宿主管理'}});return;
+    send({kind:'context',context:{pluginName:'astrbot_plugin_private_companion',pageName:'宿主管理'}});return;
   }
   if(m.kind!=='request')return;
   try {
     if(!['api:get','api:post'].includes(m.action)||!/^(staging|host)\\/[a-z-]+$/.test(m.endpoint))
       throw new Error('Unexpected fixture bridge request');
-    const url=new URL('/api/plug/astrbot_plugin_private_companion_v2/'+m.endpoint,location.origin);
+    const url=new URL('/api/plug/astrbot_plugin_private_companion/'+m.endpoint,location.origin);
     for(const [key,value] of Object.entries(m.params||{}))url.searchParams.set(key,value);
     const response=await fetch(url,{method:m.action==='api:get'?'GET':'POST',
       headers:{'Content-Type':'application/json'},...(m.action==='api:post'?{body:JSON.stringify(m.body||{})}:{})});

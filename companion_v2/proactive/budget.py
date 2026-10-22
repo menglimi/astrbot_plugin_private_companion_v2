@@ -102,22 +102,43 @@ class ContactBudget:
                 AND COALESCE(json_extract(c.record_json, '$.administrator_test'), 0) = 0
                 AND d.delivered_at >= ?""",
             (day_start, recent_start, context.key, now, min(day_start, recent_start)))
-        latest = self.runtime.read_one("""SELECT d.delivered_at FROM proactive_contacts c
+        latest = self.runtime.read_one("""SELECT d.delivered_at, json_extract(c.record_json, '$.purpose') AS purpose
+            FROM proactive_contacts c
             JOIN background_deliveries d ON json_extract(d.request_json, '$.source_ref') = c.contact_id
             WHERE c.origin_key = ? AND d.owner = 'proactive.contact' AND d.state = 'delivered'
                 AND d.delivered_at <= ?
                 AND COALESCE(json_extract(c.record_json, '$.administrator_test'), 0) = 0
             ORDER BY d.delivered_at DESC LIMIT 1""", (context.key, now))
         elapsed = None
+        last_purpose = None
         if latest is not None:
             elapsed = max(0, int((normalize_utc(at, field="contact rhythm time")
                                   - datetime.fromisoformat(latest[0]).astimezone(timezone.utc)
                                   ).total_seconds() // 60))
-        return {"local_time": local_at.strftime("%H:%M"),
-                "delivered_today": row["delivered_today"],
-                "daily_maximum": preferences.values["max_contacts_24h"],
-                "delivered_last_4_hours": row["delivered_recently"],
-                "minutes_since_last_delivery": elapsed}
+            if isinstance(latest["purpose"], str) and latest["purpose"]:
+                last_purpose = latest["purpose"]
+        recent_purposes_rows = self.runtime.read_all("""SELECT json_extract(c.record_json, '$.purpose') AS purpose
+            FROM proactive_contacts c
+            JOIN background_deliveries d ON json_extract(d.request_json, '$.source_ref') = c.contact_id
+            WHERE c.origin_key = ? AND d.owner = 'proactive.contact' AND d.state = 'delivered'
+                AND d.delivered_at >= ? AND d.delivered_at <= ?
+                AND COALESCE(json_extract(c.record_json, '$.administrator_test'), 0) = 0
+            ORDER BY d.delivered_at DESC LIMIT 6""", (context.key, day_start, now))
+        recent_purposes = []
+        for item in recent_purposes_rows:
+            purpose = item["purpose"]
+            if isinstance(purpose, str) and purpose and purpose not in recent_purposes:
+                recent_purposes.append(purpose)
+        snapshot = {"local_time": local_at.strftime("%H:%M"),
+                    "delivered_today": row["delivered_today"],
+                    "daily_maximum": preferences.values["max_contacts_24h"],
+                    "delivered_last_4_hours": row["delivered_recently"],
+                    "minutes_since_last_delivery": elapsed}
+        if last_purpose is not None:
+            snapshot["last_delivered_purpose"] = last_purpose
+        if recent_purposes:
+            snapshot["recent_purposes_today"] = recent_purposes
+        return snapshot
 
     def model_usage(self, context, preferences, at):
         """Provider usage for this local day; local Laya decisions have no monetary ledger."""

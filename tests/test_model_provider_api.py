@@ -150,7 +150,7 @@ class ProviderRouteTests(unittest.IsolatedAsyncioTestCase):
         return providers
 
     async def call(self, route, *, payload=None, username="admin", query=None):
-        prefix = "C:/Users/99505/.astrbot/data/plugins/astrbot_plugin_private_companion_v2/astrbot_host.model_api"
+        prefix = "C:/Users/99505/.astrbot/data/plugins/astrbot_plugin_private_companion/astrbot_host.model_api"
         import astrbot_host.model_api as model_api
         request = Request({"type": "http", "method": "POST" if payload is not None else "GET",
                            "path": route, "headers": [], "query_string": b""})
@@ -217,6 +217,20 @@ class ProviderRouteTests(unittest.IsolatedAsyncioTestCase):
                 result = await self.call(PREFIX, query=query)
                 self.assertEqual(result["message"], "model_request_invalid", result)
 
+    async def test_image_provider_schema_exposes_editable_sd_sampling_fields(self):
+        (await self.controller.initialize_profile()).unwrap()
+        result = await self.call(PREFIX + "/image-schema")
+
+        self.assertEqual(result["status"], "ok", result)
+        fields = result["data"]["image_provider_group"]["sd_webui"]["fields"]
+        self.assertEqual(fields["steps"]["kind"], "integer")
+        self.assertEqual(fields["steps"]["storage"], "parameters")
+        self.assertEqual(fields["cfg_scale"]["kind"], "number")
+        self.assertEqual(fields["cfg_scale"]["group"], "sampling")
+        self.assertIn("denoising_strength", fields)
+        self.assertNotIn("endpoint", fields)
+        self.assertNotIn("model", fields)
+
     async def test_staging_reopen_prepares_legacy_reaction_settings_before_read_only_assembly(self):
         from dataclasses import replace
         from companion_v2.configuration.models import ConfigLayer, ConfigTarget
@@ -280,7 +294,7 @@ class ProviderRouteTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_tts_provider_roundtrip_masks_secrets(self):
         (await self.controller.initialize_profile()).unwrap()
-        prefix = "C:/Users/99505/.astrbot/data/plugins/astrbot_plugin_private_companion_v2/astrbot_host.model_api"
+        prefix = "C:/Users/99505/.astrbot/data/plugins/astrbot_plugin_private_companion/astrbot_host.model_api"
         import astrbot_host.model_api as model_api
         listed = await self.call(model_api.PREFIX + "/tts/providers")
         item = listed["data"]["items"][0]
@@ -523,7 +537,7 @@ class ProviderRouteTests(unittest.IsolatedAsyncioTestCase):
         registry = NS(
             image_enabled={"image.generate": True, "image.edit": True, "image.mask_edit": True},
             declarations=lambda: (), status=lambda _extension: {"state": "unavailable", "error_code": "native_extension_unavailable"},
-            issues=(("astrbot_plugin_private_companion_v2.image", "native_configuration_invalid"),),
+            issues=(("astrbot_plugin_private_companion.image", "native_configuration_invalid"),),
         )
         with patch.object(self.controller, "native_extensions", registry):
             response = await self.call(PREFIX + "/image")

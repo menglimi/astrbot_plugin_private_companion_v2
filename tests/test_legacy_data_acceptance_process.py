@@ -95,11 +95,24 @@ class LegacyDataAcceptanceProcessTests(unittest.IsolatedAsyncioTestCase):
             "791": _group([str(account_offset + 304), str(account_offset + 305)],
                           [(str(account_offset + 304), str(account_offset + 305))]),
         }
-        _write_json(root / "companions.json", _profile(f"{target_label}-主角色", primary_groups,
-            diary_date="2025-04-01", dream_date="2025-04-02"))
-        _write_json(root / "persona_profiles" / "companion-b.json",
-            _profile(f"{target_label}-次人格", secondary_groups, diary_date="2025-04-01",
-                     dream_date="2025-04-02"))
+        for index, (filename, label, groups) in enumerate((
+                ("companions.json", f"{target_label}-主角色", primary_groups),
+                ("persona_profiles/companion-b.json", f"{target_label}-次人格", secondary_groups))):
+            profile = _profile(label, groups, diary_date="2025-04-01", dream_date="2025-04-02")
+            photo = f"photo_reference_images/{index}-identity.png"
+            outfit = f"photo_reference_images/{index}-outfit.png"
+            for path, kind in ((photo, "identity"), (outfit, "outfit")):
+                color = tuple(hashlib.sha256((label + kind).encode("utf-8")).digest()[:3])
+                destination = root / path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(_png(color))
+            profile["persona_settings"] = {
+                "photo_reference_catalog": [{"id": "identity", "source": photo,
+                    "reference_roles": ["identity", "style"]}],
+                "wardrobe_items": [{"id": "outfit", "name": label + "围巾",
+                    "description": label + "合成穿搭", "tags": ["winter", "test"],
+                    "path": outfit}]}
+            _write_json(root / filename, profile)
 
         image_directory = root / "reaction_expression_library" / "images"
         image_directory.mkdir(parents=True)
@@ -147,6 +160,10 @@ class LegacyDataAcceptanceProcessTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(migration["journals_expected"], 8)
             self.assertEqual(migration["journals_created"], 8)
             self.assertEqual(migration["journals_remaining"], 0)
+            self.assertEqual(migration["reference_images_created"], 8)
+            self.assertEqual(migration["wardrobe_items_created"], 4)
+            self.assertEqual(migration["persisted_after_restart"]["reference_payloads"], 8)
+            self.assertEqual(migration["persisted_after_restart"]["wardrobe_items"], 4)
             self.assertEqual(migration["persisted_after_restart"]["personas_verified"], 4)
             self.assertEqual(migration["persisted_after_restart"]["targets_verified"], 2)
             self.assertEqual(set(migration["archives_verified_by_target"]), {"first", "second"})

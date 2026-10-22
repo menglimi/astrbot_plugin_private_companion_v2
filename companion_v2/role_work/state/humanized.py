@@ -111,6 +111,15 @@ def _condition_texts(simulation, limit):
     return result
 
 
+def _mood_text(value):
+    if isinstance(value, str):
+        return " ".join(value.split())[:120]
+    if isinstance(value, dict):
+        desc = " ".join(str(value.get("description") or "").split())[:120]
+        return desc
+    return ""
+
+
 def facets(simulation, *, intensity):
     """The state facets this band may express, most useful first."""
     limit, _ = budget(band_of(intensity))
@@ -121,7 +130,7 @@ def facets(simulation, *, intensity):
     for text in (_energy_text(values.get("energy")), _sleep_execution_text(simulation)):
         if text:
             result.append(text)
-    for text in (" ".join(str(values.get("mood") or "").split())[:120],
+    for text in (_mood_text(values.get("mood")),
                  " ".join(str(values.get("sleep") or "").split())[:120],
                  " ".join(str(values.get("health") or "").split())[:120],
                  " ".join(str(values.get("hunger") or "").split())[:120],
@@ -139,11 +148,35 @@ def _sleep_execution_text(simulation):
     execution = simulation.get("sleep_execution")
     if not isinstance(execution, dict):
         return ""
-    if execution.get("state") == "sleeping" and execution.get("planned_wake_at"):
+    state = execution.get("state")
+    if state == "sleeping" and execution.get("planned_wake_at"):
         return "正在休息，计划 " + str(execution["planned_wake_at"])[11:16] + " 醒来"
-    if execution.get("state") == "awake" and execution.get("ended_at"):
+    if state == "interrupted":
+        if execution.get("early_interruptions"):
+            return "刚入睡不久被唤醒，人还有点迷糊"
+        return "睡眠刚被唤醒，人还有点困意"
+    if state == "awake" and execution.get("ended_at"):
+        awake_minutes = execution.get("awake_minutes")
+        if type(awake_minutes) is int and awake_minutes <= 25:
+            return "刚睡醒不久，还带着一点睡醒后的迷糊感"
         return "刚睡醒"
     return ""
+
+
+def is_sleepy(simulation):
+    """Pacing from physical sleep execution only; prose is interpreted in prompts."""
+    if not isinstance(simulation, dict):
+        return False
+    execution = simulation.get("sleep_execution")
+    if isinstance(execution, dict):
+        state = execution.get("state")
+        if state in ("sleeping", "interrupted"):
+            return True
+        if state == "awake":
+            awake_minutes = execution.get("awake_minutes")
+            if type(awake_minutes) is int and awake_minutes <= 25:
+                return True
+    return False
 
 
 def instruction(simulation, *, intensity):

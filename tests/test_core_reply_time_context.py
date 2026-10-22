@@ -2,8 +2,9 @@ from datetime import datetime, timezone
 import json
 from types import SimpleNamespace as NS
 import unittest
+from unittest.mock import Mock
 
-from astrbot_host.core_reply_context import build_core_reply_prompt
+from astrbot_host.core_reply_context import CURRENT_TIME_INSTRUCTION, build_core_reply_prompt
 from companion_v2.foundation.refs import ScopeKind
 
 
@@ -42,9 +43,20 @@ class CoreReplyTimeContextTests(unittest.TestCase):
         self.assertEqual(perception["current_local_time"]["local_time"], "22:55")
         self.assertEqual(perception["current_local_time"]["timezone"], "Asia/Shanghai")
         self.assertNotIn('"local_time":"22:55"', prompt.instruction)
-        self.assertTrue(any("不要立刻像报时一样纠正" in item
-                            for item in prompt.perception_instructions))
+        self.assertIn(CURRENT_TIME_INSTRUCTION, prompt.perception_instructions)
         self.assertEqual(prompt.perception_options, (True, True, True))
+
+        # Native snapshots name their arrival time ``at``. Preparation can run
+        # after another reply part has been sent, so its wall time is too late.
+        native_input.at = at.replace(minute=54)
+        capture = Mock(return_value={})
+        interaction = Mock(return_value={})
+        application.background_history = NS(capture=capture, interaction=interaction,
+                                            read=lambda *_args, **_kwargs: ())
+        context.key = "private-time-test"
+        build_core_reply_prompt(application, context, native_input, at=at)
+        self.assertEqual(capture.call_args.args[1], native_input.at)
+        self.assertEqual(interaction.call_args.args[1], native_input.at)
 
         context.scope.kind = ScopeKind.GROUP
         group_prompt = build_core_reply_prompt(application, context, native_input, at=at)
@@ -73,6 +85,7 @@ class CoreReplyTimeContextTests(unittest.TestCase):
         app = NS(messages=messages, perception_settings=NS(capture=lambda *_: {"settings": settings}),
             reply_settings=NS(snapshot=lambda *_: NS(values={
                 GROUP + ".style_prompt": "自然地接话",
+                GROUP + ".prompt_style_mode": "guided",
                 GROUP + ".enable_humanized_expression": True,
                 GROUP + ".humanized_expression_prompt": "别像在做汇报",
             })), router=NS(profiles={}), tools=NS())

@@ -2,7 +2,7 @@
 "use strict";
 window.CompanionNativePerceptionPage = (() => {
   const product = window.CompanionProduct;
-  const prefix = "/astrbot_plugin_private_companion_v2/";
+  const prefix = "/astrbot_plugin_private_companion/";
   const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char]));
   const errors = {
     configuration_revision_conflict:"配置已变化，草稿仍在。刷新后核对，再采用最新版本保存。",
@@ -425,7 +425,28 @@ window.CompanionNativePerceptionPage = (() => {
     nodes = null; path = ""; scope = ""; status = null; drafts = {}; notices = {}; busy = false;
     publishStatus();
   }
-  return {mount, unmount, refresh:load, subscribe(listener) {
+  /* 页面级未保存守卫（page-guards.js）用：只要有一段还有改过但没提交的字段就算脏。
+     感知页的草稿按分段存在内存里，切分段能留住，切页就会随工作区卸载——
+     所以离开前必须问一声。 */
+  function isDirty() {
+    return Object.values(drafts || {}).some(draft => {
+      if (!draft || !draft.touched || !draft.touched.size) return false;
+      return [...draft.touched].some(name => String(draft.values?.[name]) !== String(draft.original?.[name]));
+    });
+  }
+  /* 全局搜索用：感知页自己的字段表（日期、节假日、农历、黄历、平台标识等）。
+     这一组不在 config-editor 的 spec 里，此前整组搜不到。
+     「资讯」段的字段其实是主动联系的 news.*，spec 里已经能搜到，这里不再重复索引。 */
+  const sectionTitles = {environment: "环境", model: "模型"};
+  function searchEntries() {
+    return Object.entries(fields).filter(([section]) => sectionTitles[section]).flatMap(([section, list]) => (list || []).map(([field, label, , help]) => ({
+      group: "conversation.perception", groupTitle: "感知", field,
+      label: label || field, help: help || "",
+      section, sectionTitle: sectionTitles[section],
+      sectionCount: Object.keys(sectionTitles).length,
+    })));
+  }
+  return {mount, unmount, refresh:load, searchEntries, isDirty, subscribe(listener) {
     if (typeof listener !== "function") return () => {};
     subscribers.add(listener); listener(publicSnapshot());
     return () => subscribers.delete(listener);

@@ -1,7 +1,7 @@
-"""转发摄入上限：schema → HostSettings → StagingConfiguration → StagingProfile → Bridge。
+"""转发设置：schema → HostSettings → StagingConfiguration → StagingProfile → Bridge。
 
-这几个上限的作用是**只收紧不放宽**：结构常量（MAX_FORWARDS 4 / MAX_NODES 32 /
-MAX_DEPTH 4）同时约束落库描述符的校验，所以操作者只能把一次输入能带进来的量调小，
+三个数量设置不能超过结构边界（MAX_FORWARDS 4 / MAX_NODES 300 / MAX_DEPTH 4），
+节点设置默认仍为 32；旧版合并节点上限 1–300 可无损保留。嵌套展开开关只影响新输入，
 已落库的转发事件永远仍可读。
 
 正因为是「只收紧」，接线断了不会报错——下游用默认值，也就是结构上限，
@@ -21,20 +21,22 @@ import unittest
 from astrbot_host.settings import HostSettings
 from companion_v2.adapters.astrbot.staging_config import StagingConfiguration
 from companion_v2.conversation.forwards.models import (
-    MAX_DEPTH, MAX_FORWARDS, MAX_NODES, ForwardIntakePolicy)
+    DEFAULT_MAX_NODES, MAX_DEPTH, MAX_FORWARDS, MAX_NODES, ForwardIntakePolicy)
 
 
 class ForwardIntakeSettingsTests(unittest.TestCase):
     def test_schema_defaults_match_the_policy(self):
         schema = json.loads((Path(__file__).resolve().parents[1] / "_conf_schema.json").read_text(encoding="utf-8"))
         items = schema["runtime"]["items"]
-        # 三个 schema 字段的默认值必须等于策略默认值；不然「没编辑过」的安装
-        # 一升级就会拿到一个与结构常量不同的上限，等于静默改了行为。
+        # 默认值必须与 V2 原有 intake 默认一致；迁移映射另可保留 V1 的自定义值。
         self.assertEqual(items["forward_max_forwards"]["default"], MAX_FORWARDS)
-        self.assertEqual(items["forward_max_nodes"]["default"], MAX_NODES)
+        self.assertEqual(items["forward_max_nodes"]["default"], DEFAULT_MAX_NODES)
+        self.assertEqual(items["forward_max_nodes"]["max"], MAX_NODES)
         self.assertEqual(items["forward_max_depth"]["default"], MAX_DEPTH)
+        self.assertTrue(items["forward_parse_nested"]["default"])
         self.assertEqual(asdict(ForwardIntakePolicy()),
-                         {"max_forwards": MAX_FORWARDS, "max_nodes": MAX_NODES, "max_depth": MAX_DEPTH})
+                         {"max_forwards": MAX_FORWARDS, "max_nodes": DEFAULT_MAX_NODES,
+                          "max_depth": MAX_DEPTH, "parse_nested": True})
 
     def test_default_configuration_parses_and_exposes_the_policy(self):
         # 崩溃点：parse() 早就在构造 ForwardIntakePolicy，但 dataclass 没这个字段。
@@ -43,15 +45,17 @@ class ForwardIntakeSettingsTests(unittest.TestCase):
 
     def test_narrowed_limits_survive_the_parser(self):
         settings = HostSettings.parse({"runtime": {
-            "forward_max_forwards": 2, "forward_max_nodes": 8, "forward_max_depth": 2}})
+            "forward_max_forwards": 2, "forward_max_nodes": 80, "forward_max_depth": 2,
+            "forward_parse_nested": False}})
         self.assertEqual(settings.forward_intake,
-                         ForwardIntakePolicy(max_forwards=2, max_nodes=8, max_depth=2))
+                         ForwardIntakePolicy(max_forwards=2, max_nodes=80, max_depth=2, parse_nested=False))
 
     def test_out_of_range_and_wrong_typed_limits_are_rejected(self):
-        # 只能收紧：超过结构上限的值要在这里被拒，而不是留到落库时才炸。
+        # 超过结构上限的值要在配置边界被拒，而不是留到落库时才炸。
         for changes in ({"forward_max_forwards": MAX_FORWARDS + 1}, {"forward_max_nodes": 0},
                         {"forward_max_depth": MAX_DEPTH + 1}, {"forward_max_forwards": "2"},
-                        {"forward_max_forwards": True}, {"forward_max_nodes": 33}):
+                        {"forward_max_forwards": True}, {"forward_max_nodes": MAX_NODES + 1},
+                        {"forward_parse_nested": 1}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 HostSettings.parse({"runtime": changes})
 
@@ -78,15 +82,15 @@ class ForwardIntakeFingerprintTests(unittest.TestCase):
         self.assertEqual(restored.fingerprint, self._configuration().fingerprint)
         self.assertEqual(restored.forward_intake, ForwardIntakePolicy())
 
-    def test_narrowed_limits_enter_the_document_and_round_trip(self):
-        narrowed = ForwardIntakePolicy(max_forwards=2, max_nodes=8, max_depth=2)
+    def test_nondefault_limits_and_nested_switch_enter_the_document_and_round_trip(self):
+        narrowed = ForwardIntakePolicy(max_forwards=2, max_nodes=80, max_depth=2, parse_nested=False)
         document = self._configuration(forward_intake=narrowed).document()
         self.assertEqual(document["forward_intake"],
-                         {"max_forwards": 2, "max_nodes": 8, "max_depth": 2})
+                         {"max_forwards": 2, "max_nodes": 80, "max_depth": 2, "parse_nested": False})
         restored = StagingConfiguration.parse(json.dumps(document, ensure_ascii=False))
         self.assertEqual(restored.forward_intake, narrowed)
         self.assertEqual(restored.fingerprint, self._configuration(forward_intake=narrowed).fingerprint)
-        # 收紧必须改变哈希，否则旧 profile 不会重建。
+        # 任何有效变化都必须改变哈希，否则旧 profile 不会重建。
         self.assertNotEqual(restored.fingerprint, self._configuration().fingerprint)
 
     def test_an_invalid_policy_is_rejected_at_the_configuration_boundary(self):

@@ -44,7 +44,7 @@ for data_url, code in (
         assert error.code == code
     else:
         raise AssertionError("invalid upload data was accepted")
-routes = {(path.removeprefix("/astrbot_plugin_private_companion_v2/image-materials"), tuple(methods))
+routes = {(path.removeprefix("/astrbot_plugin_private_companion/image-materials"), tuple(methods))
           for path, _handler, methods, _description in ImageMaterialsWebAPI(None).routes()}
 assert ("/references/upload", ("POST",)) in routes
 assert ("/references/update", ("POST",)) in routes

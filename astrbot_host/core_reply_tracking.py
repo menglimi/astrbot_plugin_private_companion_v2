@@ -254,9 +254,13 @@ def prepare_core_reply_tracking(event, prepared, *, admission, now, reason="", m
     elif state["event_id"] != event_id or state["context"] != context:
         return None
     try:
+        note_live = getattr(admission, "note_live_core_turn", None)
+        if callable(note_live):
+            note_live(context, event_id, active=True)
         at, instruction = now(), prepared.get("instruction", "")
         _dispatch(state, lambda: admission.record_core_reply(context, event_id, instruction=instruction,
-                                                            reason=reason, mentioned=mentioned, at=at))
+            reason=reason, mentioned=mentioned, at=at,
+            continuation=(prepared.get("group_admission") or {}).get("continuation")))
     except Exception as error:
         logger.warning("[CompanionV2] 核心群回复准入记录暂不可用 error_type=%s", type(error).__name__)
     event.send = state["_send_wrapper"]
@@ -345,6 +349,12 @@ def finish_core_reply_tracking(event, *, log_completion=True):
         return None
     if not state["completed"]:
         state["completed"] = True
+        try:
+            note_live = getattr(state.get("admission"), "note_live_core_turn", None)
+            if callable(note_live):
+                note_live(state["context"], state["event_id"], active=False)
+        except Exception:
+            pass
         _persist(state, "completed")
     if log_completion:
         _log(state, "completed")

@@ -7,7 +7,7 @@ const path = require("node:path");
 async function run({browser, outputDir, bridgeMode="direct", pageRoot=path.resolve(__dirname,"../pages/陪伴小屋"), inspect=null}) {
   const root=path.resolve(pageRoot);
   await fs.mkdir(outputDir,{recursive:true});
-  const host="astrbot_plugin_private_companion_v2";
+  const host="astrbot_plugin_private_companion";
   const first=`host/targets/first/roles/role-a/state`;
   const secondRole=`host/targets/first/roles/role-b/state`;
   const secondTarget=`host/targets/second/roles/role-a/state`;

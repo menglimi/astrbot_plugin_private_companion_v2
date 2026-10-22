@@ -29,6 +29,7 @@ NATIVE_PROMPT = (
 )
 PRIVATE_PROMPT = (
     "普通私聊正文按自然停顿组织，完整接住对方的话；不要为凑条数扩写或拆散一句话、称呼与回应、因果解释。"
+    "先看完整条回复再安排边界，避免前几条很短、最后一条收进大量剩余内容。"
     "连续标点（例如 ...？、？！）保持在同一条消息里，不要生成以孤立标点开头的气泡。"
     "需要指定独立气泡时，边界只用完整标记 {{split_marker}} 单独占一行。"
     "标记不是正文；不要放进代码、引用或链接。直接输出聊天正文，不输出 JSON 或内部字段。"
@@ -263,22 +264,39 @@ def prepare_core_reply_streaming_boundary(event):
                      state["prepared"].get("event_ref", "unknown"), previous)
 
 
+def _group_under_concurrent_pressure(event):
+    from .core_reply_tracking import CORE_REPLY_TRACKING_EXTRA
+    tracking = event.get_extra(CORE_REPLY_TRACKING_EXTRA)
+    if not isinstance(tracking, dict):
+        return False
+    admission = tracking.get("admission")
+    checker = getattr(admission, "has_concurrent_or_newer_core_turn", None)
+    if not callable(checker):
+        return False
+    try:
+        return bool(checker(tracking.get("context"), tracking.get("event_id")))
+    except Exception:
+        return False
+
+
 async def _send_part(event, state, part, args=(), kwargs=None):
     core = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
     if state["stopped"] or core.get("group_participation", {}).get("mode") == "skip":
         return None
-    if state["sent"]:
-        gap = part_gap_seconds(state["settings"], sent_core_text(part),
-                               (core["prepared"].get("event_id"), state["sent"]))
-        if gap:
-            await asyncio.sleep(gap)
     try:
+        if state["sent"] and not _group_under_concurrent_pressure(event):
+            gap = part_gap_seconds(state["settings"], sent_core_text(part),
+                                   (core["prepared"].get("event_id"), state["sent"]))
+            if gap:
+                await asyncio.sleep(gap)
         attempts = core["send_attempts"]
         result = await state["send"](part, *args, **(kwargs or {}))
     except BaseException:
         # RespondStage catches send failures per component. A later component
         # must not continue after authorization denial or an unknown send.
         state["stopped"] = True
+        from .core_reply import finish_core_reply_presence
+        finish_core_reply_presence(event, force=True)
         raise
     if core["send_attempts"] > attempts:
         state["sent"] += 1

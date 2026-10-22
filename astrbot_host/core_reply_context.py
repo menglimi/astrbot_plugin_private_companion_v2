@@ -12,6 +12,7 @@ import logging
 import time
 
 from companion_v2.conversation.foreground import ContextContribution, ContributionState
+from companion_v2.conversation.awareness_context import INSTRUCTION as CROSS_WINDOW_INSTRUCTION
 from companion_v2.conversation.growth_context import ROLE_GROWTH_INSTRUCTION
 from companion_v2.conversation.life_context import LIFE_INSTRUCTION
 from companion_v2.conversation.messages import KNOWLEDGE_INSTRUCTION
@@ -32,6 +33,7 @@ BACKGROUND_INSTRUCTION = """这些是当前角色与窗口可用的背景资料�
 MEMORY_INSTRUCTION = (
     "这些记忆仅属于当前私聊对象与当前角色。保留原来陈述的时间、归因与不确定性，"
     "摘要和习惯线索帮助自然接话，不能替代本轮用户的明确表达。不要把派生摘要当作独立证据。"
+    "提及较早的一般往事时可用“我记得你之前提过……”等带时间质感的自然口吻，不机械背诵时间戳。"
 )
 GROUP_INSTRUCTION = (
     "当前是群聊，回复面向本群。当前发言者只代表本人，群公共记忆中的旧话保留各自账号和时间，"
@@ -39,6 +41,7 @@ GROUP_INSTRUCTION = (
     "互动边不证明现实关系、私聊关系或权限；私人关系资料不用于替代当前发言者的明确表达。"
 )
 CURRENT_TIME_INSTRUCTION = """current_local_time 是系统时钟按当前窗口配置时区投影出的本轮时间，用于理解现在、今天和问候时段。历史消息与摘要保留各自日期，不能充当当前时间。
+感知本轮 current_local_time 与最近历史消息时间戳的跨度：同一对话流内直接自然接话；隔了半天、隔夜或隔了几天再聊时，自然体现重逢或时隔感，不把几天前的话头当成上一秒刚说完直接硬接。
 时间只在相关时使用，不主动报时。用户说“还早”等话时结合玩笑、夸张或时区差异理解；只有对方问几点，或会影响实际安排时，才简短说明或确认，不据此推断对方已经睡着、刚起床或正在等待。"""
 SENT_CONTINUATION_INSTRUCTION = (
     SENT_MESSAGE_INSTRUCTION +
@@ -113,13 +116,14 @@ def _knowledge_materials(messages, context, native_input, at, *, members=False):
     return owner.background_contributions(context, include_official=False, **arguments)
 
 
-def _memory_materials(owner, context, native_input, at):
+def _memory_materials(owner, context, native_input, at, timezone_name):
     """Reuse memory selection and validation with a batch-free lexical session."""
     if owner is None or owner.delegated():
         return ()
     from companion_v2.memory.habits import habit_capture
     from companion_v2.memory.models import owner_key
     from companion_v2.memory.pinned import select_pinned
+    from companion_v2.memory.time_intent import absolute_day_window
 
     memory = owner.memory
     memory.writer.access.check(context)
@@ -135,13 +139,16 @@ def _memory_materials(owner, context, native_input, at):
     if policy.automatic_context and policy.context_items:
         memory.query.begin(context, session_id, expires_at=at + timedelta(minutes=10))
         remaining = policy.context_items
-        intent = native_input.text[-240:]
+        day_window = absolute_day_window(native_input.text, at, timezone_name)
+        time_range = ({"time_start": day_window[0], "time_end": day_window[1]}
+                      if day_window else {})
+        intent = "" if day_window else native_input.text[-240:]
         if memory.runtime.read_one("""SELECT 1 FROM memory_views
                 WHERE owner_key = ? AND kind = 'experience' AND state = 'active' LIMIT 1""",
                 (owner_key(context),)):
             try:
                 result = require(memory.query.query(context, session_id, query_intent=intent,
-                                                    kind="experiences", limit=1))
+                                                    kind="experiences", limit=1, **time_range))
                 snapshot["experience_references"] = [
                     {"view_id": item["view_id"], "revision": item["revision"]}
                     for item in result["items"]
@@ -155,7 +162,7 @@ def _memory_materials(owner, context, native_input, at):
         if remaining:
             try:
                 result = require(memory.query.query(context, session_id, query_intent=intent,
-                                                    limit=min(remaining, policy.query_items)))
+                                                    limit=min(remaining, policy.query_items), **time_range))
                 snapshot["references"].extend(
                     {"atom_id": item["atom_id"], "revision": item["revision"]}
                     for item in result["items"] if item["atom_id"] not in snapshot["core_ids"]
@@ -166,6 +173,45 @@ def _memory_materials(owner, context, native_input, at):
                 logger.warning("[CompanionV2] 核心回复记忆召回降级 error_type=%s", type(error).__name__)
                 snapshot["recall_unavailable"] = getattr(error, "code", "memory_recall_unavailable")
     return owner.contributions(snapshot, context)
+
+
+def _legacy_memory_materials(memory, context, native_input, at, timezone_name):
+    """Recall mapped historical material even when an external plugin owns live memory."""
+    from companion_v2.memory.time_intent import absolute_day_window
+    legacy = getattr(getattr(memory, "query", None), "legacy", None)
+    if legacy is None:
+        return ()
+    policy = memory.writer.access.policy_for(context)
+    if not policy.automatic_context or not policy.context_items:
+        return ()
+    day = absolute_day_window(native_input.text, at, timezone_name)
+    arguments = {"time_start": day[0], "time_end": day[1]} if day else {}
+    result = require(legacy.query(context, query_intent="" if day else native_input.text[-240:],
+        limit=min(3, policy.context_items, policy.query_items), lexical=not bool(day),
+        max_result_chars=policy.context_chars, **arguments))
+    items = result.get("items", [])
+    if not items:
+        return ()
+    legacy.verify(context, items)
+    materials, used = [], 0
+    for item in items:
+        payload = encode(item)
+        if used + len(payload) > policy.context_chars:
+            break
+        used += len(payload)
+        materials.append(ContextContribution("memory:legacy:" + item["id"], "memory", "historical_memory",
+            ContributionState.READY, payload))
+    return tuple(materials)
+
+
+def _cross_window_section(messages, context, at):
+    owner = getattr(messages, "cross_window_context", None)
+    if owner is None:
+        return ""
+    material = owner.contribution(context, at)
+    if material is None:
+        return ""
+    return _material_section("跨窗口在场", CROSS_WINDOW_INSTRUCTION, (material,))
 
 
 def build_core_reply_prompt(application, context, native_input, *, at):
@@ -250,6 +296,7 @@ def build_core_reply_prompt(application, context, native_input, *, at):
     optional("person_card", lambda: _material_section("当前相识资料", GROUP_INSTRUCTION
         if context.scope.kind is ScopeKind.GROUP else MEMORY_INSTRUCTION,
         (messages.acquaintance.card_contribution(context, at),)))
+    optional("cross_window", lambda: _cross_window_section(messages, context, at))
     optional("knowledge_reference", lambda: _material_section("角色知识资料", KNOWLEDGE_INSTRUCTION,
         _knowledge_materials(messages, context, native_input, at)))
     optional("knowledge_member_clue", lambda: _material_section("本窗口成员资料", MEMBER_CLUE_INSTRUCTION,
@@ -257,12 +304,28 @@ def build_core_reply_prompt(application, context, native_input, *, at):
 
     def conversation_perception():
         from companion_v2.agenda.planning_config import configured_annual_calendars
-        from companion_v2.conversation.date_context import ALMANAC_INSTRUCTION, CALENDAR_INSTRUCTION, project_local_date
+        from companion_v2.conversation.date_context import (
+            ALMANAC_INSTRUCTION, CALENDAR_INSTRUCTION, project_interaction_gap, project_local_date,
+        )
 
         settings = perception_settings()
         clock = project_local_date(at, settings["calendar_timezone"], holiday_enabled=False,
             lunar_enabled=False, automatic_solar_terms_enabled=False, almanac_enabled=False)
         perception_data = {"current_local_time": clock}
+        owner = getattr(application, "background_history", None)
+        if owner is not None and hasattr(context, "key"):
+            try:
+                received_at = getattr(native_input, "at", at)
+                interaction = owner.interaction(context, min(received_at, at), action="conversation.reply")
+                if isinstance(interaction, dict):
+                    last_at = max((value for value in (interaction.get("last_user_at"),
+                                                       interaction.get("last_assistant_at"))
+                                   if isinstance(value, str) and value), default=None)
+                    gap = project_interaction_gap(at, last_at, settings["calendar_timezone"])
+                    if gap is not None:
+                        perception_data["interaction_gap"] = gap
+            except Exception:
+                pass
         instructions = [CURRENT_TIME_INSTRUCTION]
         if settings["calendar_enabled"]:
             annual_calendars = None
@@ -295,7 +358,7 @@ def build_core_reply_prompt(application, context, native_input, *, at):
             owner = getattr(application, "background_history", None)
             if owner is None:
                 return ""
-            received_at = getattr(native_input, "received_at", at)
+            received_at = getattr(native_input, "at", at)
             snapshot = owner.capture(context, min(received_at, at), action="conversation.reply",
                                      limit=8, max_chars=3200)
             items = owner.read(snapshot, context, at, action="conversation.reply")
@@ -320,7 +383,13 @@ def build_core_reply_prompt(application, context, native_input, *, at):
         optional("proactive_inspirations", inspirations)
         profile("relationship_profile", getattr(messages, "relationship_profile_context", None))
         optional("memory", lambda: _material_section("当前私聊记忆", MEMORY_INSTRUCTION,
-            _memory_materials(getattr(messages, "memory_context", None), context, native_input, at)))
+            _memory_materials(getattr(messages, "memory_context", None), context, native_input, at,
+                              perception_settings()["calendar_timezone"])))
+        optional("legacy_memory", lambda: _material_section("迁入的历史资料",
+            "这些是经过身份映射的旧版历史资料，保留各自时间与来源。旧偏好、旧情绪、未完话头和承诺只说明当时，"
+            "不恢复旧任务或授权，也不当作当前状态；结合本轮表达自然回忆，需要更多细节时继续查询历史记忆。",
+            _legacy_memory_materials(getattr(application, "memory", None), context, native_input, at,
+                                     perception_settings()["calendar_timezone"])))
         captured("relationship", "相处背景", RELATIONSHIP_INSTRUCTION,
                  getattr(messages, "relationship_context", None))
         captured("life", "角色生活", LIFE_INSTRUCTION, getattr(messages, "life_context", None))

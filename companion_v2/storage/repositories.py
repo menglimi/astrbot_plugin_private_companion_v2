@@ -226,6 +226,79 @@ class OperationRepository:
         assert updated is not None
         return Outcome.success(_operation_from_row(updated, replayed=False))
 
+    def outbox(self, operation_id: str, part_id: str) -> Outcome[OutboxRecord]:
+        _opaque(operation_id, field="operation_id")
+        _opaque(part_id, field="part_id")
+        row = self._runtime.read_one(
+            """SELECT outbox.*, operations.owner, operations.installation_id, operations.platform,
+                      operations.scope_kind, operations.native_scope_id, operations.bot_id, operations.account_id,
+                      operations.conversation_id, operations.session_id, operations.lineage_id,
+                      operations.operation_revision, operations.idempotency_key
+               FROM outbox JOIN operations ON outbox.operation_id = operations.operation_id
+               WHERE outbox.operation_id = ? AND outbox.part_id = ?""",
+            (operation_id, part_id),
+        )
+        if row is None:
+            return Outcome.failed("outbox_not_found", "operation has no matching outbox part")
+        return Outcome.success(_outbox_from_row(row))
+
+    def transition_outbox(
+        self,
+        operation_id: str,
+        part_id: str,
+        *,
+        expected_operation_state: OperationState,
+        next_operation_state: OperationState,
+        expected_outbox_state: str,
+        next_outbox_state: str,
+        observed_at: datetime,
+        receipt_ref: str | None = None,
+    ) -> Outcome[OperationReceipt]:
+        """Advance a send operation and its outbox row in one transaction."""
+        _opaque(operation_id, field="operation_id")
+        _opaque(part_id, field="part_id")
+        allowed = {
+            (OperationState.ACCEPTED, "pending"): {(OperationState.UNKNOWN, "unknown"),
+                                                       (OperationState.COMPLETED, "cancelled")},
+            (OperationState.UNKNOWN, "unknown"): {(OperationState.COMPLETED, "accepted"),
+                                                      (OperationState.COMPLETED, "cancelled"),
+                                                      (OperationState.UNKNOWN, "unknown")},
+        }
+        if (next_operation_state, next_outbox_state) not in allowed.get(
+                (expected_operation_state, expected_outbox_state), set()):
+            return Outcome.failed("outbox_transition_invalid", "operation and outbox transition is not supported")
+        if next_outbox_state == "accepted":
+            if (not isinstance(receipt_ref, str) or not receipt_ref or receipt_ref != receipt_ref.strip()
+                    or len(receipt_ref) > 512):
+                return Outcome.failed("outbox_receipt_invalid", "accepted outbox state requires a bounded receipt")
+        elif receipt_ref is not None:
+            return Outcome.failed("outbox_receipt_invalid", "only accepted outbox state can store a receipt")
+        timestamp = encode_timestamp(observed_at)
+        with self._runtime.transaction() as connection:
+            operation = connection.execute(
+                "SELECT * FROM operations WHERE operation_id = ?", (operation_id,)
+            ).fetchone()
+            outbox = connection.execute(
+                "SELECT * FROM outbox WHERE operation_id = ? AND part_id = ?", (operation_id, part_id)
+            ).fetchone()
+            if operation is None or outbox is None:
+                return Outcome.failed("outbox_not_found", "operation has no matching outbox part")
+            if (operation["state"], outbox["state"]) != (expected_operation_state.value, expected_outbox_state):
+                return Outcome.failed("outbox_state_conflict", "operation or outbox has already changed")
+            connection.execute(
+                "UPDATE operations SET state = ?, updated_at = ? WHERE operation_id = ?",
+                (next_operation_state.value, timestamp, operation_id),
+            )
+            connection.execute(
+                "UPDATE outbox SET state = ?, receipt_ref = ? WHERE operation_id = ? AND part_id = ?",
+                (next_outbox_state, receipt_ref, operation_id, part_id),
+            )
+            updated = connection.execute(
+                "SELECT * FROM operations WHERE operation_id = ?", (operation_id,)
+            ).fetchone()
+        assert updated is not None
+        return Outcome.success(_operation_from_row(updated, replayed=False))
+
     def pending_outbox(self) -> tuple[OutboxRecord, ...]:
         rows = self._runtime.read_all(
             """
@@ -468,6 +541,7 @@ def _outbox_from_row(row: sqlite3.Row) -> OutboxRecord:
         payload_hash=row["payload_hash"],
         state=row["state"],
         created_at=decode_timestamp(row["created_at"]),
+        receipt_ref=row["receipt_ref"],
     )
 
 

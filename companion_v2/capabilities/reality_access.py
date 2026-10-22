@@ -15,7 +15,7 @@ from .repositories import CapabilityRepository
 
 ACTION = "reality.snapshot.read"
 EXTENSION = "reality"
-PACKAGE_ID = "astrbot_plugin_private_companion_v2.reality"
+PACKAGE_ID = "astrbot_plugin_private_companion.reality"
 OWNER = "capability.reality-access"
 
 

@@ -8,7 +8,7 @@
    tts, ...}，不带外层 sections。 */
 "use strict";
 window.CompanionReplyPage = (() => {
-  const PREFIX = "/astrbot_plugin_private_companion_v2/";
+  const PREFIX = "/astrbot_plugin_private_companion/";
   const GROUP = "conversation.presentation";
 
   /* 枚举选项：注册表里这些字段是 TEXT，约束在 reply_settings.validate 里。
@@ -24,6 +24,7 @@ window.CompanionReplyPage = (() => {
     image_position: {after_text: "文字后", before_text: "文字前"},
     voice_trigger_mode: {always: "每轮", request: "按请求", adaptive: "模型择句"},
     voice_generation_mode: {plain: "朗读正文", model_tag: "模型语音标签"},
+    voice_conversion_scope: {full: "完整口述", partial: "选择适合口述的短句"},
     voice_segment_mode: {each: "每一段", first: "仅首段", last: "仅末段"},
     voice_delivery_mode: {voice_and_text: "文字与语音", voice_only: "仅语音（完整覆盖时）"},
     voice_position: {before_text: "文字前", after_text: "文字后", after_media: "所有组件后"},
@@ -80,6 +81,16 @@ window.CompanionReplyPage = (() => {
       group_wakeup_short_text_wait_ms: "短消息合并等待（毫秒）",
       group_wakeup_log_limit: "近期判定记录上限",
       group_air_guard_enabled: "启用空气护栏",
+      private_closing_guard_enabled: "启用私聊收尾沉默",
+      private_closing_guard_window_seconds: "收尾判断窗口（秒）",
+      private_closing_guard_prompt_enabled: "同时提示模型自然收尾",
+      private_debounce_enabled: "启用私聊连续输入防抖",
+      private_debounce_min_ms: "最短静默（毫秒）",
+      private_debounce_max_ms: "最长静默（毫秒）",
+      private_debounce_total_ms: "单轮总上限（毫秒）",
+      group_conversation_followup_enabled: "允许非点名续接",
+      group_conversation_followup_seconds: "续接有效时间（秒）",
+      group_conversation_followup_max_turns: "每次唤醒最多自动续接轮数",
       group_air_guard_window_seconds: "接话统计窗口（秒）",
       group_air_guard_max_bot_replies: "窗口内连续回复参考上限",
       group_air_guard_cooldown_seconds: "密集接话收口期（秒）",
@@ -121,6 +132,7 @@ window.CompanionReplyPage = (() => {
       reply_quote_first_part_only: "只在第一段引用", reply_quote_skip_chars: "短回复字数门槛",
       reply_mention_speaker_enabled: "群聊回复时 @ 发言者",
       voice_enabled: "启用语音", voice_trigger_mode: "触发方式", voice_generation_mode: "朗读内容",
+      voice_conversion_scope: "语音转换范围",
       voice_segment_mode: "朗读段落", voice_delivery_mode: "发送形式", voice_position: "语音位置",
       voice_language: "语音语言", voice_foreign_text_mode: "外语文字",
       voice_provider_id: "通用 TTS 扩展", voice_zh_provider_id: "中文 TTS 扩展",
@@ -206,6 +218,16 @@ window.CompanionReplyPage = (() => {
       group_wakeup_short_text_wait_ms: "短文本触发后等待后续消息再判断；0 表示不等待。",
       group_wakeup_log_limit: "回复工作台最多读取的近期群聊判定记录数，不改变参与规则。",
       group_air_guard_enabled: "开启后将近期连续回复与礼貌收尾次数作为群聊提示参考，不机械截断回复。",
+      private_closing_guard_enabled: "开启后，对方只是道晚安、道别、感谢或简短应声，而角色上一轮已经收尾时，本轮不再调用模型回复，避免互相道晚安。带问题、请求、图片或新内容的消息不静默。",
+      private_closing_guard_window_seconds: "只在这个时间窗口内判断收尾；超过窗口后仍按普通消息回复。范围 60–7200 秒。",
+      private_closing_guard_prompt_enabled: "未触发静默时，把收尾语境作为本轮提示，提醒模型不要另起话题、追问或再补一条同义道别。",
+      private_debounce_enabled: "仅纯文本私聊生效：第一条消息立即开始准备，短线补充并入同一轮，只触发一次模型请求。图片、语音、视频、文件、引用和命令立即处理。",
+      private_debounce_min_ms: "长消息靠近这个下限；与最长静默相同时使用固定等待，推荐从 1500 毫秒起调整。",
+      private_debounce_max_ms: "短消息靠近这个上限；实际窗口还受单轮总上限约束，默认 4000 毫秒。",
+      private_debounce_total_ms: "从第一条消息开始计算，达到该时间后不再等待新消息；默认 8000 毫秒，不能小于最长静默。",
+      group_conversation_followup_enabled: "开启后，可由决策模型判断是否回应上一轮互动后的非点名发言；关闭后仅按独立唤醒策略参与。",
+      group_conversation_followup_seconds: "距上次实际回复多久内可以续接，默认 120 秒。等待补充或选择旁听不会延长已回复链的有效时间。",
+      group_conversation_followup_max_turns: "默认最多自动续接 3 轮，最初唤醒的回复不计入。按宿主发送调用正常返回的回复事件计数，分段与工具循环只算一轮；等待、旁听、失败或结果未知不消耗轮数。到限后停止自动续接及弱触发，明确 @、引用或直呼可重新开启；仅调整窗口时不影响其他群。",
       group_air_guard_window_seconds: "统计群聊连续回复和礼貌收尾次数的时间窗口。",
       group_air_guard_max_bot_replies: "短窗口内达到该回复轮数后，提示模型降低弱候选参与倾向。",
       group_air_guard_cooldown_seconds: "达到连续回复参考值后，持续旁听的时间；明确 @、直呼和有效接续仍可回应。",
@@ -271,9 +293,18 @@ window.CompanionReplyPage = (() => {
                 "group_wakeup_cooldown_seconds", "group_wakeup_generated_keyword_limit",
                 "group_wakeup_topic_interest_max_boost", "group_wakeup_debounce_pending_penalty",
                 "group_wakeup_log_limit"]},
+      {id: "group_continuation", title: "连续对话与熔断", help: "续接由模型判断是否需要回应，轮数上限防止无限跟答。",
+       fields: ["group_conversation_followup_enabled", "group_conversation_followup_seconds",
+                "group_conversation_followup_max_turns"]},
+      {id: "private_debounce", title: "私聊节奏 · 连续输入", help: "第一条消息到达即开始准备，后续文本并入同一轮；总等待不超过配置上限。",
+       fields: ["private_debounce_enabled", "private_debounce_min_ms", "private_debounce_max_ms",
+                "private_debounce_total_ms"]},
       {id: "group_air_guard", title: "空气护栏 · 挡说太多", help: "",
        fields: ["group_air_guard_enabled", "group_air_guard_window_seconds", "group_air_guard_max_bot_replies",
                 "group_air_guard_cooldown_seconds", "group_air_guard_polite_loop_limit"]},
+      {id: "private_closing", title: "私聊收尾 · 允许沉默", help: "",
+       fields: ["private_closing_guard_enabled", "private_closing_guard_window_seconds",
+                "private_closing_guard_prompt_enabled"]},
       {id: "group_content_safety", title: "内容护栏 · 挡说错话", help: "",
        fields: ["enable_group_injection_guard", "enable_group_privacy_guard",
                 "enable_group_reality_promise_guard"]},
@@ -299,7 +330,7 @@ window.CompanionReplyPage = (() => {
       {id: "forwards", title: "合并转发理解", help: "",
        fields: ["forward_message_adaptation_enabled"]},
       {id: "voice", title: "语音与朗读", help: "",
-       fields: ["voice_enabled", "voice_trigger_mode", "voice_generation_mode", "voice_segment_mode",
+       fields: ["voice_enabled", "voice_trigger_mode", "voice_generation_mode", "voice_conversion_scope", "voice_segment_mode",
                 "voice_delivery_mode", "voice_language", "voice_foreign_text_mode",
                 "voice_provider_id", "voice_probability", "voice_cooldown_seconds",
                 "voice_max_speech_chars", "voice_timeout_seconds", "voice_zh_provider_id",
@@ -335,6 +366,11 @@ window.CompanionReplyPage = (() => {
       part_gap_min_ms: {part_gap_mode: "random"},
       part_gap_max_ms: {part_gap_mode: "random"},
       part_gap_log_base: {part_gap_mode: "log"},
+      private_closing_guard_window_seconds: {private_closing_guard_enabled: true},
+      private_closing_guard_prompt_enabled: {private_closing_guard_enabled: true},
+      private_debounce_min_ms: {private_debounce_enabled: true},
+      private_debounce_max_ms: {private_debounce_enabled: true},
+      private_debounce_total_ms: {private_debounce_enabled: true},
     },
     listFields: {
       split_words: {maxItems: 80, maxLength: 40, unique: "exact", trim: true,
@@ -357,11 +393,12 @@ window.CompanionReplyPage = (() => {
       private_image_self_recognition_hint: 3, video_self_recognition_hint: 3},
   };
   const decisionSectionIds = new Set(["wakeup_direct", "wakeup_interest", "wakeup_members",
-    "wakeup_cold_group", "wakeup_fatigue", "group_air_guard", "group_content_safety"]);
+    "wakeup_cold_group", "wakeup_fatigue", "group_continuation", "private_debounce",
+    "group_air_guard", "private_closing", "group_content_safety"]);
   const decisionViewSections = {
     response: ["wakeup_direct", "wakeup_interest", "wakeup_members"],
-    tempo: ["wakeup_cold_group", "wakeup_fatigue"],
-    safety: ["group_air_guard", "group_content_safety"],
+    tempo: ["group_continuation", "private_debounce", "wakeup_cold_group", "wakeup_fatigue"],
+    safety: ["group_air_guard", "private_closing", "group_content_safety"],
   };
   const decisionSectionViews = Object.fromEntries(Object.entries(decisionViewSections)
     .flatMap(([view, sections]) => sections.map(section => [section, view])));
@@ -1115,7 +1152,7 @@ window.CompanionReplyPage = (() => {
     const diagnostics = [undefined, "expression", "decision"].includes(options.view)
       ? '<div data-reply-part="diagnostics"></div>' : "";
     const scopeNote = options.view === "decision"
-      ? '<aside class="reply-scope-note" role="note"><strong>基础唤醒后才进行决策</strong><p>答疑默认关闭，弱相关词默认留空。群唤醒设置跟随角色，同一角色的群窗口共用；在私聊窗口调整也会更新该角色的群设置。明确 @、引用或直接呼唤优先，其他候选由 Laya 结合有效开关与近期群历史判断是否旁听。</p></aside>' : options.view === "perception"
+      ? '<aside class="reply-scope-note" role="note"><strong>基础唤醒后才进行决策</strong><p>答疑默认关闭，弱相关词默认留空。群唤醒设置跟随角色，同一角色的群窗口共用；在私聊窗口调整也会更新该角色的群设置。明确 @、引用或直接呼唤优先，其他候选由 Laya 结合有效开关与近期群历史判断是否旁听。私聊收尾沉默只处理纯道别、致谢或简短应声，且角色上一轮已经收尾；带问题、请求、图片或新内容的消息不受影响。私聊纯文本防抖与合并总窗口在「参与节奏 → 私聊节奏 · 连续输入」中配置；图片、语音、视频、文件、引用和命令不参与合并。</p></aside>' : options.view === "perception"
       ? '<aside class="reply-scope-note" role="note"><strong>普通聊天的媒体理解在 AstrBot 中配置</strong>' +
         '<p>普通聊天的图片、视频和文件由 AstrBot 及已启用的扩展处理。本页的转述和文件读取设置用于 V2 独立任务及历史兼容。</p></aside>'
       : '<aside class="reply-scope-note" role="note" data-reply-part="scope">' +

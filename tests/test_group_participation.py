@@ -26,6 +26,24 @@ def command(action, arguments, identifier="choice"):
 
 
 class GroupParticipationTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_legacy_delivered_followups_share_the_native_fuse_and_count_batches_once(self):
+        await self.setup_delivery()
+        admission = self.app.tools.group_participation.admission
+        for index in range(4):
+            context, batch, _ = await self.receive("这一部分继续聊", commands=((ACTION, {"mode": "reply"}),))
+            admission.record(context, batch, reason="mention" if index == 0 else "reply_follow_up",
+                             mentioned=index == 0)
+            saved = admission.recorded(context, batch)
+            saved["reasons"] = ["mention" if index == 0 else "reply_follow_up"]
+            with self.app.runtime.transaction() as connection:
+                connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = ?",
+                    (json.dumps(saved, ensure_ascii=False, sort_keys=True), "conversation.group_admission.v1:" + batch))
+            self.clock.advance(timedelta(seconds=1))
+            result = (await self.controller.group_reply_candidate(self.group_event(
+                identifier="legacy-follow-" + str(index), text="接着说"))).unwrap()
+            self.assertEqual(result["continuation"]["used_turns"], index)
+            self.assertEqual(result["admitted"], index < 3)
+
     def setUp(self):
         super().setUp()
         self.sequence = 0

@@ -97,7 +97,7 @@ import sqlite3
 import sys
 import unicodedata
 
-# 本插件目录：…/data/plugins/astrbot_plugin_private_companion_v2
+# 本插件目录：…/data/plugins/astrbot_plugin_private_companion
 PLUGIN_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 MAIN_DATABASE = "companion-v2.sqlite3"

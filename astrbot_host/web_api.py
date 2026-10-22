@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from .controller import AstrBotStagingController
 
 
-API_PREFIX = "/astrbot_plugin_private_companion_v2/staging"
+API_PREFIX = "/astrbot_plugin_private_companion/staging"
 
 
 def _json_value(value: object) -> object:

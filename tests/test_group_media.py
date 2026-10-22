@@ -17,12 +17,25 @@ from astrbot_host.media import load_native_image
 from astrbot_host.group_authority import GroupAuthority
 from astrbot_host.native import installed_native_types
 from astrbot_host.quotes import load_native_group_quote
+from companion_v2.adapters.astrbot.group import NativeGroupBridge
 from companion_v2.adapters.astrbot.model_wire import tool_alias
 from companion_v2.conversation.quotes.service import quote_reference
 from companion_v2.execution.models import TaskContext, TaskError, encode
 
 
 class GroupMediaTests(GroupMediaFixture, unittest.IsolatedAsyncioTestCase):
+    def test_quote_validation_ignores_unstable_component_positions(self):
+        raw = [{"type": "at", "data": {"qq": "2418334969"}},
+               {"type": "reply", "data": {"id": "387336160"}},
+               {"type": "text", "data": {"text": "dsh的一个插件吧"}}]
+        parts = [NS(type=NS(value="Reply"), id="387336160"),
+                 NS(type=NS(value="Plain"), text="dsh的一个插件吧")]
+        NativeGroupBridge._validate_quote_components(raw, parts)
+        with self.assertRaises(TaskError) as raised:
+            NativeGroupBridge._validate_quote_components(
+                raw, [NS(type=NS(value="Reply"), id="387336161")])
+        self.assertEqual(raised.exception.code, "host_quote_invalid")
+
     @staticmethod
     def raw_parts(parts):
         raw = []

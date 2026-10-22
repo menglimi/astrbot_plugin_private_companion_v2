@@ -4,6 +4,10 @@
 所以这是真渲染而不是示意图——改令牌后重新生成就能看到真实效果。
 
 用法：python3 tools/build_theme_preview.py [输出路径]
+
+产物默认写到仓库的 build/（已 gitignore），不再写进 pages/陪伴小屋/。
+写进页面目录的那一版曾被发布脚本原样打进插件 ZIP：单文件 13.9 MB，
+压缩后占整个安装包的四分之一。
 """
 import base64
 import json
@@ -13,7 +17,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PAGE = ROOT / "pages" / "陪伴小屋"
-OUT = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "pages" / "陪伴小屋" / "theme-preview.html"
+OUT = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "build" / "theme-preview.html"
 
 THEMES = [
     ("courtyard", "庭院", "日间的清爽草绿与天光，默认外观", "day"),

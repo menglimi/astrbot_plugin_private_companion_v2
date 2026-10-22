@@ -279,7 +279,7 @@
         "description": "任务提示",
         "hint": "当前 AstrBot 人格提示仍由宿主读取并单独校验；这里补充本次回复任务的约束。",
         "type": "text",
-          "default": "沿用当前 AstrBot 人格，先回应本轮真正的问题或话题。自然、具体地说清意思；只使用本轮输入和有依据的材料，不补造事实。按任务需要调整长短与格式，闲聊不复述、不写客服式收尾。"
+        "default": "沿用当前 AstrBot 人格，先回应本轮真正的问题或话题。自然、具体地说清意思；只使用本轮输入和有依据的材料，不补造事实。按任务需要调整长短与格式，闲聊不复述、不写客服式收尾。"
       },
       "fallback_provider_id": {
         "description": "回复任务的回退 Provider",
@@ -351,7 +351,10 @@
         "description": "流式分段发送方式",
         "hint": "buffered：收齐并校验后再分段发送；incremental：流式生成时按分段词、正则或模型边界逐段发送。分段字数阈值在流式中按当前已收到的正文计算；已发送的段落不回改。语音、图片组合回复及未按协议输出的模型收齐后发送。",
         "type": "string",
-        "options": ["buffered", "incremental"],
+        "options": [
+          "buffered",
+          "incremental"
+        ],
         "default": "buffered"
       },
       "enabled": {
@@ -583,6 +586,32 @@
         "description": "模型选句补充提示",
         "type": "text",
         "default": ""
+      },
+      "conversion_scope": {
+        "description": "语音转换范围",
+        "type": "string",
+        "options": [
+          "full",
+          "partial"
+        ],
+        "default": "full",
+        "hint": "full 按所选段落完整口述；partial 由主回复模型选择适合朗读的短句。发送形态单独配置。"
+      },
+      "private_cooldown_seconds": {
+        "description": "私聊语音冷却覆盖（秒）",
+        "type": "int",
+        "default": -1,
+        "min": -1,
+        "max": 86400,
+        "hint": "-1 继承基础会话冷却；0 不等待。"
+      },
+      "group_cooldown_seconds": {
+        "description": "群聊语音冷却覆盖（秒）",
+        "type": "int",
+        "default": -1,
+        "min": -1,
+        "max": 86400,
+        "hint": "-1 继承基础会话冷却；0 不等待。"
       }
     }
   },
@@ -623,7 +652,9 @@
         "description": "连续回戳次数",
         "hint": "命中回戳后连续戳回对方几次，范围 1–5；旧配置默认一次。",
         "type": "int",
-        "default": 1
+        "default": 1,
+        "minimum": 1,
+        "maximum": 5
       },
       "model_reply_enabled": {
         "description": "启用模型即兴回复",
@@ -634,7 +665,9 @@
       "model_reply_probability": {
         "description": "模型即兴回复概率",
         "type": "float",
-        "default": 0.3
+        "default": 0.3,
+        "minimum": 0.0,
+        "maximum": 1.0
       }
     }
   },
@@ -721,9 +754,11 @@
       },
       "forward_max_nodes": {
         "description": "单次合并转发最多读取节点数",
-        "hint": "结构上限为 32，只能收紧不能放宽。默认等于原常量，未编辑的安装行为不变。已落库的转发事件不受影响，仍可正常读取。",
+        "hint": "范围 1–300，默认 32；兼容旧版节点上限。共享文本与媒体预算仍会限制单次实际摄取量。已落库的转发事件不受影响，仍可正常读取。",
         "type": "int",
         "default": 32,
+        "min": 1,
+        "max": 300,
         "invisible": true
       },
       "forward_max_depth": {
@@ -738,6 +773,13 @@
         "hint": "结构上限为 4，只能收紧不能放宽。已落库的转发事件不受影响，仍可正常读取。",
         "type": "int",
         "default": 4,
+        "invisible": true
+      },
+      "forward_parse_nested": {
+        "description": "展开嵌套合并转发",
+        "hint": "关闭后保留嵌套转发占位，不读取其内部节点。",
+        "type": "bool",
+        "default": true,
         "invisible": true
       }
     }

@@ -26,8 +26,8 @@ from astrbot.api.web import PluginRequest, bind_request_context
 from starlette.requests import Request
 
 
-BACKUP_PREFIX = "/astrbot_plugin_private_companion_v2/backup"
-LEGACY_PREFIX = "/astrbot_plugin_private_companion_v2/legacy"
+BACKUP_PREFIX = "/astrbot_plugin_private_companion/backup"
+LEGACY_PREFIX = "/astrbot_plugin_private_companion/legacy"
 
 
 class QueryArgs(dict):
@@ -96,7 +96,7 @@ class MultiTargetInstallApiTests(multi_support.MultiFixture, unittest.IsolatedAs
 
         self.controller.save_plugin_config = lambda candidate: (
             self.controller.config.clear(), self.controller.config.update(candidate))
-        async def apply_bindings(candidate):
+        async def apply_bindings(candidate, **_options):
             self.controller.config.clear()
             self.controller.config.update(candidate)
             return {"saved": True, "started": True}
@@ -221,7 +221,7 @@ class MultiTargetInstallApiTests(multi_support.MultiFixture, unittest.IsolatedAs
         self.controller.register_routes()
         caller = RouteCaller(self.native, __import__("astrbot_host.page_api", fromlist=["request"]))
 
-        result = await caller.call("/astrbot_plugin_private_companion_v2/page/targets")
+        result = await caller.call("/astrbot_plugin_private_companion/page/targets")
 
         self.assertEqual(result["status"], "ok", result)
         data = result["data"]
@@ -229,6 +229,60 @@ class MultiTargetInstallApiTests(multi_support.MultiFixture, unittest.IsolatedAs
         for target in data["targets"]:
             for role in target["roles"]:
                 self.assertTrue(role["legacy_api"].endswith("/legacy"), role)
+
+    async def test_group_model_routes_support_role_defaults_and_isolated_group_windows(self):
+        config = multi_support.multi_config(group_targets=[
+            {"target_id": "group-one", "platform_id": "qq-main", "account_id": "100",
+             "bot_id": "bot-a", "group_id": "300"},
+            {"target_id": "group-two", "platform_id": "qq-main", "account_id": "100",
+             "bot_id": "bot-a", "group_id": "301"},
+        ])
+        self.controller = self.make_controller(config=config)
+        await self.controller.initialize_profile()
+        self.controller.register_routes()
+        from astrbot_host import group_model_api
+
+        caller = RouteCaller(self.native, group_model_api)
+        inventory = self.controller.web_api.target_inventory()
+        groups = {target["target_id"]: target for target in inventory if target["scope_kind"] == "group"}
+        self.assertEqual(set(groups), {"group-one", "group-two"})
+        first_route = groups["group-one"]["roles"][0]["model_api"]
+        second_route = groups["group-two"]["roles"][0]["model_api"]
+        paths = {path for path, _, _, _ in self.native.registered_web_apis}
+        self.assertIn(first_route, paths)
+        self.assertIn(first_route + "/configure", paths)
+        self.assertIn(second_route, paths)
+
+        role_status = await caller.call(first_route, query={"layer": "role"})
+        window_status = await caller.call(first_route, query={"layer": "window"})
+        self.assertEqual(role_status["status"], "ok", role_status)
+        self.assertEqual(window_status["status"], "ok", window_status)
+        self.assertEqual(role_status["data"]["scope_kind"], "group")
+        self.assertEqual(role_status["data"]["configuration_layer"], "role")
+        self.assertEqual(window_status["data"]["configuration_layer"], "window")
+        proactive = next(item for item in window_status["data"]["tasks"]
+                         if item["kind"] == "proactive.compose")
+        relationship_prompts = [item for item in proactive["prompt_sections"]
+                                if item.get("configuration_layer") == "role"]
+        self.assertTrue(relationship_prompts)
+        self.assertTrue(all(not item["editable"] for item in relationship_prompts))
+
+        task = next(item for item in window_status["data"]["tasks"] if item["kind"] == "memory.reflect")
+        saved = await caller.call(first_route + "/configure", payload={
+            "kind": "memory.reflect", "operation_key": "group-one-window-prompt",
+            "edit_token": task["edit_token"], "changes": {"prompt": "只用于群一窗口"},
+            "reset": [], "layer": "window",
+        })
+        self.assertEqual(saved["status"], "ok", saved)
+
+        first_window = await caller.call(first_route, query={"layer": "window"})
+        second_window = await caller.call(second_route, query={"layer": "window"})
+        first_task = next(item for item in first_window["data"]["tasks"] if item["kind"] == "memory.reflect")
+        second_task = next(item for item in second_window["data"]["tasks"] if item["kind"] == "memory.reflect")
+        role_task = next(item for item in role_status["data"]["tasks"] if item["kind"] == "memory.reflect")
+        self.assertEqual(first_task["fields"]["prompt"]["value"], "只用于群一窗口")
+        self.assertNotEqual(second_task["fields"]["prompt"]["value"], "只用于群一窗口")
+        self.assertNotEqual(role_task["fields"]["prompt"]["value"], "只用于群一窗口")
 
 
 class MultiTargetLegacyApplyTests(multi_support.MultiFixture, unittest.IsolatedAsyncioTestCase):
@@ -242,6 +296,85 @@ class MultiTargetLegacyApplyTests(multi_support.MultiFixture, unittest.IsolatedA
         config = multi_support.multi_config()
         config["legacy"] = {"v1_root": str(self.v1)}
         self.controller = self.make_controller(config=config)
+
+    async def test_official_supplement_adds_group_persona_to_existing_role_without_changing_data(self):
+        await self._supplement_existing_role(auto=False)
+
+    async def test_auto_inheritance_adds_shared_persona_without_locking_or_losing_its_receipt(self):
+        await self._supplement_existing_role(auto=True)
+
+    async def _supplement_existing_role(self, *, auto):
+        import astrbot_host.legacy_api as legacy_api
+        from copy import deepcopy
+
+        section = self.controller.config["multi_host"]
+        section["targets"] = section["targets"][:1]
+        section["personas"] = [{"bot_id": "bot-a", "persona_id": "original", "role_id": "role-a"}]
+        self.window_personas["qq-main:GroupMessage:300"] = "second"
+        self.native.persona_manager.personas_v3 = list(self.native.persona_records.values())
+        self.native.platforms = {"qq-main": self.native.platform}
+        clients = self.native.platform.client._wsr_api_clients
+        self.native.platform.client._wsr_api_clients = {"100": clients["100"]}
+        self.controller.refresh_settings()
+        config_path = self.root / "config" / "astrbot_plugin_private_companion_config.json"
+        config_path.parent.mkdir()
+        self.controller.default_data_root = self.root / "plugin_data" / "companion-7"
+        config_path.write_text(json.dumps({
+            "basic_config": {"bot_scope_mode": "allowlist", "bot_scope_ids": ["100"],
+                "target_user_ids": ["200"], "plugin_specific_persona_id": "original",
+                "enable_multi_persona_mode": False},
+            "group_observation_config": {"enable_group_companion": True,
+                "group_access_mode": "whitelist", "group_whitelist_ids": ["300"]},
+        }), encoding="utf-8")
+        source_bytes = config_path.read_bytes()
+        (await self.controller.initialize_profile()).unwrap()
+        self.controller.save_plugin_config = lambda candidate: self.controller.config.update(candidate)
+        self.controller.register_routes()
+        caller = RouteCaller(self.native, legacy_api)
+        runtime = self.controller.runtime
+        route = self.controller.web_api.target_inventory()[0]["roles"][0]["legacy_api"]
+        api = caller.routes[route].__self__
+        from companion_v2.legacy.migration import ConfigIntent
+        request = Request({"type": "http", "method": "POST", "path": route,
+                           "headers": [], "query_string": b""})
+        with bind_request_context(PluginRequest(request, username="admin")):
+            seed = ConfigIntent("role.profile", "role.profile", {"name": "已迁移角色"}, "test")
+            target = api._scope_target(api.controller.session, seed)
+            snapshot = api.controller.session.application.configuration._snapshot(
+                api._operator(), target, seed.group_id, support.NOW)
+            api._apply_intent(seed, api.controller.session, snapshot)
+        with runtime.transaction() as connection:
+            connection.execute("INSERT INTO runtime_metadata(key, value) VALUES (?, ?)",
+                               ("persona-migration-existing-profile", "保留原角色资料"))
+        before_configuration = [dict(row) for row in runtime.read_all("SELECT * FROM configuration_values", ())]
+        original_target = deepcopy(section["targets"][0])
+        planned = await caller.call(route + "/plan", query={"configuration_scope": "plugin"})
+        self.assertEqual(planned["status"], "ok", planned)
+        plan = planned["data"]
+        self.assertTrue(any(item["target_kind"] == "plugin_config" for item in plan["intents"]), plan)
+        plugin = next(item for item in plan["intents"] if item["target_kind"] == "plugin_config")
+        pairs = plugin["values"]["multi_host.personas"]
+        self.assertEqual({row["persona_id"]: row["role_id"] for row in pairs},
+                         {"original": "role-a", "second": "role-a"})
+        import asyncio
+        applied = await asyncio.wait_for(caller.call(route + ("/auto" if auto else "/apply"), payload={} if auto else {
+            "plan_token": plan["plan_token"], "configuration_scope": "plugin"}), timeout=20)
+        self.assertEqual(applied["status"], "ok", applied)
+        self.assertEqual(applied["data"]["errors"], [], applied)
+        if auto:
+            self.assertEqual(applied["data"]["state"], "imported", applied)
+            self.assertTrue(applied["data"]["configuration_imported"], applied)
+            self.assertTrue(applied["data"]["data_import_required"], applied)
+        runtime = self.controller.runtime
+        self.assertEqual(self.controller.config["multi_host"]["targets"][0], original_target)
+        self.assertEqual(self.controller.config["multi_host"]["personas"], pairs)
+        self.assertEqual(self.controller.config["multi_host"]["group_targets"][0]["group_id"], "300")
+        for row in before_configuration:
+            self.assertEqual(dict(runtime.read_one("SELECT * FROM configuration_values "
+                "WHERE target_key = ? AND field_id = ?", (row["target_key"], row["field_id"]))), row)
+        self.assertEqual(runtime.read_one("SELECT value FROM runtime_metadata WHERE key = ?",
+            ("persona-migration-existing-profile",))["value"], "保留原角色资料")
+        self.assertEqual(config_path.read_bytes(), source_bytes)
 
     async def test_migration_writes_the_selected_roles_settings(self):
         import astrbot_host.legacy_api as legacy_api
@@ -335,6 +468,264 @@ class SingleTargetLegacyApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(applied["data"]["written_count"], 0,
                            "迁移必须真的写进去（原先目标推导失败，一条都写不进去）")
         self.assertEqual(applied["data"]["errors"], [])
+        self.assertTrue(applied["data"]["completion_recorded"])
+
+    def _split_migration(self):
+        from companion_v2.foundation.outcome import Outcome
+        from companion_v2.legacy.migration import ConfigIntent, MigrationPlan, SourceFinding
+
+        plan = MigrationPlan(str(self.v1), findings=(
+            SourceFinding("private.host_configuration", "private", "converted", "ready", ()),
+            SourceFinding("reality.configuration", "reality", "converted", "absent", ()),
+            SourceFinding("image.configuration", "image", "converted", "absent", ()),
+            *(SourceFinding(name + ".configuration", name, "converted", "absent", ())
+              for name in ("game", "together", "live")),
+        ), intents=(ConfigIntent("role.state", "role.state",
+            {"enabled": True, "maintenance_minutes": 45, "presence_enabled": True},
+            "private.host_configuration"),))
+        return NS(plan=lambda: Outcome.success(plan), configuration_context_fingerprint="split-test",
+                  v1_root=self.v1, _configuration=lambda: {})
+
+    async def test_split_plan_keeps_existing_role_values_and_matches_the_remaining_fields_token(self):
+        from astrbot_host.legacy_api import LegacyMigrationWebAPI
+        from companion_v2.legacy.migration import ConfigIntent
+
+        (await self.controller.initialize_profile()).unwrap()
+        session = self.controller.session
+        api = LegacyMigrationWebAPI(self.controller)
+        raw = Request({"type": "http", "method": "POST", "path": "/",
+                       "headers": [], "query_string": b""})
+        with bind_request_context(PluginRequest(raw, username="admin")):
+            seed = ConfigIntent("role.state", "role.state", {"enabled": False}, "test")
+            service = session.application.configuration
+            target = api._scope_target(session, seed)
+            baseline = service._snapshot(api._operator(), target, seed.group_id, support.NOW)
+            api._apply_intent(seed, session, baseline)
+            migration = self._split_migration()
+            plan = api._plan(migration, self.v1, session).unwrap()
+            state_intents = [item for item in plan["intents"] if item["group_id"] == "role.state"]
+            self.assertEqual([item["fields"] for item in state_intents],
+                             [["maintenance_minutes"], ["presence_enabled"]])
+            result = (await api._apply(migration, self.v1, session, plan["plan_token"])).unwrap()
+            self.assertEqual(result["errors"], [])
+            self.assertNotIn("role.state.enabled", result["written"])
+            snapshot = service._snapshot(api._operator(), target, seed.group_id, support.NOW)
+            self.assertFalse(snapshot.fields["role.state.enabled"].value)
+            self.assertEqual(snapshot.fields["role.state.maintenance_minutes"].value, 45)
+
+    async def test_split_plan_rejects_changes_after_preparation_before_any_write(self):
+        from astrbot_host.legacy_api import LegacyMigrationWebAPI
+        from companion_v2.configuration.models import ConfigLayer
+        from companion_v2.configuration.owners import SparseConfigurationOwner
+        from companion_v2.legacy.migration import ConfigIntent
+
+        (await self.controller.initialize_profile()).unwrap()
+        session = self.controller.session
+        api = LegacyMigrationWebAPI(self.controller)
+        migration = self._split_migration()
+        raw = Request({"type": "http", "method": "POST", "path": "/",
+                       "headers": [], "query_string": b""})
+        with bind_request_context(PluginRequest(raw, username="admin")):
+            plan = api._plan(migration, self.v1, session).unwrap()
+            original = api._prepare_intents
+            service = session.application.configuration
+            def changed_after_preparation(*args):
+                prepared = original(*args)
+                intent = ConfigIntent("role.state", "role.state", {"maintenance_minutes": 50}, "test")
+                target = api._scope_target(session, intent)
+                self.assertIs(target.layer, ConfigLayer.ROLE)
+                definitions = service.registry.group(intent.group_id)
+                owner = service._owners[definitions[0].owner_id]
+                current = owner.read(target, definitions)
+                SparseConfigurationOwner.write(owner, target, owner.role_fields(definitions),
+                    changes={"role.state.maintenance_minutes": 50}, reset=(),
+                    expected_revision=current.revision, observed_at=support.NOW)
+                return prepared
+            with patch.object(api, "_prepare_intents", side_effect=changed_after_preparation):
+                result = await api._apply(migration, self.v1, session, plan["plan_token"])
+            self.assertFalse(result.is_success)
+            self.assertEqual(result.failure.code, "legacy_plan_stale")
+            window = api._scope_target(session, ConfigIntent("role.state", "role.state",
+                {"presence_enabled": True}, "test"))
+            snapshot = service._snapshot(api._operator(), window, "role.state", support.NOW)
+            self.assertFalse(snapshot.fields["role.state.presence_enabled"].value)
+            self.assertEqual(snapshot.fields["role.state.maintenance_minutes"].value, 50)
+
+    async def test_upgrade_guide_route_lifecycle_imports_then_confirms_after_restart(self):
+        import astrbot_host.legacy_api as legacy_api
+
+        self.controller.register_routes()
+        caller = RouteCaller(self.native, legacy_api)
+        (await self.controller.initialize_profile()).unwrap()
+        source_config = self.v1 / "companion_config.json"
+        source_values = json.loads(source_config.read_text(encoding="utf-8"))
+        source_values["model_assignment_config"] = {"enable_llm_streaming": True}
+        source_config.write_text(json.dumps(source_values, ensure_ascii=False) + "\n",
+                                 encoding="utf-8", newline="\n")
+        self.controller.save_plugin_config = lambda candidate: self.controller.config.update(candidate)
+        original_v1_config = source_config.read_bytes()
+
+        discovered = await caller.call(LEGACY_PREFIX)
+        self.assertEqual(discovered["status"], "ok", discovered)
+        self.assertEqual(discovered["data"]["install"]["phase"], "upgrade_pending")
+        self.assertTrue(discovered["data"]["install"]["pending"])
+
+        inherited = await caller.call(LEGACY_PREFIX + "/auto", payload={})
+        self.assertEqual(inherited["status"], "ok", inherited)
+        self.assertGreater(inherited["data"]["written_count"], 0, inherited)
+        self.assertTrue(inherited["data"]["configuration_imported"], inherited)
+        self.assertTrue(inherited["data"]["data_import_required"], inherited)
+        self.assertEqual(source_config.read_bytes(), original_v1_config,
+                         "upgrade import must leave V1 source files untouched")
+
+        api = caller.routes[LEGACY_PREFIX].__self__
+        before_restart = await caller.call(LEGACY_PREFIX)
+        self.assertEqual(before_restart["data"]["install"]["phase"], "upgrade_restart_check")
+        self.assertFalse(before_restart["data"]["install"]["restart_observed"])
+        self.assertEqual(before_restart["data"]["install"]["data_migration_status"], "not_inferred")
+
+        premature = await caller.call(LEGACY_PREFIX + "/upgrade-confirm", payload={"confirmed": True})
+        self.assertEqual(premature["status"], "error", premature)
+        self.assertEqual(premature["data"]["code"], "legacy_restart_required")
+
+        api._instance_token = "simulated-next-astrbot-process"
+        after_restart = await caller.call(LEGACY_PREFIX)
+        self.assertTrue(after_restart["data"]["install"]["restart_observed"])
+        confirmed = await caller.call(LEGACY_PREFIX + "/upgrade-confirm", payload={"confirmed": True})
+        self.assertEqual(confirmed["status"], "ok", confirmed)
+        self.assertEqual(confirmed["data"]["install"]["phase"], "upgrade_cleanup")
+        self.assertTrue(confirmed["data"]["install"]["upgrade_verified"])
+        self.assertEqual(confirmed["data"]["install"]["data_migration_status"], "not_inferred")
+        self.assertEqual(source_config.read_bytes(), original_v1_config)
+
+    async def test_upgrade_state_requires_restart_and_separates_data_migration(self):
+        from astrbot_host.legacy_api import LegacyMigrationWebAPI
+
+        (await self.controller.initialize_profile()).unwrap()
+        first_instance = LegacyMigrationWebAPI(self.controller)
+        self.assertTrue(first_instance._mark_imported(2, self.v1))
+
+        before_restart = first_instance._install_state(self.v1, [{"available": True}])
+        self.assertEqual(before_restart["phase"], "upgrade_restart_check")
+        self.assertFalse(before_restart["restart_observed"])
+        self.assertTrue(before_restart["configuration_imported"])
+        self.assertEqual(before_restart["data_migration_status"], "not_inferred")
+
+        alternate_root = self.root / "alternate-v1"
+        alternate_root.mkdir()
+        alternate = first_instance._install_state(alternate_root, [{"available": True}])
+        self.assertEqual(alternate["phase"], "upgrade_pending")
+
+        after_restart = LegacyMigrationWebAPI(self.controller)
+        after_restart._instance_token = "new-process"
+        ready_to_confirm = after_restart._install_state(self.v1, [{"available": True}])
+        self.assertTrue(ready_to_confirm["restart_observed"])
+        self.assertTrue(after_restart._mark_upgrade_verified(self.v1))
+
+        verified = after_restart._install_state(self.v1, [{"available": True}])
+        self.assertEqual(verified["phase"], "upgrade_cleanup")
+        self.assertTrue(verified["upgrade_verified"])
+        self.assertEqual(after_restart._install_state(alternate_root, [{"available": True}])["phase"],
+                         "upgrade_pending")
+
+        self.assertTrue(after_restart._mark_imported(1, self.v1, configuration_scope="proactive"))
+        after_additional_write = after_restart._install_state(self.v1, [{"available": True}])
+        self.assertEqual(after_additional_write["phase"], "upgrade_restart_check")
+        self.assertFalse(after_additional_write["upgrade_verified"])
+
+    async def test_no_change_import_is_verified_without_restart(self):
+        from astrbot_host.legacy_api import LegacyMigrationWebAPI
+
+        (await self.controller.initialize_profile()).unwrap()
+        api = LegacyMigrationWebAPI(self.controller)
+        self.assertTrue(api._mark_imported(
+            0, self.v1, configuration_scope="plugin", restart_required=False,
+        ))
+
+        state = api._install_state(self.v1, [{"available": True}])
+
+        self.assertEqual(state["phase"], "upgrade_cleanup")
+        self.assertTrue(state["configuration_imported"])
+        self.assertEqual(state["configuration_scopes"], ["plugin"])
+        self.assertFalse(state["restart_required"])
+        self.assertTrue(state["upgrade_verified"])
+
+    async def test_plugin_reload_reopens_configuration_without_a_process_restart(self):
+        from astrbot_host.legacy_api import LegacyMigrationWebAPI
+
+        (await self.controller.initialize_profile()).unwrap()
+        original = LegacyMigrationWebAPI(self.controller)
+        self.assertTrue(original._mark_imported(2, self.v1, restart_required=True))
+        rebuilt_routes = LegacyMigrationWebAPI(self.controller)
+        self.assertEqual(original._instance_token, rebuilt_routes._instance_token)
+        self.assertFalse(rebuilt_routes._restart_observed(self.v1))
+
+        await self.controller.terminate()
+        reopened = support.AstrBotStagingController(self.native, self.controller.config, self.root,
+            native_types=self.controller.native_types, now=lambda: support.NOW)
+        self.addAsyncCleanup(reopened.terminate)
+        (await reopened.load_existing()).unwrap()
+        (await reopened.start()).unwrap()
+        loaded = LegacyMigrationWebAPI(reopened)
+        self.assertNotEqual(original._instance_token, loaded._instance_token)
+        self.assertTrue(loaded._restart_observed(self.v1))
+        self.assertTrue(loaded._mark_upgrade_verified(self.v1))
+        self.assertFalse(loaded._install_state(self.v1, [])["restart_required"])
+
+    async def test_no_change_import_preserves_restart_pending_from_prior_write(self):
+        from astrbot_host.legacy_api import LegacyMigrationWebAPI
+
+        (await self.controller.initialize_profile()).unwrap()
+        api = LegacyMigrationWebAPI(self.controller)
+        self.assertTrue(api._mark_imported(
+            2, self.v1, configuration_scope="plugin", restart_required=True,
+        ))
+        self.assertTrue(api._mark_imported(
+            0, self.v1, configuration_scope="proactive", restart_required=False,
+        ))
+
+        state = api._install_state(self.v1, [{"available": True}])
+
+        self.assertEqual(state["phase"], "upgrade_restart_check")
+        self.assertEqual(state["configuration_scopes"], ["plugin", "proactive"])
+        self.assertTrue(state["restart_required"])
+        self.assertFalse(state["upgrade_verified"])
+
+    async def test_legacy_import_marker_without_scope_keeps_its_upgrade_state(self):
+        from astrbot_host.legacy_api import LegacyMigrationWebAPI
+
+        (await self.controller.initialize_profile()).unwrap()
+        with self.controller.runtime.transaction() as connection:
+            connection.execute(
+                "INSERT INTO runtime_metadata(key, value) VALUES (?, ?)",
+                ("legacy_imported_at", "2026-01-01T00:00:00Z"),
+            )
+
+        api = LegacyMigrationWebAPI(self.controller)
+        state = api._install_state(self.v1, [{"available": True}])
+        self.assertEqual(state["phase"], "upgrade_restart_check")
+        self.assertTrue(state["configuration_imported"])
+        self.assertTrue(state["configuration_scope_unknown"])
+        self.assertEqual(state["configuration_scopes"], [])
+
+        alternate_root = self.root / "alternate-v1"
+        alternate_root.mkdir()
+        alternate = api._install_state(alternate_root, [{"available": True}])
+        self.assertEqual(alternate["phase"], "upgrade_pending")
+        self.assertFalse(alternate["configuration_scope_unknown"])
+
+    async def test_partial_scope_marker_does_not_inherit_legacy_completion(self):
+        from astrbot_host.legacy_api import LegacyMigrationWebAPI
+
+        (await self.controller.initialize_profile()).unwrap()
+        api = LegacyMigrationWebAPI(self.controller)
+        self.assertTrue(api._mark_imported(2, self.v1, configuration_scope="proactive"))
+
+        state = api._install_state(self.v1, [{"available": True}])
+        self.assertEqual(state["phase"], "upgrade_pending")
+        self.assertFalse(state["configuration_imported"])
+        self.assertFalse(state["configuration_scope_unknown"])
+        self.assertEqual(state["configuration_scopes"], ["proactive"])
 
 
 class HostConfigDiscoveryTests(unittest.IsolatedAsyncioTestCase):
@@ -354,7 +745,8 @@ class HostConfigDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.data_root = base / "plugin_data" / "astrbot_plugin_private_companion_v2"
         self.data_root.mkdir(parents=True)
         # V1 数据根留空：证明来源的就绪只靠宿主配置文件，不靠任何转储。
-        (base / "plugin_data" / "astrbot_plugin_private_companion").mkdir()
+        self.v1 = base / "plugin_data" / "astrbot_plugin_private_companion"
+        self.v1.mkdir(parents=True)
         config_dir = base / "config"
         config_dir.mkdir()
         self.host_config_path = config_dir / "astrbot_plugin_private_companion_config.json"
@@ -423,6 +815,25 @@ class HostConfigDiscoveryTests(unittest.IsolatedAsyncioTestCase):
             "back_probability": 0.4,
             "replies": ["V1 戳一戳回复"],
         })
+
+    async def test_auto_inheritance_rejects_unreadable_host_config_without_writing(self):
+        import astrbot_host.legacy_api as legacy_api
+
+        self.host_config_path.write_text("{ invalid json", encoding="utf-8")
+        self.controller.register_routes()
+        caller = RouteCaller(self.native, legacy_api)
+        (await self.controller.initialize_profile()).unwrap()
+        original_config = json.loads(json.dumps(self.controller.config))
+
+        inherited = await caller.call(LEGACY_PREFIX + "/auto", payload={})
+
+        self.assertEqual(inherited["status"], "error", inherited)
+        self.assertEqual(inherited["data"]["code"], "legacy_configuration_unavailable")
+        self.assertEqual(self.controller.config, original_config)
+        api = legacy_api.LegacyMigrationWebAPI(self.controller)
+        self.assertFalse(api._already_imported(self.v1))
+        self.assertIsNone(api._runtime_metadata_value("legacy_configuration_scopes"))
+        self.assertIsNone(api._runtime_metadata_value("legacy_configuration_imported_root"))
 
     def test_plugin_config_candidate_falls_back_for_noncopyable_runtime_mapping(self):
         import astrbot_host.legacy_api as legacy_api
@@ -569,6 +980,12 @@ class HostConfigDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("poke", self.controller.config)
 
     async def test_account_targets_and_persona_are_previewed_and_applied_without_mode_switch(self):
+        from dataclasses import replace
+        from unittest.mock import AsyncMock
+
+        self.controller.native_types = replace(self.controller.native_types,
+            persona_snapshot_lookup=AsyncMock(return_value="original"),
+            persona_selection_lookup=lambda _context, _umo, selected: selected)
         self._write_host_config(
             basic_config={
                 "bot_scope_mode": "all",

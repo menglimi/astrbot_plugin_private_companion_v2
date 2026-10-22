@@ -191,7 +191,7 @@ class JournalContactEvents:
                 "revision": entry.reference.revision, "operation_id": receipt.operation_id,
                 "journal_hash": digest(entry), "purpose": "life", "expires_at": stamp(opportunity.expires_at)}
             label = "一则新保存的梦境片段" if entry.reference.key.kind is JournalKind.DREAM else "一篇新保存的日记"
-            summary = f"{label}或许能带来一句自然的角色近况；这是私密主观书写，不合适就跳过，不把梦当成现实。"
+            summary = f"{label}或许能带来一句带余韵的角色近况或碎碎念；这是私密主观书写，只取最想顺口提到的一点，不合适就跳过，不把梦当成现实。"
             thought = Thought("journal-event-" + digest(marker), opportunity, ThoughtKind.CONVERSATION, summary,
                               EvidenceSnapshot(context.scope, at, (source,)), 1.0)
             return (opportunity, (ContactIntent("life", thought),), marker), True

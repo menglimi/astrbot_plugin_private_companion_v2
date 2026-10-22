@@ -39,6 +39,12 @@ from companion_v2.identity_policy.repository import PersistentIdentityDirectory
 GROUP = "conversation.busy_gate"
 OWNER = "conversation.busy_gate"
 LAYERS = (ConfigLayer.ROLE, ConfigLayer.WINDOW)
+BUSY_DELAY_INSTRUCTION = (
+    "本轮按忙碌日程规则经过了短暂延迟；规则命中只说明调度原因，不证明角色刚忙完、正在忙或用户在忙。"
+    "若已注入的角色状态或日程材料体现了手头事务，可在回应用户时顺手自然带出一点"
+    "“刚忙完手头这截/忙里抽空看手机”的轻量呼吸感，但不要每次生硬套用固定抱歉模板，"
+    "不要编造材料中未记录的具体进度或结果，也不要据此敷衍或拒绝回应。"
+)
 # V1 hard-coded ``min(12, ...)`` for group chats and capped both delays at 900.
 # V2 keeps the 900 bound for private passive replies and records the group cap as
 # a deliberate design difference (docs/BUSY_REPLY_GATE_SLICE_20260927.md).
@@ -424,7 +430,8 @@ def proactive_hold(runtime, context, *, now, settings=None, items=None):
 # Event-driven opportunities carry their own verified timing and stay outside the
 # gate, exactly as they keep their place ahead of the ordinary check-in slot.
 EVENT_MARKERS = frozenset((
-    "activity_event", "journal_event", "calendar_event", "date_event", "meal_event",
+    "activity_event", "growth_event", "journal_event", "calendar_event",
+    "reminiscence_event", "date_event", "meal_event",
     "weather_event", "weather_change_event", "official_alert_event", "balance_event", "news_event",
 ))
 

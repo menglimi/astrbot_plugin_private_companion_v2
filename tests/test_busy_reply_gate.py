@@ -346,6 +346,7 @@ class BusyGateHostTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         self.advance(app, (due - self.clock.now()).total_seconds() + 1)
         self.assertEqual((await self.done(app, later))["state"], "complete")
         self.assertEqual(len(self.called), before + 1)
+        self.assertIn(busy_gate.BUSY_DELAY_INSTRUCTION, self.called[-1].original.instruction)
 
     async def test_new_input_arms_and_then_never_shortens_the_deferred_window(self):
         """The first input of the window arms the delay; later ones keep it."""

@@ -5,6 +5,7 @@ durable occurrence ledger, so restart never replays a decision or a missed slot.
 """
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta
 import json
@@ -17,15 +18,18 @@ from companion_v2.conversation.messages import event_from_document
 from companion_v2.execution.models import QUEUED, TaskContext, TaskError, digest, require, stamp
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.delivery.history import VERSION as HISTORY_VERSION
+from companion_v2.role_work.life import rest_gate
 
 from .contact_models import ContactIntent
-from .configuration import GROUP, PURPOSES
+from .configuration import GROUP, PURPOSES, hour_activity_curve
 from .calendar_events import CalendarContactEvents
 from .date_events import DateContactEvents
 from .events import ActivityContactEvents
 from .greetings import GreetingContactEvents
+from .growth_events import GrowthContactEvents
 from .journal_events import JournalContactEvents
 from .meal_events import MealContactEvents
+from .reminiscence_events import ReminiscenceContactEvents
 from .rhythm import SLOT_WINDOW, ContactRhythm
 from .weather_events import WeatherContactEvents
 from .weather_change_events import WeatherChangeContactEvents
@@ -34,6 +38,7 @@ from .balance_events import BalanceContactEvents
 from .news_events import NewsContactEvents
 from .screen_events import ScreenContactEvents
 from .relationship_events import RelationshipContactEvents
+from .wake_events import WakeContactEvents
 from .models import EvidenceSnapshot, Opportunity, Thought, ThoughtKind
 from .persona_judge import KIND as JUDGE_KIND
 from .preferences import ContactPreferences
@@ -76,19 +81,26 @@ SYNTHETIC_ENVIRONMENT_EVENTS = {
 
 
 class ContactSchedule:
-    def __init__(self, contacts, messages, *, notify, role_life=None, role_journal=None, calendar=None,
-                 role_state=None, weather_port=None, weather_alert_port=None, balance_port=None, news_port=None,
-                 screen_peek=None):
+    def __init__(self, contacts, messages, *, notify, role_life=None, role_growth=None, role_journal=None,
+                 calendar=None, relationships=None, role_state=None, weather_port=None,
+                 weather_alert_port=None, balance_port=None, news_port=None, screen_peek=None,
+                 wake_port=None):
         self.contacts, self.messages, self.notify = contacts, messages, notify
         self.tasks, self.runtime = contacts.tasks, contacts.runtime
         self.screen_peek = screen_peek
+        self.role_state = role_state
+        self.wake_events = (WakeContactEvents(contacts, role_state, wake_port)
+                            if wake_port is not None else None)
         self._maintenance_contexts = {}
         self._workers, self._cursor, self._native_cursor, self._closed = {}, 0, 0, False
         self._judges = {}
         self.rhythm = ContactRhythm(contacts.runtime)
         self.events = ActivityContactEvents(contacts, role_life) if role_life is not None else None
+        self.growth_events = GrowthContactEvents(contacts, role_growth) if role_growth is not None else None
         self.journal_events = JournalContactEvents(contacts, role_journal) if role_journal is not None else None
         self.calendar_events = CalendarContactEvents(contacts, calendar) if calendar is not None else None
+        self.reminiscence_events = (ReminiscenceContactEvents(contacts, relationships)
+                                    if relationships is not None else None)
         self.date_events = DateContactEvents(contacts)
         self.greeting_events = GreetingContactEvents(contacts, role_state)
         self.meal_events = MealContactEvents(contacts)
@@ -269,10 +281,11 @@ class ContactSchedule:
 
     def validate_origin(self, context, origin, at):
         current, row, event = self._origin(context, origin["batch_id"], at)
-        event_markers = {"activity_event", "journal_event", "calendar_event", "date_event",
+        event_markers = {"activity_event", "growth_event", "journal_event", "calendar_event",
+                         "reminiscence_event", "date_event",
                          "meal_event", "weather_event", "weather_change_event", "official_alert_event",
                          "balance_event", "news_event", "screen_event", "greeting_event", "burst_event",
-                         "relationship_event", "followup_event", "open_loop_event"}
+                         "relationship_event", "followup_event", "open_loop_event", "morning_event"}
         rhythm_event_markers = event_markers - {"relationship_event"}
         if current != {key: value for key, value in origin.items() if key not in event_markers}:
             raise TaskError("contact_conversation_changed", "automatic opportunity lost its original conversation")
@@ -284,7 +297,7 @@ class ContactSchedule:
             raise TaskError("contact_conversation_active", "original conversation has not reached its configured idle time")
         interaction = None
         if ("greeting_event" in origin or "burst_event" in origin or "followup_event" in origin
-                or not rhythm_event_markers.intersection(origin)):
+                or "morning_event" in origin or not rhythm_event_markers.intersection(origin)):
             if self.contacts.history is None:
                 raise TaskError("delivery_history_unavailable", "automatic contact requires confirmed communication history")
             interaction = self.contacts.history.interaction(context, at, action=GROUP)
@@ -301,6 +314,10 @@ class ContactSchedule:
             if self.events is None:
                 raise TaskError("contact_activity_unavailable", "automatic activity requires its original producer")
             self.events.validate(context, origin["activity_event"], at)
+        if "growth_event" in origin:
+            if self.growth_events is None:
+                raise TaskError("contact_growth_unavailable", "automatic growth contact requires its original producer")
+            self.growth_events.validate(context, origin["growth_event"], at)
         if "journal_event" in origin:
             if self.journal_events is None:
                 raise TaskError("contact_journal_unavailable", "automatic journal sharing requires its original producer")
@@ -309,6 +326,10 @@ class ContactSchedule:
             if self.calendar_events is None:
                 raise TaskError("contact_calendar_unavailable", "automatic reminder requires its original calendar")
             self.calendar_events.validate(context, origin["calendar_event"], at)
+        if "reminiscence_event" in origin:
+            if self.reminiscence_events is None:
+                raise TaskError("contact_reminiscence_unavailable", "reminiscence contact requires its original producer")
+            self.reminiscence_events.validate(context, origin["reminiscence_event"], at)
         if "date_event" in origin:
             self.date_events.validate(context, origin["date_event"], at)
         if "meal_event" in origin:
@@ -335,6 +356,10 @@ class ContactSchedule:
             self.relationship_events.validate(context, event, origin["relationship_event"], at)
         if "followup_event" in origin:
             self._validate_followup(context, event, origin["followup_event"], preferences, at, interaction)
+        if "morning_event" in origin:
+            if self.wake_events is None:
+                raise TaskError("contact_morning_unavailable", "the morning chain is not assembled")
+            self.wake_events.validate(context, origin["morning_event"], at, interaction=interaction)
         if "open_loop_event" in origin:
             self._validate_open_loop(context, origin["open_loop_event"], preferences, at)
 
@@ -375,7 +400,13 @@ class ContactSchedule:
         # All discretionary openings share the stable conversation slot. News
         # polling can mint a fresh opportunity on every tick; using that timestamp
         # would keep re-rolling the curve until even a sleeping hour admits it.
-        hour_allowed = self.rhythm.hour_allows(context, preferences, opened, observed_at=at)
+        morning_curve = None
+        if self.wake_events is not None:
+            morning_curve = self.wake_events.adjusted_curve(
+                context, preferences, opened,
+                hour_activity_curve(preferences.values["proactive_hour_activity_curve"]))
+        hour_allowed = self.rhythm.hour_allows(context, preferences, opened, observed_at=at,
+                                                curve=morning_curve)
         if self.calendar_events is not None:
             candidate, more = self.calendar_events.select(context, preferences, at)
             if candidate is not None:
@@ -389,6 +420,24 @@ class ContactSchedule:
         if self._appointment_silence(context, preferences, at):
             self._note_window(context, row, at, "rhythm", "skipped", "appointment_silence")
             return None
+        if self.wake_events is not None:
+            candidate = self.wake_events.select(context, preferences, at, source=event.source,
+                                                 interaction=interaction)
+            if candidate is not None:
+                opportunity, intents, marker = candidate
+                intents = tuple(replace(intent, thought=replace(intent.thought, evidence=EvidenceSnapshot(
+                    context.scope, at, (event.source,)))) for intent in intents)
+                return context, opportunity, intents, batch["role_instruction"], {
+                    **origin, "morning_event": marker}
+            diagnostic = self.wake_events.last_diagnostic
+            if isinstance(diagnostic, Mapping) and diagnostic.get("reason"):
+                reason_code = str(diagnostic["reason"])
+                if diagnostic.get("state"):
+                    reason_code += "@" + str(diagnostic["state"])
+                if diagnostic.get("confidence") is not None:
+                    reason_code += ":" + str(diagnostic["confidence"])
+                self._note_window(context, row, at, "morning", "skipped", reason_code[:96],
+                                  purpose="greeting", next_at=diagnostic.get("next_at"))
         candidate = self.greeting_events.select(context, preferences, at, interaction=interaction)
         if candidate is not None:
             opportunity, intents, marker = candidate
@@ -416,6 +465,31 @@ class ContactSchedule:
                 return context, opportunity, intents, batch["role_instruction"], {**origin, "journal_event": marker}
             if more:
                 self._note_window(context, row, at, "sources", "pending", "journal_source_pending")
+                return None
+        if hour_allowed and self.growth_events is not None:
+            candidate, more = self.growth_events.select(context, preferences, at)
+            candidate = self._share_candidate(context, preferences, candidate)
+            if candidate is not None:
+                opportunity, intents, marker = candidate
+                intents = tuple(replace(intent, thought=replace(intent.thought, evidence=EvidenceSnapshot(
+                    context.scope, at, (event.source, *intent.thought.evidence.sources)))) for intent in intents)
+                return context, opportunity, intents, batch["role_instruction"], {**origin, "growth_event": marker}
+            if more:
+                self._note_window(context, row, at, "sources", "pending", "growth_source_pending")
+                return None
+        if hour_allowed and self.calendar_events is not None:
+            candidate, more = self.calendar_events.select_transitions(context, preferences, at)
+            if candidate is not None:
+                opportunity, intents, marker = candidate
+                if marker.get("purpose") == "life":
+                    candidate = self._share_candidate(context, preferences, candidate)
+                if candidate is not None:
+                    opportunity, intents, marker = candidate
+                    intents = tuple(replace(intent, thought=replace(intent.thought, evidence=EvidenceSnapshot(
+                        context.scope, at, (event.source, *intent.thought.evidence.sources)))) for intent in intents)
+                    return context, opportunity, intents, batch["role_instruction"], {**origin, "calendar_event": marker}
+            if more:
+                self._note_window(context, row, at, "sources", "pending", "calendar_transition_pending")
                 return None
         candidate = self.screen_events.select(context, preferences, at) if hour_allowed else None
         if candidate is not None:
@@ -466,8 +540,17 @@ class ContactSchedule:
         if candidate is not None:
             opportunity, intents, marker = candidate
             return context, opportunity, intents, batch["role_instruction"], {**origin, "open_loop_event": marker}
-        if burst is None and self.runtime.read_one("""SELECT 1 FROM execution_tasks WHERE origin_key = ? AND kind = ?
-                AND created_at > ? LIMIT 1""", (context.key, CONTACT_KIND, stamp(at - base_interval))):
+        if hour_allowed and self.reminiscence_events is not None:
+            candidate, more = self.reminiscence_events.select(context, preferences, at)
+            if candidate is not None:
+                opportunity, intents, marker = candidate
+                intents = tuple(replace(intent, thought=replace(intent.thought, evidence=EvidenceSnapshot(
+                    context.scope, at, (event.source, *intent.thought.evidence.sources)))) for intent in intents)
+                return context, opportunity, intents, batch["role_instruction"], {**origin, "reminiscence_event": marker}
+            if more:
+                self._note_window(context, row, at, "sources", "pending", "reminiscence_source_pending")
+                return None
+        if burst is None and self._recent_attempt_blocking(context, at, base_interval):
             self._note_window(context, row, at, "rhythm", "skipped", "recent_attempt_cooldown")
             return None
         if preferences.unanswered_paused(unanswered):
@@ -488,12 +571,11 @@ class ContactSchedule:
                 return None
             thought = Thought("conversation-burst-" + digest([burst.origin_contact_id, burst.index]),
                 opportunity, ThoughtKind.CONVERSATION,
-                f"这是同一阵念头里的第{burst.index + 1}条短消息，换一个角度，不要重复上一条，也不要求对方回应。",
+                f"这是同一阵念头里的第{burst.index + 1}条短消息，顺着刚才没说完的余韵补充一个具体细节或换个轻巧角度，不要重复上一条，也不要求对方回应。",
                 EvidenceSnapshot(context.scope, at, (event.source,)), 1.0)
             return (context, opportunity, (ContactIntent("chat", thought),), batch["role_instruction"],
                     {**origin, "burst_event": burst.document()})
-        if self.runtime.read_one("""SELECT 1 FROM execution_tasks WHERE origin_key = ? AND kind = ?
-                AND created_at > ? LIMIT 1""", (context.key, CONTACT_KIND, stamp(at - interval))):
+        if self._recent_attempt_blocking(context, at, interval, include_skips=True):
             self._note_window(context, row, at, "rhythm", "skipped", "recent_attempt_cooldown")
             return None
         expires = opened + min(interval, timedelta(minutes=5))
@@ -674,9 +756,20 @@ class ContactSchedule:
             result = direct(candidate, "activity_event", "角色活动完成回执", "reading" if purpose == "creation" else "activity")
             if result is not None:
                 return result
+        if purpose in ("life", "creation") and self.growth_events is not None:
+            candidate, _ = self.growth_events.select(context, preferences, at, purpose=purpose)
+            result = direct(candidate, "growth_event", "角色成长进展回执",
+                            "skill_growth" if purpose == "creation" else "goal_growth")
+            if result is not None:
+                return result
         if purpose == "life" and self.journal_events is not None:
             candidate, _ = self.journal_events.select(context, preferences, at)
             result = direct(candidate, "journal_event", "角色日记/梦境回执", "journal")
+            if result is not None:
+                return result
+        if purpose == "life" and self.calendar_events is not None:
+            candidate, _ = self.calendar_events.select_transitions(context, preferences, at, purpose="life")
+            result = direct(candidate, "calendar_event", "角色日程结束回执", "role_plan_finished")
             if result is not None:
                 return result
 
@@ -684,6 +777,12 @@ class ContactSchedule:
             candidate, source_stages = await self.screen_events.diagnostic(context, self.screen_peek,
                 test_id=test_id, role_instruction=batch["role_instruction"])
             result = direct(candidate, "screen_event", "真实窥屏与视觉分析", "glance")
+            if result is not None:
+                return result
+
+        if purpose in ("affection", "care") and self.reminiscence_events is not None:
+            candidate, _ = self.reminiscence_events.select(context, preferences, at, purpose=purpose)
+            result = direct(candidate, "reminiscence_event", "共同记忆回响生产器", purpose)
             if result is not None:
                 return result
 
@@ -707,6 +806,11 @@ class ContactSchedule:
                 return result
 
         if purpose == "followup":
+            if self.calendar_events is not None:
+                candidate, _ = self.calendar_events.select_transitions(context, preferences, at, purpose="followup")
+                result = direct(candidate, "calendar_event", "已结束约定余温生产器", "post_commitment")
+                if result is not None:
+                    return result
             interaction = (self.contacts.history.interaction(context, at, action=GROUP)
                            if self.contacts.history is not None else None)
             result = direct(self._followup_candidate(context, event, interaction, preferences, at),
@@ -789,9 +893,11 @@ class ContactSchedule:
         route_purposes = {
             "synthetic_event": set(PURPOSES),
             "conversation_scheduler": {"chat"}, "greeting_event": {"greeting"}, "date_event": {"greeting"},
-            "activity_event": {"life", "creation"}, "journal_event": {"life"}, "screen_event": {"screen"},
+            "activity_event": {"life", "creation"}, "growth_event": {"life", "creation"},
+            "journal_event": {"life"}, "screen_event": {"screen"},
             "relationship_event": {"affection", "care", "play", "repair", "invitation"},
-            "calendar_event": {"reminder"}, "meal_event": {"meal"}, "followup_event": {"followup"},
+            "reminiscence_event": {"affection", "care"},
+            "calendar_event": {"reminder", "followup", "life"}, "meal_event": {"meal"}, "followup_event": {"followup"},
             "open_loop_event": {"followup"},
             "official_alert_event": {"environment"}, "balance_event": {"environment"},
             "news_event": {"news", "environment"}, "weather_event": {"environment"},
@@ -930,7 +1036,7 @@ class ContactSchedule:
         for memo in result.unwrap():
             if memo.expired(at) or memo.followup_count > 0 or memo.created_at is None:
                 continue
-            if event.received_at > memo.created_at:
+            if event.received_at > memo.created_at and memo.revision <= 1:
                 continue
             opened = memo.created_at + delay
             if memo.schedule is not None:
@@ -945,7 +1051,8 @@ class ContactSchedule:
                 continue
             if at < opened or at >= expires:
                 continue
-            opportunity = Opportunity("open-loop-followup-" + digest([context.key, memo.memo_id]),
+            seed_parts = [context.key, memo.memo_id] + ([memo.revision] if memo.revision > 1 else [])
+            opportunity = Opportunity("open-loop-followup-" + digest(seed_parts),
                                       context.scope, opened, expires)
             task_id = self.contacts.task_id(context, opportunity)
             if (self.runtime.read_one("SELECT 1 FROM execution_tasks WHERE task_id = ?", (task_id,))
@@ -979,12 +1086,38 @@ class ContactSchedule:
             if due is not None:
                 opened = max(opened, due)
         expires = memo.expires_at
+        skipped = self.runtime.read_one(
+            """SELECT 1 FROM proactive_contacts
+               WHERE origin_key = ?
+                 AND json_extract(record_json, '$.automatic_origin.open_loop_event.memo_id') = ?
+                 AND json_extract(record_json, '$.decision') = 'skip'""",
+            (context.key, marker["memo_id"])) is not None
+        allowed_counts = (0, 1) if skipped else (1,)
         if (memo.purpose != "open_loop" or memo.state != "active" or memo.expired(at)
-                or expires is None or memo.revision != marker["memo_revision"] or memo.followup_count != 1
+                or expires is None or memo.revision != marker["memo_revision"]
+                or memo.followup_count not in allowed_counts
                 or marker["opened_at"] != stamp(opened) or marker["expires_at"] != stamp(expires)
                 or at < opened or at >= expires):
             raise TaskError("contact_open_loop_expired", "the original open-loop opportunity has expired")
         preferences.require_contact("followup")
+
+    def _recent_attempt_blocking(self, context, at, cooldown, *, include_skips=False):
+        """True if a recent contact task ran inside the cooldown window.
+
+        When ``include_skips`` is False, a model ``skip`` retires its own
+        opportunity ID without locking out every subsequent producer; the
+        ordinary conversation slot still waits out its full interval after any
+        attempt so a skipped event does not immediately fall through to a
+        generic conversation slot.
+        """
+        if include_skips:
+            return self.runtime.read_one("""SELECT 1 FROM execution_tasks WHERE origin_key = ? AND kind = ?
+                AND created_at > ? LIMIT 1""", (context.key, CONTACT_KIND, stamp(at - cooldown))) is not None
+        return self.runtime.read_one("""SELECT 1 FROM execution_tasks t
+            LEFT JOIN proactive_contacts c ON c.task_id = t.task_id
+            WHERE t.origin_key = ? AND t.kind = ? AND t.created_at > ?
+              AND COALESCE(json_extract(c.record_json, '$.decision'), 'send') != 'skip'
+            LIMIT 1""", (context.key, CONTACT_KIND, stamp(at - cooldown))) is not None
 
     def _appointment_silence(self, context, preferences, at):
         """True while a voluntary contact is too close to an accepted appointment.
@@ -1011,6 +1144,34 @@ class ContactSchedule:
             return None
         busy = busy_context(readable_items(self.runtime, context), now=at, settings=settings)
         return proactive_defer_until(settings, busy, now=at)
+
+    def _sleep_hold(self, context, origin, at):
+        """Resume instant while the role's own active sleep receipt is resting, else None.
+
+        Like ``_busy_hold``, this runs at the plan boundary without consuming the
+        task ledger, and exempts event-driven opportunities as well as explicit
+        ``insomnia_night`` greetings unless the user woke the role within the
+        active awake-grace window.
+        """
+        if busy_exempt_source(origin):
+            return None
+        if isinstance(origin, dict):
+            greeting = origin.get("greeting_event")
+            if isinstance(greeting, dict) and greeting.get("kind") == "insomnia_night":
+                return None
+        settings = rest_gate.read_settings(self.runtime, context)
+        if not settings.enable_rest_reply_simulation:
+            return None
+        sleep = rest_gate.sleep_context(self.runtime, context, now=at, settings=settings)
+        if not sleep.get("resting"):
+            return None
+        grace = rest_gate.awake_grace(rest_gate.document(self.runtime, context), now=at)
+        if grace.get("active") and grace.get("sleep") == sleep.get("sleep"):
+            return None
+        wake_at = sleep.get("wake_at")
+        if isinstance(wake_at, datetime) and wake_at > at:
+            return wake_at
+        return at + timedelta(seconds=rest_gate.hold_defer(sleep, now=at))
 
     def _record_worker_result(self, context, origin, result, *, purpose=None, failure_stage="task_admission"):
         if result.is_success:
@@ -1261,6 +1422,11 @@ class ContactSchedule:
                     self._note_window(context, row, now, "busy_gate", "skipped", "conversation_busy",
                                       purpose=purpose, next_at=busy_until)
                     continue
+                sleep_until = self._sleep_hold(context, origin, now)
+                if sleep_until is not None:
+                    self._note_window(context, row, now, "rest_gate", "skipped", "role_sleeping",
+                                      purpose=purpose, next_at=sleep_until)
+                    continue
                 worker = asyncio.create_task(self._run(plan), name="companion:automatic-contact:" + row["origin_key"])
                 self._workers[row["origin_key"]] = worker
                 self._note_window(context, row, now, "task_queue", "queued", "candidate_queued", purpose=purpose)
@@ -1288,10 +1454,14 @@ class ContactSchedule:
             worker.cancel()
         if self.events is not None:
             self.events.close()
+        if self.growth_events is not None:
+            self.growth_events.close()
         if self.journal_events is not None:
             self.journal_events.close()
         if self.calendar_events is not None:
             self.calendar_events.close()
+        if self.reminiscence_events is not None:
+            self.reminiscence_events.close()
         if self.weather_events is not None:
             self.weather_events.close()
         if self.weather_change_events is not None:

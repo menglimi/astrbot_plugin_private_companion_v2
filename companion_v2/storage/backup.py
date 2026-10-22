@@ -114,7 +114,8 @@ def _inspect(path: Path, *, installation_id: str, schema_version: str) -> dict:
     # A read-only URI keeps inspection from creating or migrating anything, and a
     # wall clock bounds a hang instead of relying on a busy timeout.
     try:
-        connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=10.0)
+        from .sqlite_path import readonly_uri
+        connection = sqlite3.connect(readonly_uri(path), uri=True, timeout=10.0)
     except sqlite3.Error as error:
         raise BackupError("backup_snapshot_unreadable", "the snapshot is not a readable SQLite database") from error
     try:
@@ -333,7 +334,8 @@ def current_schema_version(data_root: Path) -> str | None:
     if not database.is_file():
         return None
     try:
-        connection = sqlite3.connect(f"file:{database.as_posix()}?mode=ro", uri=True, timeout=10.0)
+        from .sqlite_path import readonly_uri
+        connection = sqlite3.connect(readonly_uri(database), uri=True, timeout=10.0)
     except sqlite3.Error:
         return None
     try:

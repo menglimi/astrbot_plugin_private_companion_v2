@@ -12,7 +12,7 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
 const drains = async (times = 8) => { for (let index = 0; index < times; index += 1) await flush(); };
 const wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 const TOKEN = 'a'.repeat(64);
-const PREFIX = '/astrbot_plugin_private_companion_v2/';
+const PREFIX = '/astrbot_plugin_private_companion/';
 const plain = value => JSON.parse(JSON.stringify(value));
 
 /* The registered group is window-scoped; these are the fields the page edits. */
@@ -38,6 +38,12 @@ const DEFAULTS = {
   group_air_guard_enabled: true, group_air_guard_window_seconds: 60,
   group_air_guard_max_bot_replies: 3, group_air_guard_cooldown_seconds: 150,
   group_air_guard_polite_loop_limit: 2,
+  private_closing_guard_enabled: true, private_closing_guard_window_seconds: 1800,
+  private_closing_guard_prompt_enabled: true,
+  private_debounce_enabled: true, private_debounce_min_ms: 1500,
+  private_debounce_max_ms: 4000, private_debounce_total_ms: 8000,
+  group_conversation_followup_enabled: true, group_conversation_followup_seconds: 120,
+  group_conversation_followup_max_turns: 3,
   enable_group_injection_guard: true, enable_group_privacy_guard: true,
   enable_group_reality_promise_guard: true, enable_context_image_captioning: false,
   context_image_caption_max_items: 2, enable_private_image_self_recognition: false,
@@ -62,6 +68,7 @@ const DEFAULTS = {
   reply_quote_group_enabled: true, reply_quote_first_part_only: true, reply_quote_skip_chars: 0,
   reply_mention_speaker_enabled: false, reply_diagnostic_limit: 80,
   voice_trigger_mode: 'always', voice_generation_mode: 'plain', voice_segment_mode: 'each',
+  voice_conversion_scope: 'full',
   voice_delivery_mode: 'voice_and_text', voice_position: 'after_media', voice_language: 'zh',
   voice_foreign_text_mode: 'original', voice_probability: 1, voice_cooldown_seconds: 0,
   voice_max_speech_chars: 1800, voice_timeout_seconds: 30, voice_trigger_keywords: '',
@@ -83,7 +90,11 @@ const LIMITS = {
   group_wakeup_short_text_wait_ms: [0, 30000], group_wakeup_log_limit: [10, 300],
   group_air_guard_window_seconds: [30, 1800], group_air_guard_max_bot_replies: [1, 20],
   group_air_guard_cooldown_seconds: [0, 1800],
+  group_conversation_followup_seconds: [15, 1800], group_conversation_followup_max_turns: [1, 12],
   group_air_guard_polite_loop_limit: [1, 10], context_image_caption_max_items: [0, 8],
+  private_closing_guard_window_seconds: [60, 7200],
+  private_debounce_min_ms: [10, 120000], private_debounce_max_ms: [10, 120000],
+  private_debounce_total_ms: [10, 120000],
   private_image_vision_cache_max_items: [0, 2000], private_image_vision_max_chars: [120, 4000],
   private_image_vision_wait_seconds: [1, 30], private_image_provider_failure_cooldown_seconds: [0, 3600],
   video_understanding_max_chars: [200, 6000], video_understanding_wait_seconds: [1, 60],
@@ -103,6 +114,10 @@ const FIELDS = Object.fromEntries(Object.entries(DEFAULTS).map(([name, value]) =
     'video_understanding_private_enabled', 'video_understanding_group_enabled',
     'file_understanding_private_enabled', 'file_understanding_group_enabled',
     'prompt_style_mode',
+    'private_closing_guard_enabled', 'private_closing_guard_window_seconds',
+    'private_closing_guard_prompt_enabled',
+    'private_debounce_enabled', 'private_debounce_min_ms', 'private_debounce_max_ms',
+    'private_debounce_total_ms',
     ...Object.keys(DEFAULTS).filter(name => name.startsWith('group_wakeup_') && !GROUP_SCOPE_FIELDS.has(name)),
   ]);
   const entry = {kind, default: value, apply_mode: 'immediate',
@@ -148,7 +163,8 @@ function harness() {
       setAttribute(name, value) { attributes[name] = value; }};
   });
   const sectionIds = ['segment', 'style', 'cleanup', 'wakeup_direct', 'wakeup_interest', 'wakeup_members',
-    'wakeup_cold_group', 'wakeup_fatigue', 'group_air_guard', 'group_content_safety',
+    'wakeup_cold_group', 'wakeup_fatigue', 'group_continuation', 'private_debounce', 'group_air_guard',
+    'private_closing', 'group_content_safety',
     'context_image', 'image_narration', 'video_narration', 'file_understanding', 'forwards', 'voice', 'components', 'checks'];
   const sectionTabs = sectionIds.map(id => {
     const tab = {dataset: {wbSection: id}, focus() {}, click() {
@@ -615,7 +631,7 @@ test('reply expression, perception, and decision settings partition every field 
   const decision = plain(live(harnessed).state.container.groups.flatMap(group => group.fields));
   assert.deepEqual(plain(live(harnessed).state.container.groups.map(group => group.id)),
     ['wakeup_direct', 'wakeup_interest', 'wakeup_members', 'wakeup_cold_group', 'wakeup_fatigue',
-      'group_air_guard', 'group_content_safety']);
+      'group_continuation', 'private_debounce', 'group_air_guard', 'private_closing', 'group_content_safety']);
   harnessed.page.mount(harnessed.root, {view: 'perception'});
   await drains();
   harnessed.requests[2].resolve(status());
@@ -665,6 +681,71 @@ test('decision view edits the same reply route and omits expression-only tools',
   await saving;
   await drains();
   harnessed.page.unmount();
+});
+
+test('decision tempo exposes and saves the follow-up fuse settings', async () => {
+  const h = await loaded(harness(), 'decision');
+  assert.equal(h.page.selectSection('group_continuation'), true);
+  assert.match(h.slots.settings.innerHTML, /连续对话与熔断/);
+  assert.match(h.slots.settings.innerHTML, /每次唤醒最多自动续接轮数/);
+  const instance = live(h);
+  instance.state.draft.group_conversation_followup_max_turns = 2;
+  const saving = instance.save(false);
+  await drains();
+  assert.deepEqual(plain(h.requests[1].body.changes), {group_conversation_followup_max_turns: 2});
+  h.requests[1].resolve({result: {operation_id: 'followup-save', replayed: false},
+    status: status({group_conversation_followup_max_turns: 2}, 'e'.repeat(64))});
+  await saving;
+  h.page.unmount();
+});
+
+test('decision safety exposes the private closing guard as a role preference', async () => {
+  const h = await loaded(harness(), 'decision');
+  assert.equal(h.page.selectSection('private_closing'), true);
+  assert.match(h.slots.settings.innerHTML, /私聊收尾 · 允许沉默/);
+  assert.match(h.slots.settings.innerHTML, /启用私聊收尾沉默/);
+  const instance = live(h);
+  for (const name of ['private_closing_guard_enabled', 'private_closing_guard_window_seconds',
+    'private_closing_guard_prompt_enabled']) {
+    assert.ok(instance.state.container.fields[name], `${name} is available in the decision editor`);
+  }
+  assert.deepEqual(plain(instance.state.container.fields.private_closing_guard_enabled.editable),
+    ['role', 'window']);
+  assert.equal(instance.state.container.fields.private_closing_guard_window_seconds.minimum, 60);
+  assert.equal(instance.state.container.fields.private_closing_guard_window_seconds.maximum, 7200);
+  instance.state.draft.private_closing_guard_window_seconds = 600;
+  const saving = instance.save(false);
+  await drains();
+  assert.deepEqual(plain(h.requests[1].body.changes), {private_closing_guard_window_seconds: 600});
+  h.requests[1].resolve({result: {operation_id: 'closing-save', replayed: false},
+    status: status({private_closing_guard_window_seconds: 600}, 'f'.repeat(64))});
+  await saving;
+  h.page.unmount();
+});
+
+test('decision tempo exposes private debounce as a role preference', async () => {
+  const h = await loaded(harness(), 'decision');
+  assert.equal(h.page.selectSection('private_debounce'), true);
+  assert.match(h.slots.settings.innerHTML, /私聊节奏 · 连续输入/);
+  assert.match(h.slots.settings.innerHTML, /启用私聊连续输入防抖/);
+  const instance = live(h);
+  for (const name of ['private_debounce_enabled', 'private_debounce_min_ms',
+    'private_debounce_max_ms', 'private_debounce_total_ms']) {
+    assert.ok(instance.state.container.fields[name], `${name} is available in the decision editor`);
+  }
+  assert.deepEqual(plain(instance.state.container.fields.private_debounce_enabled.editable),
+    ['role', 'window']);
+  assert.equal(instance.state.container.fields.private_debounce_min_ms.minimum, 10);
+  assert.equal(instance.state.container.fields.private_debounce_max_ms.maximum, 120000);
+  assert.equal(instance.state.container.fields.private_debounce_total_ms.maximum, 120000);
+  instance.state.draft.private_debounce_min_ms = 2000;
+  const saving = instance.save(false);
+  await drains();
+  assert.deepEqual(plain(h.requests[1].body.changes), {private_debounce_min_ms: 2000});
+  h.requests[1].resolve({result: {operation_id: 'debounce-save', replayed: false},
+    status: status({private_debounce_min_ms: 2000}, 'e'.repeat(64))});
+  await saving;
+  h.page.unmount();
 });
 
 test('the expression page leaves image and forward understanding to the understanding page', async () => {

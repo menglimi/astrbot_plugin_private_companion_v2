@@ -6,7 +6,7 @@ from pathlib import Path
 
 from tools.native_acceptance_guard import LEGACY_IDS, scan_dependencies
 
-CORE_ID = "astrbot_plugin_private_companion_v2"
+CORE_ID = "astrbot_plugin_private_companion"
 EXCLUDED = {"data", "__pycache__", ".git", ".pytest_cache", "node_modules", "dist", "build", "logs"}
 
 

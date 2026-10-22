@@ -168,6 +168,26 @@ class LocalReplyGenerator:
             value = getattr(event, name, None)
             if type(value) is bool:
                 facts[name] = facts.get(name, False) or value
+        for material in getattr(getattr(request, "context", None), "materials", ()):
+            if getattr(material, "purpose", None) == "role_state":
+                try:
+                    values = json.loads(material.payload).get("simulation", {}).get("values", {})
+                    summary = {}
+                    if isinstance(values.get("energy"), int):
+                        summary["energy"] = values["energy"]
+                    for key in ("sleep", "busy"):
+                        if isinstance(values.get(key), str) and values[key].strip():
+                            summary[key] = values[key].strip()[:80]
+                    mood_val = values.get("mood")
+                    if isinstance(mood_val, str) and mood_val.strip():
+                        summary["mood"] = mood_val.strip()[:80]
+                    elif isinstance(mood_val, dict) and isinstance(mood_val.get("description"), str):
+                        summary["mood"] = mood_val["description"].strip()[:80]
+                    if summary:
+                        facts["role_state_summary"] = summary
+                except Exception:
+                    pass
+                break
         return facts
 
     async def _laya_decision(self, run, request):
@@ -260,7 +280,7 @@ class LocalReplyGenerator:
                            + ("\n" + voice.instruction if voice.instruction else "")).strip()
         return replace(request, instruction=instruction + "\n" + request.instruction) if instruction else request
 
-    async def generate(self, run):
+    async def generate(self, run, *, attention_note: str = ""):
         if run.supervisor is not self.messages.tasks:
             raise ValueError("reply generation must use the original supervisor")
         started = perf_counter()
@@ -438,6 +458,8 @@ class LocalReplyGenerator:
         # Laya can change presentation policy after the first request was
         # assembled. Keep the session's sealed request aligned with the
         # continuation fields used by the generation loop.
+        if attention_note:
+            request = replace(request, instruction=request.instruction + "\n" + attention_note)
         request = replace(request, streaming=streaming, streaming_mode=segmentation.streaming_mode)
         tools = self.messages.tools
         participation = getattr(tools, "group_participation", None)
@@ -461,8 +483,23 @@ class LocalReplyGenerator:
                     and not (voice is not None and eligible(voice, input_text=input_text,
                         kind=run.task.spec.context.scope.kind.value, batch_id=run.task.spec.request_ref))):
                 from .streaming_reply import StreamingReply
+                stream_settings = dict(captured["settings"])
+                if run.task.spec.context.scope.kind is ScopeKind.PRIVATE:
+                    state_owner = getattr(self.messages, "role_state_context", None)
+                    if state_owner is not None:
+                        try:
+                            simulation = state_owner.service.read(run.task.spec.context,
+                                at=self.messages.tasks.now(), injection=True)
+                            from companion_v2.role_work.state import humanized
+                            values = simulation.get("values") if isinstance(simulation.get("values"), dict) else {}
+                            if isinstance(values.get("energy"), int):
+                                stream_settings.setdefault("role_energy", values["energy"])
+                            if humanized.is_sleepy(simulation):
+                                stream_settings.setdefault("role_sleepy", True)
+                        except Exception:
+                            pass
                 stream_reply = StreamingReply(self.messages, run, segmentation, presentation,
-                                              captured["settings"], self.send_stream_part)
+                                              stream_settings, self.send_stream_part)
             while not local_failure_notice:
                 current = self._request(run, segmentation, streaming, voice, presentation,
                                         image_output=image_output)
@@ -685,7 +722,7 @@ class LocalReplyGenerator:
                             VALUES (?, ?, ?, ?, ?, ?, ?)""", (part_id, speech[sequence - 1],
                             policy.provider_for_language(), "voice_only" if action == "voice_only" else policy.delivery_mode,
                             policy.position,
-                            policy.timeout_seconds, policy.cooldown_seconds))
+                            policy.timeout_seconds, policy.cooldown(run.task.spec.context.scope.kind.value)))
                 if images:
                     image_part_id = "part-" + digest([batch_id, image_sequence])
                     self.messages.reply_images.publish(row, run.task.spec.context, image_part_id, images,

@@ -18,9 +18,7 @@ MAX_BACK_TIMES = 5
 MODEL_REPLY_KIND = "conversation.poke_reply"
 MODEL_REPLY_OWNER = "conversation.pokes"
 MODEL_REPLY_PROMPT = (
-    "把这次戳一戳当作轻量互动，按角色个性自然回应，可以俏皮、亲近或简短接住。"
-    "不要推断对方为什么戳、当时的情绪或你们的关系，不编造刚发生的事。"
-    "回复内容保持一条适合直接发送的简短正文，不解释选择或复述规则；最终输出遵循本轮宿主提供的回复格式。"
+    "把这次戳一戳当作轻量互动，按角色个性与当下状态自然回应，可以俏皮、亲近、犯困或简短接住。不推断对方为什么戳、当时的情绪或你们的关系，不编造刚发生的事；保持一条适合直接发送的简短正文，不解释选择或复述规则，最终输出遵循本轮宿主提供的回复格式。"
 )
 
 
@@ -154,10 +152,32 @@ class PokeReplyModel:
 
     async def generate(self, run):
         job = self.pending[run.task.task_id]
+        at = self.tasks.now()
         trigger = BackgroundPromptTrigger("poke-" + digest(job.event_key), job.context.actor.principal,
-                                          job.context.scope, self.tasks.now())
-        material = PromptMaterial(MODEL_REPLY_OWNER, "native_poke_notice",
-                                  "当前聊天中收到了一次戳一戳提示。")
+                                          job.context.scope, at)
+        notice_text = "当前聊天中收到了一次戳一戳提示。"
+        role_state = getattr(self.app, "role_state", None)
+        if role_state is not None:
+            try:
+                view = role_state.read(job.context, at=at, injection=True)
+                values = view.get("values") if isinstance(view, dict) else None
+                if isinstance(values, dict):
+                    parts = []
+                    if isinstance(values.get("energy"), int):
+                        parts.append(f"精力={values['energy']}")
+                    for key, label in (("sleep", "作息"), ("busy", "状态")):
+                        if isinstance(values.get(key), str) and values[key].strip():
+                            parts.append(f"{label}={values[key].strip()[:60]}")
+                    mood_val = values.get("mood")
+                    if isinstance(mood_val, str) and mood_val.strip():
+                        parts.append(f"心情={mood_val.strip()[:60]}")
+                    elif isinstance(mood_val, dict) and isinstance(mood_val.get("description"), str) and mood_val["description"].strip():
+                        parts.append(f"心情={mood_val['description'].strip()[:60]}")
+                    if parts:
+                        notice_text += "（角色当前自身状态参考：" + "，".join(parts) + "）"
+            except Exception:
+                pass
+        material = PromptMaterial(MODEL_REPLY_OWNER, "native_poke_notice", notice_text)
         request = PromptRequest(trigger, job.role_instruction,
             SealedForegroundContext((material,), (), ()), MODEL_REPLY_PROMPT, job.context.role_binding)
         completion = await self.gateway.generate(run, request)

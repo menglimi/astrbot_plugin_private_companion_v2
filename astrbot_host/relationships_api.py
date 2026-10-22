@@ -13,7 +13,7 @@ from companion_v2.relationships.management import RelationshipMemoryManagement
 from .management_identity import dashboard_operator
 
 
-MANAGEMENT_PREFIX = "/astrbot_plugin_private_companion_v2/relationships"
+MANAGEMENT_PREFIX = "/astrbot_plugin_private_companion/relationships"
 
 
 class RelationshipWebAPI:

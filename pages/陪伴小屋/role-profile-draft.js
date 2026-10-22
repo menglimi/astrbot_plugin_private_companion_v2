@@ -641,5 +641,15 @@ window.CompanionRoleProfileDraft = (() => {
     if (event.target?.id === "roleProfileDraftDialog") cancelPendingGeneration();
   }, true);
 
-  return {markup, open: openDialog};
+  /* 页面级未保存守卫（page-guards.js）用：草稿里改过但没提交的字段。
+     valueOf() 的回落规则是「fieldValues 优先，否则用 draft.fields」，
+     所以和 draft 里的原值比一遍即可。 */
+  function isDirty() {
+    const draft = state.draft;
+    if (!draft || !state.fieldValues) return false;
+    return Object.entries(state.fieldValues).some(([field, value]) =>
+      String(value ?? "") !== String(draft.fields?.[field] ?? ""));
+  }
+
+  return {markup, open: openDialog, isDirty};
 })();

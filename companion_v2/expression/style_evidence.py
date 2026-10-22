@@ -225,7 +225,16 @@ class ExpressionSampleCatalog:
                 samples.append(sample)
                 if len(samples) == sample_limit:
                     break
-        return tuple(samples)
+        from .legacy_import import samples as legacy_samples
+        for sample in legacy_samples(self.runtime, context, opened_at=opened_at, closed_at=at):
+            if member_ids is not None and sample.sender_id not in member_ids:
+                continue
+            if review_enabled is not None and not self.reviews.eligible(context, sample, review_enabled=review_enabled):
+                continue
+            samples.append(StyleSample(sample.handle, _trim(sample.text, sample_chars), sample.sender_id,
+                                       sample.received_at, sample.input_sequence, sample.content_hash))
+        samples.sort(key=lambda item: (stamp(item.received_at), item.handle), reverse=True)
+        return tuple(samples[:sample_limit])
 
     def _rows(self, context, opened_at, at, *, scope_kind, sample_limit):
         # This query is retained for already-created role-reply evidence.
@@ -322,6 +331,11 @@ class ExpressionSampleCatalog:
             with self.runtime.read_snapshot():
                 self._owner().authorize(context, at)
                 descriptions = {}
+                from .legacy_import import samples as legacy_samples
+                for sample in legacy_samples(self.runtime, context, opened_at=opened_at, closed_at=closed_at):
+                    if sample.handle in known:
+                        descriptions[sample.handle] = sample.text
+                        known.discard(sample.handle)
                 for row in self._input_rows(context, opened_at, closed_at, limit=512):
                     try:
                         event, text = self._input_text(row, context, at)

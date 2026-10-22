@@ -260,11 +260,26 @@
   .home-stage-side{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--sp-4)}
 }
 @media(max-width:760px){
-  .home-environment{grid-template-columns:24px minmax(0,1fr) auto 34px;gap:var(--sp-2);min-height:68px;padding:var(--sp-2) var(--sp-3)}
-  .home-environment-icon{width:24px;height:28px}
+  /* 手机上天气栏压成两行：图标 + 地点/天气 + 刷新，时钟单独一行横排。
+     原来四列挤在 390px 里，说明列只剩约 150px，一句
+     「角色地点未设置 · 正在读取天气设置…」要折成三行，
+     右侧「20:25 / 10月17日星期六 / Asia/Shanghai · 夜间」也各占一行。 */
+  .home-environment{
+    grid-template-columns:24px minmax(0,1fr) 34px;
+    grid-template-areas:"icon copy refresh" "clock clock clock";
+    align-items:center;gap:var(--sp-1) var(--sp-2);
+    min-height:0;padding:var(--sp-2) var(--sp-3);
+  }
+  .home-environment-icon{grid-area:icon;width:24px;height:28px}
   .home-environment-icon svg{width:20px;height:20px}
+  .home-environment-copy{grid-area:copy}
+  .home-environment-clock{
+    grid-area:clock;justify-items:start;
+    display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--sp-2);
+    padding-top:var(--sp-1);border-top:1px solid var(--t-line);
+  }
   .home-environment-clock time{font-size:var(--fs-lead)}
-  .home-environment-refresh{width:34px;height:34px}
+  .home-environment-refresh{grid-area:refresh;width:34px;height:34px}
   .home-stage-side{grid-template-columns:minmax(0,1fr)}
   .room-doors{grid-template-columns:repeat(2,minmax(0,1fr))}
   .room-doors button+button{padding-left:0}

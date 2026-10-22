@@ -23,15 +23,17 @@ async function run({browser, outputDir, bridgePath}) {
     const nativeAccounts = accounts();
     const personas = [...new Map(nativeAccounts.flatMap(account =>
       (account.bot_id === "bot-a" ? ["original", "second", "[%None]"] : ["persona-b"])
-        .map(persona_id => [account.bot_id + ":" + persona_id, {bot_id: account.bot_id, persona_id}]))).values()];
-    const mappings = qa.mappings || [{bot_id: "bot-a", persona_id: "original", role_id: "星缘"},
+        .map(persona_id => [account.bot_id + ":" + persona_id, {bot_id: account.bot_id, persona_id,
+          label: qa.shape === "generated" && persona_id === "original" ? "星缘-私聊" : persona_id}]))).values()];
+    const mappings = qa.mappings || [{bot_id: "bot-a", persona_id: "original",
+      role_id: qa.shape === "generated" ? "role-3491542998-5a8f9db0db8f6bb4" : "星缘"},
       ...(qa.shape === "native" ? [{bot_id: "bot-a", persona_id: "second", role_id: "星缘"}] : [])];
     const nativeTargets = nativeAccounts.map((account, index) => ({...account,
       target_id: "native-private-" + index, session_key: "native-private-" + index,
       participant_id: String(200 + index), scope_kind: "private",
       unified_msg_origin: account.platform_id + ":FriendMessage:" + (200 + index),
       persona_id: account.bot_id === "bot-a" ? "original" : "persona-b", native: true}));
-    if (qa.shape === "native") {
+    if (["native", "generated"].includes(qa.shape)) {
       for (const session of ["300", "200_300"]) nativeTargets.push({...nativeAccounts[0],
         target_id: "native-" + session, session_key: "native-" + session, group_id: "300",
         scope_kind: "group", unified_msg_origin: "qq:GroupMessage:" + session,
@@ -89,14 +91,14 @@ async function run({browser, outputDir, bridgePath}) {
     + "addEventListener('message',async event=>{const frame=document.querySelector('iframe'),m=event.data;"
     + "if(event.source!==frame.contentWindow||m.channel!=='astrbot-plugin-page')return;"
     + "const send=v=>frame.contentWindow.postMessage({channel:'astrbot-plugin-page',...v},location.origin);"
-    + "if(m.kind==='ready'){send({kind:'context',context:{pluginName:'astrbot_plugin_private_companion_v2',pageName:'账号与会话'}});return;}"
+    + "if(m.kind==='ready'){send({kind:'context',context:{pluginName:'astrbot_plugin_private_companion',pageName:'账号与会话'}});return;}"
     + "if(m.kind!=='request')return;try{const r=await fetch('/qa',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(m)});"
     + "send({kind:'response',requestId:m.requestId,ok:true,data:await r.json()});}catch(e){send({kind:'response',requestId:m.requestId,ok:false,error:e.message});}});</script>";
   const serverErrors = [], browserErrors = [], checks = [];
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, "http://127.0.0.1");
-      if (["/", "/native", "/partial", "/shared", "/denied"].includes(url.pathname)) {
+      if (["/", "/native", "/generated", "/partial", "/shared", "/denied"].includes(url.pathname)) {
         qa.shape = url.pathname.slice(1); qa.mappings = null; qa.groups = null; qa.running = false;
         qa.statusReadFails = false; qa.denied = qa.shape === "denied"; qa.calls = []; qa.posts = [];
         res.setHeader("Content-Type", "text/html; charset=utf-8"); res.end(wrapper); return;
@@ -161,6 +163,30 @@ async function run({browser, outputDir, bridgePath}) {
     assert.match(await loc("#session-manager-meta").innerText(), /1 个 AstrBot 人格/);
     assert.equal(await loc('#session-manager-related button').filter({hasText: "original"}).count(), 1);
     checks.push("account_role_persona_window_hierarchy_and_read_only_native_windows");
+
+    await page.goto(origin + "/generated"); await ready();
+    const generatedRole = loc('#topology-roles .topology-role-group[aria-label="角色 星缘"]');
+    assert.equal(await generatedRole.count(), 1);
+    assert.equal(await generatedRole.locator('[data-topology-kind="persona"]').count(), 1);
+    assert.equal(await loc('#edit-accounts .role-binding-identity strong').first().innerText(), "星缘");
+    assert.equal(await loc('#edit-accounts [data-role-id]').first().inputValue(),
+      "role-3491542998-5a8f9db0db8f6bb4");
+    const groupWindowKey = await loc('#topology-sessions .topology-node').filter({hasText: "群 300"}).first()
+      .getAttribute("data-topology-key");
+    const generatedEdges = await loc("#topology-links .topology-line").evaluateAll(lines => lines.map(line =>
+      ({source: line.dataset.topologySource, target: line.dataset.topologyTarget})));
+    assert(generatedEdges.some(edge => edge.target === groupWindowKey && edge.source.includes("second")));
+    assert(!generatedEdges.some(edge => edge.target === groupWindowKey && edge.source.includes("original")));
+    await screenshot("generated-role-desktop.png");
+    await page.setViewportSize({width: 320, height: 800});
+    const generatedWidth = await loc("body").evaluate(() =>
+      ({viewport: innerWidth, content: document.documentElement.scrollWidth}));
+    assert(generatedWidth.content <= generatedWidth.viewport + 1, JSON.stringify(generatedWidth));
+    await screenshot("generated-role-mobile.png");
+    await page.setViewportSize({width: 1280, height: 900});
+    checks.push("generated_role_label_preserves_id_and_unmapped_group_stays_separate");
+
+    await page.goto(origin); await ready();
 
     const firstRole = loc("#edit-accounts .role-binding-card").first();
     await firstRole.locator("[data-role-id]").fill("未保存的角色");
@@ -253,7 +279,7 @@ async function run({browser, outputDir, bridgePath}) {
     await loc("#save-group-targets").click();
     await loc("#notice").filter({hasText: "群目标已保存并启用 1 个群"}).waitFor();
     assert.deepEqual(qa.posts.at(-1).groups.map(row => row.group_id), ["300"]);
-    assert.deepEqual(qa.posts.at(-1).sessions, []);
+    assert.equal("sessions" in qa.posts.at(-1), false);
     assert.equal(await loc("#group-target-list [data-group-target-choice]").first().isChecked(), true);
     checks.push("explicit_group_targets_replace_wildcard_and_confirm_effective_state");
     await screenshot("account-role-windows-desktop.png");

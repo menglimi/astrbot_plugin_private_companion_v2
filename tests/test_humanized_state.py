@@ -131,8 +131,25 @@ class HumanizedBandTests(unittest.TestCase):
         self.assertEqual(humanized.facets({"values": {"energy": 95}}, intensity=100)[0], "精力很足")
         sleeping = dict(SIMULATION, sleep_execution={"state": "sleeping", "planned_wake_at": "2026-09-21T07:30:00+00:00"})
         self.assertIn("正在休息", " ".join(humanized.facets(sleeping, intensity=100)))
+        groggy = dict(SIMULATION, sleep_execution={"state": "awake", "ended_at": "2026-09-21T07:30:00+00:00", "awake_minutes": 10})
+        self.assertIn("刚睡醒不久，还带着一点睡醒后的迷糊感", " ".join(humanized.facets(groggy, intensity=100)))
+        self.assertTrue(humanized.is_sleepy(groggy))
+        interrupted = dict(SIMULATION, sleep_execution={"state": "interrupted", "early_interruptions": 1})
+        self.assertIn("刚入睡不久被唤醒", " ".join(humanized.facets(interrupted, intensity=100)))
+        self.assertTrue(humanized.is_sleepy(interrupted))
+        fully_awake = dict(SIMULATION, sleep_execution={"state": "awake", "ended_at": "2026-09-21T07:30:00+00:00", "awake_minutes": 60})
+        self.assertIn("刚睡醒", " ".join(humanized.facets(fully_awake, intensity=100)))
+        self.assertFalse(humanized.is_sleepy({"values": {"energy": 80}, "sleep_execution": {"state": "awake", "ended_at": "2026-09-21T07:30:00+00:00", "awake_minutes": 60}}))
         # Without material the dial adds nothing rather than a generic claim.
         self.assertEqual(humanized.instruction({"values": {}}, intensity=100), "")
+
+    def test_sleep_words_do_not_determine_pacing_without_a_current_receipt(self):
+        for text in ("睡得很好，不困了", "睡眠充足", "没有疲劳", "睡前想看书", "昨晚有点困", "刚被吵醒"):
+            with self.subTest(text=text):
+                self.assertFalse(humanized.is_sleepy({"values": {"sleep": text,
+                    "conditions": [{"kind": "sleep", "text": text}]}}))
+        self.assertFalse(humanized.is_sleepy({"sleep_execution": {
+            "state": "awake", "ended_at": "2026-09-21T07:30:00+00:00"}}))
 
     def test_patrol_time_contract_and_retention_pruning(self):
         self.assertEqual(humanized.parse_patrol_time("04:00").hour, 4)

@@ -16,8 +16,8 @@ function harness(rootId = "forwardIntakeWorkspace") {
     voice_reply: {enabled: false, probability: 1, private_probability: -1, group_probability: -1},
     poke: {enabled: false, trigger_probability: 0.25, back_probability: 0, back_times: 1,
       model_reply_enabled: false, model_reply_probability: 0.3, replies: ["我在"]},
-    forward_intake: {max_forwards: 4, max_nodes: 32, max_depth: 4},
-    forward_bounds: {max_forwards: 4, max_nodes: 32, max_depth: 4},
+    forward_intake: {max_forwards: 4, max_nodes: 32, max_depth: 4, parse_nested: true},
+    forward_bounds: {max_forwards: 4, max_nodes: 300, max_depth: 4},
     edit_tokens: {voice: "v".repeat(64), poke: "p".repeat(64), forward_intake: "f".repeat(64)},
     apply_modes: {voice: "restart_host", poke: "immediate", forward_intake: "immediate_next_input"},
   };
@@ -53,15 +53,17 @@ test("forward intake page renders bounded controls, saves all values and exposes
   h.page.mount({forwardRoot: h.root});
   await drain();
   assert.match(h.root.innerHTML, /name="max_forwards" min="1" max="4"/);
-  assert.match(h.root.innerHTML, /name="max_nodes" min="1" max="32"/);
+  assert.match(h.root.innerHTML, /name="max_nodes" min="1" max="300"/);
   assert.match(h.root.innerHTML, /name="max_depth" min="1" max="4"/);
+  assert.match(h.root.innerHTML, /name="parse_nested"/);
   assert.match(h.root.innerHTML, /单条消息最大转发数/);
-  assert.equal(h.page.searchEntries().filter(item => item.group === "forward_intake").length, 3);
+  assert.equal(h.page.searchEntries().filter(item => item.group === "forward_intake").length, 4);
 
-  const values = {max_forwards: "2", max_nodes: "8", max_depth: "2"};
+  const values = {max_forwards: "2", max_nodes: "80", max_depth: "2"};
   const message = {textContent: "", hidden: true};
   const button = {disabled: false, textContent: "保存合并转发上限"};
   const controls = Object.fromEntries(Object.entries(values).map(([name, value]) => [name, {value}]));
+  controls.parse_nested = {checked: false};
   const form = {dataset: {hostForm: "forward_intake"},
     querySelector(selector) {
       const field = selector.match(/^\[name="(.+)"\]$/)?.[1];
@@ -73,7 +75,8 @@ test("forward intake page renders bounded controls, saves all values and exposes
   const saved = h.calls.find(call => call.method === "POST");
   assert.equal(prevented, true);
   assert.equal(saved.route, "host-options/forward_intake");
-  assert.deepEqual(JSON.parse(JSON.stringify(saved.body.changes)), {max_forwards: 2, max_nodes: 8, max_depth: 2});
+  assert.deepEqual(JSON.parse(JSON.stringify(saved.body.changes)),
+    {max_forwards: 2, max_nodes: 80, max_depth: 2, parse_nested: false});
   assert.match(h.root.innerHTML, /已保存/);
 });
 
@@ -82,7 +85,8 @@ test("forward intake page rejects a value beyond the host-provided structural bo
   h.page.mount({forwardRoot: h.root});
   await drain();
   const message = {textContent: "", hidden: true};
-  const controls = {max_forwards: {value: "4"}, max_nodes: {value: "33"}, max_depth: {value: "4"}};
+  const controls = {max_forwards: {value: "4"}, max_nodes: {value: "301"}, max_depth: {value: "4"},
+    parse_nested: {checked: true}};
   const form = {dataset: {hostForm: "forward_intake"}, querySelector(selector) {
     const field = selector.match(/^\[name="(.+)"\]$/)?.[1];
     return field ? controls[field] : message;
@@ -90,7 +94,7 @@ test("forward intake page rejects a value beyond the host-provided structural bo
   h.handlers.submit({target: {closest: () => form}, preventDefault() {}});
   await drain();
   assert.equal(h.calls.some(call => call.method === "POST"), false);
-  assert.match(message.textContent, /每条转发的节点数请输入 1 到 32/);
+  assert.match(message.textContent, /节点数请输入 1 到 300/);
 });
 
 test("received-poke page renders and saves a bounded repeated-poke count", async () => {

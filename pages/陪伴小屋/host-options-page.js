@@ -78,8 +78,13 @@ window.CompanionHostOptionsPage = (() => {
       </div>`;
     };
     return `<section class="host-options-panel" aria-label="语音默认值">
-      <header class="host-options-heading"><div><h3>语音默认值</h3>
-        <p>作为各对象的起始值；对象单独设置的朗读概率优先。修改后需重启插件。</p></div></header>
+      <header class="host-options-heading"><div><h3>语音回复 · 开关与概率</h3>
+        <p>这一页只管“发不发语音、多大概率发”。发音人、音色、语速与试听在「模型与连接 → 语音」，分段与发送位置在「表达 → 语音」。</p></div></header>
+      <nav class="host-options-jumps" aria-label="语音的其他配置位置">
+        <a class="button small" href="#manage/models">发音人与音色 · 模型与连接</a>
+        <a class="button small" href="#manage/models">试听与语种 · 同上（语音配置）</a>
+        <a class="button small" href="#manage/expression/text">分段与发送位置 · 表达 / 文本</a>
+      </nav>
       ${!value.enabled ? '<p class="host-options-warning" role="note">语音总开关关闭时，对象页启用语音也不会合成。</p>' : ""}
       <form data-host-form="voice" novalidate>
         <div class="host-options-row"><div class="host-options-copy"><strong>允许语音回复</strong>
@@ -144,25 +149,29 @@ window.CompanionHostOptionsPage = (() => {
 
   function renderForwardIntake() {
     const value = state.forwardIntake;
-    if (state.loading && !value) return '<p class="host-options-empty" role="status">正在读取合并转发上限…</p>';
-    if (!value) return `<div class="host-options-empty" role="status"><p>${esc(state.error || "合并转发上限暂时不可用。")}</p>
+    if (state.loading && !value) return '<p class="host-options-empty" role="status">正在读取合并转发设置…</p>';
+    if (!value) return `<div class="host-options-empty" role="status"><p>${esc(state.error || "合并转发设置暂时不可用。")}</p>
       <button type="button" class="button small" data-host-reload>重新读取</button></div>`;
     const fields = [
       ["max_forwards", "单条消息最大转发数"],
-      ["max_nodes", "单条转发最大节点数"],
+      ["max_nodes", "单次最多展开节点数"],
       ["max_depth", "最大嵌套深度"],
     ];
-    return `<section class="host-options-panel" aria-label="合并转发摄取上限">
-      <header class="host-options-heading"><div><h3>合并转发摄取上限</h3></div></header>
+    return `<section class="host-options-panel" aria-label="合并转发设置">
+      <header class="host-options-heading"><div><h3>合并转发理解</h3></div></header>
       <form data-host-form="forward_intake" novalidate>
         ${fields.map(([name, title]) => `<label class="host-options-row">
           <span class="host-options-copy"><strong>${title}</strong><small>1–${state.forwardBounds[name]}</small></span>
           <input class="host-options-number" type="number" name="${name}" min="1" max="${state.forwardBounds[name]}"
             step="1" inputmode="numeric" data-wb-field="${name}" value="${value[name]}">
         </label>`).join("")}
+        <div class="host-options-row"><div class="host-options-copy"><strong>展开嵌套合并转发</strong>
+          <small>关闭时保留未展开提示，不读取内部节点。</small></div>
+          <label class="host-options-switch"><input type="checkbox" name="parse_nested" data-wb-field="parse_nested" ${value.parse_nested ? "checked" : ""}>
+            <span>${value.parse_nested ? "已开启" : "已关闭"}</span></label></div>
         <footer class="host-options-footer">${messageMarkup("forward_intake")}
           <button type="submit" class="button small primary" ${state.saving === "forward_intake" ? "disabled" : ""}>
-            ${state.saving === "forward_intake" ? "正在保存…" : "保存合并转发上限"}</button>
+            ${state.saving === "forward_intake" ? "正在保存…" : "保存合并转发设置"}</button>
         </footer>
       </form>
     </section>`;
@@ -240,7 +249,7 @@ window.CompanionHostOptionsPage = (() => {
           model_reply_probability: fraction(form, "model_reply_probability"), replies};
       } else {
         changes = {};
-        const labels = {max_forwards: "每条消息中的转发数", max_nodes: "每条转发的节点数", max_depth: "嵌套深度"};
+        const labels = {max_forwards: "每条消息中的转发数", max_nodes: "节点数", max_depth: "嵌套深度"};
         for (const name of ["max_forwards", "max_nodes", "max_depth"]) {
           const raw = String(formElement(form, name)?.value ?? "");
           const value = Number(raw);
@@ -248,6 +257,7 @@ window.CompanionHostOptionsPage = (() => {
             throw new Error(`${labels[name]}请输入 1 到 ${state.forwardBounds[name]} 之间的整数。`);
           changes[name] = value;
         }
+        changes.parse_nested = !!formElement(form, "parse_nested")?.checked;
       }
     } catch (error) {
       const message = form.querySelector("[data-host-options-message]");
@@ -275,7 +285,7 @@ window.CompanionHostOptionsPage = (() => {
       state.saving = "";
       if (saved) paint();
       else if (button) {button.disabled = false;button.textContent = group === "voice" ? "保存语音默认值"
-        : group === "poke" ? "保存戳一戳设置" : "保存合并转发上限";}
+        : group === "poke" ? "保存戳一戳设置" : "保存合并转发设置";}
     }
   }
 
@@ -343,8 +353,9 @@ window.CompanionHostOptionsPage = (() => {
       field, label, help: "", section: "received", sectionTitle, sectionCount: 1, aliases}));
     const forward = [
       ["max_forwards", "每条消息中的转发数", "每次摄取的数量上限", ["合并转发", "上限"]],
-      ["max_nodes", "每条转发的节点数", "转发节点上限", ["合并转发", "节点"]],
+      ["max_nodes", "单次最多展开节点数", "转发节点上限", ["合并转发", "节点", "300"]],
       ["max_depth", "嵌套深度", "转发嵌套层数", ["合并转发", "深度"]],
+      ["parse_nested", "展开嵌套合并转发", "关闭时保留未展开提示", ["嵌套", "开关"]],
     ].map(([field, label, sectionTitle, aliases]) => ({group: "forward_intake", groupTitle: "合并转发理解",
       field, label, help: "", section: "intake", sectionTitle, sectionCount: 1, aliases}));
     return [...voice, ...poke, ...forward];

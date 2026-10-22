@@ -43,7 +43,7 @@
  */
 "use strict";
 window.CompanionLearningPage = (() => {
-  const HOST = "astrbot_plugin_private_companion_v2";
+  const HOST = "astrbot_plugin_private_companion";
   const PREFIX = "/" + HOST + "/";
   const STORE = "companion-learning-page-v1:";
   /* 五个阶段按推进方向排，轨道就按这个顺序画。

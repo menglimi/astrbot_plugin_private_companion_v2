@@ -17,7 +17,7 @@ from .topics import SCENES, TOPIC_SPECS
 
 EXTENSION = "qzone"
 PACKAGE_ID = "companion_v2.qzone"
-PUBLISHER_ID = "astrbot_plugin_private_companion_v2"
+PUBLISHER_ID = "astrbot_plugin_private_companion"
 PACKAGE_VERSION = "1.0.0"
 ARTIFACT_HASH = "included-qzone-1.0.0"
 PROVIDER = "qzone.included"

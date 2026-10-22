@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+from companion_v2.conversation.date_context import WEEKDAYS, period_label
 from companion_v2.conversation.segmentation import SegmentationPolicy
 from companion_v2.conversation.foreground import BackgroundPromptTrigger
 from companion_v2.conversation.flow import ConversationPolicy
@@ -219,6 +220,9 @@ class ProactiveDedupTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestCa
         self.assertEqual(intent["local_now"], local_now.isoformat())
         self.assertEqual(intent["local_date"], local_now.date().isoformat())
         self.assertEqual(intent["local_time"], local_now.strftime("%H:%M"))
+        self.assertEqual(intent["weekday"], WEEKDAYS[local_now.weekday()])
+        self.assertEqual(intent["is_weekend"], local_now.weekday() >= 5)
+        self.assertEqual(intent["period"], period_label(local_now.hour))
         self.assertIn("下午不要说“早安”或“早上好”", instruction)
         self.assertIn("不要把旧消息当成仍待回复的内容重新接续", instruction)
         for changes in ({"dedup_min_shared_tokens": 0}, {"dedup_min_shared_tokens": 5},

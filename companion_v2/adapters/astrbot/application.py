@@ -36,8 +36,10 @@ class AstrBotCompanionHost:
         external = map_tools(runtime, tool_port) if declarations else None
         # Every declared extension keeps its own scope preferences (proactive sharing
         # and thought weight) on the shared configuration entry point.
+        internal = getattr(tool_port, "provider_admission", None)
         owners = tuple(CapabilityConfigurationOwner(runtime, extension_id=extension_id)
-                       for extension_id in sorted({item.descriptor.package.extension_id for item in declarations}))
+                       for extension_id in sorted({item.descriptor.package.extension_id for item in declarations
+                           if not callable(internal) or internal(item.host_tool_id) is None}))
         # 记忆归属由组装方注入（真实 AstrBot 装配用 ``memory_owner_provider(context)``
         # 读别家的声明，测试可以注入一个假的）；缺省是 V2 自己。判定只有一个来源，
         # 不在核心和适配层各写一遍。写入端口同理：它把已经完成的日记、梦境与主动

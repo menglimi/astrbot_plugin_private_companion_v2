@@ -10,6 +10,8 @@ from pathlib import Path
 import sqlite3
 import stat
 
+from .sqlite_snapshot import open_readonly_sqlite_snapshot
+
 
 MAX_PROFILE_JSON_BYTES = 64 * 1024 * 1024
 MAX_PROFILE_DB_BYTES = 256 * 1024 * 1024
@@ -67,7 +69,7 @@ def read_sqlite(path: Path):
                 continue
             if not _regular(details, MAX_PROFILE_DB_BYTES):
                 return None, "profile_database_invalid"
-        connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)
+        connection = open_readonly_sqlite_snapshot(path, timeout=2)
         connection.row_factory = sqlite3.Row
         try:
             connection.execute("PRAGMA query_only=ON")
@@ -165,8 +167,10 @@ class PrimaryProfile:
         if self.path is None:
             return ""
         try:
-            return self.path.relative_to(root).as_posix()
-        except ValueError:
+            resolved_root = Path(root).resolve()
+            resolved_path = self.path.resolve()
+            return resolved_path.relative_to(resolved_root).as_posix()
+        except (OSError, ValueError):
             return self.path.as_posix()
 
     def document(self, root):

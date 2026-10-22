@@ -50,7 +50,7 @@ class LiveSettingsMethods:
         if manager is None:
             try:
                 from .page_config import PageConfigManager
-                manager = PageConfigManager(self, 'astrbot_plugin_private_companion_v2.live', logger)
+                manager = PageConfigManager(self, 'astrbot_plugin_private_companion.live', logger)
             except Exception:
                 manager = None
         if manager is not None and callable(getattr(manager, 'apply_updates', None)):

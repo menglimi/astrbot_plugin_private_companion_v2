@@ -34,8 +34,9 @@ from companion_v2.storage.schema import (
     MIGRATION_V61_TO_V62_FINGERPRINT, MIGRATION_V61_TO_V62_ID, SCHEMA_VERSION_V62,
     MIGRATION_V62_TO_V63_FINGERPRINT, MIGRATION_V62_TO_V63_ID, SCHEMA_VERSION_V63,
     MIGRATION_V63_TO_V64_FINGERPRINT, MIGRATION_V63_TO_V64_ID, SCHEMA_VERSION_V64,
+    MIGRATION_V64_TO_V65_FINGERPRINT, MIGRATION_V64_TO_V65_ID, SCHEMA_VERSION_V65,
 )
-from tests.execution_support import remove_v21, remove_v22, remove_v31, remove_v32, remove_v33, remove_v34, remove_v35, remove_v36, remove_v52, remove_v53, remove_v55, remove_v57, remove_v58, remove_v59, remove_v60, remove_v61, remove_v62, remove_v63
+from tests.execution_support import remove_v21, remove_v22, remove_v31, remove_v32, remove_v33, remove_v34, remove_v35, remove_v36, remove_v52, remove_v53, remove_v55, remove_v57, remove_v58, remove_v59, remove_v60, remove_v61, remove_v62, remove_v63, remove_v64, remove_v65
 
 
 class StorageMigrationTests(unittest.TestCase):
@@ -117,6 +118,11 @@ class StorageMigrationTests(unittest.TestCase):
         )
         self.assertEqual((prompt_migration["to_version"], prompt_migration["fingerprint"]),
                          (SCHEMA_VERSION_V64, MIGRATION_V63_TO_V64_FINGERPRINT))
+        receipt_migration = runtime.read_one(
+            "SELECT * FROM schema_migrations WHERE migration_id = ?", (MIGRATION_V64_TO_V65_ID,),
+        )
+        self.assertEqual((receipt_migration["to_version"], receipt_migration["fingerprint"]),
+                         (SCHEMA_VERSION_V65, MIGRATION_V64_TO_V65_FINGERPRINT))
         migration = runtime.read_one(
             "SELECT * FROM schema_migrations WHERE migration_id = ?", (MIGRATION_V60_TO_V61_ID,),
         )
@@ -417,8 +423,7 @@ class StorageMigrationTests(unittest.TestCase):
     def test_v63_upgrade_adds_proactive_prompt_archive(self):
         self.open_runtime().close()
         with closing(sqlite3.connect(self.database)) as connection:
-            connection.execute("DROP TABLE proactive_prompt_snapshots")
-            connection.execute("DELETE FROM schema_migrations WHERE migration_id = ?", (MIGRATION_V63_TO_V64_ID,))
+            remove_v64(connection)
             connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = 'schema_version'",
                                (SCHEMA_VERSION_V63,))
             connection.commit()
@@ -432,6 +437,23 @@ class StorageMigrationTests(unittest.TestCase):
             "PRAGMA table_info(proactive_prompt_snapshots)", ())}
         self.assertTrue({"task_id", "call_id", "provider_id", "model_name", "prompt_hash",
                          "messages_json", "created_at"}.issubset(columns))
+
+    def test_v64_upgrade_adds_nullable_outbox_receipt_reference(self):
+        self.open_runtime().close()
+        with closing(sqlite3.connect(self.database)) as connection:
+            remove_v65(connection)
+            connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = 'schema_version'",
+                               (SCHEMA_VERSION_V64,))
+            connection.commit()
+
+        upgraded = self.open_runtime()
+        migration = upgraded.read_one("SELECT * FROM schema_migrations WHERE migration_id = ?",
+                                      (MIGRATION_V64_TO_V65_ID,))
+        self.assertEqual((migration["from_version"], migration["to_version"], migration["fingerprint"]),
+                         (SCHEMA_VERSION_V64, SCHEMA_VERSION_V65, MIGRATION_V64_TO_V65_FINGERPRINT))
+        columns = {row["name"] for row in upgraded.read_all("PRAGMA table_info(outbox)", ())}
+        self.assertIn("receipt_ref", columns)
+        self.assertIsNone(upgraded.read_one("SELECT receipt_ref FROM outbox", ())["receipt_ref"])
 
     def test_v52_upgrade_adds_response_diagnostics_and_rolls_back_on_failure(self):
         runtime = self.open_runtime()

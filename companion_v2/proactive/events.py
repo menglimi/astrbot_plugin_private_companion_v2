@@ -11,10 +11,13 @@ import json
 from companion_v2.execution.models import TaskContext, TaskError, digest, encode, require, stamp
 from companion_v2.foundation.refs import RoleOwnerRef, SourceRef, VersionRef
 from companion_v2.role_work.codec import activity_from_json
-from companion_v2.role_work.models import RoleActivityState
+from companion_v2.role_work.models import RoleActivityState, RoleArtifactJournalMeaning, RoleArtifactKind
+from companion_v2.sharing.models import ShareMaterial
+from companion_v2.sharing.planner import ShareCatalog, SharePlanner
 from companion_v2.sources.dependencies import link
 from companion_v2.sources.governance import bind
 from companion_v2.sources.models import SourceRecord
+from companion_v2.sources.repositories import AssetRepository
 from companion_v2.storage.models import OperationState
 
 from .contact_models import ContactIntent
@@ -32,6 +35,12 @@ class ActivityContactEvents:
             raise ValueError("activity contacts must share the original role ledger")
         self.contacts, self.life, self.runtime = contacts, role_life, role_life.runtime
         self._scans = OrderedDict()
+        self.share_catalog = ShareCatalog()
+        self.share_planner = SharePlanner(
+            sources=self.contacts.sources,
+            assets=AssetRepository(self.runtime),
+            catalog=self.share_catalog,
+        )
         self.guard = bind(self.runtime, SOURCE_OWNER, self._validate_source)
 
     def close(self):
@@ -43,10 +52,23 @@ class ActivityContactEvents:
         return RoleOwnerRef(context.scope.installation_id, context.scope.bot_id,
                             context.role_binding.role.subject_id)
 
-    def _receipt(self, context, activity, at):
+    def _artifact_for_activity(self, context, activity):
+        owner = self._owner(context)
+        for artifact in self.life.artifacts_for_scope(context.scope, owner=owner):
+            if (artifact.activity_id == activity.activity_id
+                    and artifact.kind is RoleArtifactKind.TEXT
+                    and artifact.journal_meaning is RoleArtifactJournalMeaning.CREATIVE_TEXT):
+                return artifact
+        return None
+
+    def _receipt(self, context, activity, at, *, has_artifact=False):
         if (activity.owner != self._owner(context) or activity.scope != context.scope
-                or activity.work is None or activity.work.context_key != context.key
                 or activity.state is not RoleActivityState.COMPLETED or activity.updated_at > at):
+            raise TaskError("contact_activity_unavailable", "contact needs a completion in its original role and window")
+        if activity.work is not None:
+            if activity.work.context_key != context.key:
+                raise TaskError("contact_activity_unavailable", "contact needs a completion in its original role and window")
+        elif not has_artifact:
             raise TaskError("contact_activity_unavailable", "contact needs a completion in its original role and window")
         if activity != self.life.activity(activity.activity_id, owner=activity.owner):
             raise TaskError("contact_activity_changed", "contact activity no longer matches its original receipt")
@@ -65,7 +87,8 @@ class ActivityContactEvents:
         return row["operation_id"]
 
     def _material(self, context, activity, at):
-        if activity.work.kind == "reading":
+        work_kind = activity.work.kind if activity.work is not None else ""
+        if work_kind == "reading":
             receipt = activity.reading
             if (receipt is None or receipt.source != activity.work.source
                     or receipt.content_hash != activity.work.content_hash
@@ -82,10 +105,22 @@ class ActivityContactEvents:
                 "subjective_reflection": receipt.reflection[:2048],
                 "reflection_meaning": "角色读后的主观联想，不是原文事实或用户经历。"}
             return "creation", body, (receipt.source,)
-        if activity.work.kind == "sleep" and activity.reading is None and activity.updated_at > activity.started_at:
+        if work_kind == "sleep" and activity.reading is None and activity.updated_at > activity.started_at:
             return "life", {"event": "sleep_completed", "started_at": stamp(activity.started_at),
                 "completed_at": stamp(activity.updated_at),
                 "meaning": "生活执行端确认角色这一段睡眠已经结束；不证明做过梦、梦见什么、已经起床或完成其他活动。"}, ()
+        artifact = self._artifact_for_activity(context, activity) if activity.reading is None else None
+        if artifact is not None:
+            record, = self.contacts._records(context, (artifact.source,), at)
+            if record.content_hash != digest(record.payload) or not record.payload.strip():
+                raise TaskError("contact_artifact_changed", "artifact text no longer matches its source hash")
+            excerpt = record.payload.strip()
+            body = {"event": "creative_artifact_completed", "completed_at": stamp(activity.updated_at),
+                "artifact_id": artifact.artifact_id,
+                "activity_title": activity.description[:256],
+                "meaning": "角色刚刚完成了一段创作文本作品；这是角色自己的随笔或小创作，不是现实发生的事件或用户经历。",
+                "excerpt": excerpt[:4096], "excerpt_truncated": len(excerpt) > 4096}
+            return "creation", body, (artifact.source,)
         raise TaskError("contact_activity_unsupported", "this activity has no supported factual contact projection")
 
     def _project(self, context, activity, operation_id, at):
@@ -109,7 +144,8 @@ class ActivityContactEvents:
                 raise ValueError("invalid activity source receipt")
             context = TaskContext.restore(receipt["context"])
             activity = self.life.activity(receipt["activity_id"], owner=self._owner(context))
-            operation_id = self._receipt(context, activity, at)
+            artifact = self._artifact_for_activity(context, activity) if activity.reading is None else None
+            operation_id = self._receipt(context, activity, at, has_artifact=artifact is not None)
             purpose, expected_body, _ = self._material(context, activity, at)
             identifier = "contact-activity-source-" + digest([context.key, activity.activity_id, activity.revision])
             reference = SourceRef(identifier, SOURCE_OWNER, context.scope, VersionRef(identifier, 1), activity.updated_at)
@@ -165,9 +201,14 @@ class ActivityContactEvents:
             cursor = (row["updated_at"], row["activity_id"], row["revision"])
             self._scans[context.key] = (token, cursor, at)
             activity = activity_from_json(row["record_json"])
-            if activity.state is not RoleActivityState.COMPLETED or activity.work is None:
+            if activity.state is not RoleActivityState.COMPLETED:
                 continue
-            candidate_purpose = "creation" if activity.work.kind == "reading" else "life"
+            work_kind = activity.work.kind if activity.work is not None else ""
+            artifact = (self._artifact_for_activity(context, activity)
+                        if work_kind not in ("reading", "sleep") and activity.reading is None else None)
+            if activity.work is None and artifact is None:
+                continue
+            candidate_purpose = ("creation" if work_kind == "reading" or artifact is not None else "life")
             if purpose is not None and purpose != candidate_purpose:
                 continue
             if preferences.reason(candidate_purpose):
@@ -177,15 +218,31 @@ class ActivityContactEvents:
             if self._known(context, opportunity):
                 continue
             try:
-                operation_id = self._receipt(context, activity, at)
+                operation_id = self._receipt(context, activity, at, has_artifact=artifact is not None)
                 candidate_purpose, source = self._project(context, activity, operation_id, at)
             except (TaskError, KeyError):
                 continue
+            if artifact is not None:
+                prepared = self.share_planner.prepare(
+                    ShareMaterial.from_role_artifact(artifact),
+                    resolved=context.actor,
+                    capability="text",
+                    observed_at=at,
+                    authorizer=self.contacts.tasks.identity,
+                    role_owner=self._owner(context),
+                )
+                if not prepared.is_success:
+                    continue
             marker = {"activity_id": activity.activity_id, "revision": activity.revision,
                 "operation_id": operation_id, "activity_hash": digest(activity), "purpose": candidate_purpose,
                 "expires_at": stamp(opportunity.expires_at)}
-            summary = ("刚完成了一段真实阅读，可以自然地分享一点已读片段和自己的感想；不合适就跳过。" if candidate_purpose == "creation" else
-                       "角色的一段睡眠确实结束了，可以看看是否有自然值得分享的近况；不要凭空补出梦或醒后经历。")
+            if artifact is not None:
+                summary = ("角色刚写完一段自己的小作品或随笔，想顺手递给对方看看、分享一点创作时的念头；"
+                           "不夸大篇幅或外部发表事实，不合适就跳过。")
+            elif candidate_purpose == "creation":
+                summary = ("刚完成了一段真实阅读，像合上书随手跟熟人念叨一句最触动或好玩的点，自然带出自己的感受，不写读书报告；不合适就跳过。")
+            else:
+                summary = ("角色的一段睡眠确实结束了，可以像刚缓过神来那样自然带一句此刻的状态或近况；不要凭空补出梦或醒后经历。")
             thought = Thought("activity-event-" + digest(marker), opportunity, ThoughtKind.CONVERSATION, summary,
                               EvidenceSnapshot(context.scope, at, (source,)), 1.0)
             return (opportunity, (ContactIntent(candidate_purpose, thought),), marker), True
@@ -203,7 +260,8 @@ class ActivityContactEvents:
             raise TaskError("contact_activity_unavailable", "contact activity is no longer available") from error
         if activity.revision != marker["revision"] or digest(activity) != marker["activity_hash"]:
             raise TaskError("contact_activity_changed", "contact activity changed after selection")
-        operation_id = self._receipt(context, activity, at)
+        artifact = self._artifact_for_activity(context, activity) if activity.reading is None else None
+        operation_id = self._receipt(context, activity, at, has_artifact=artifact is not None)
         preferences = require(self.contacts.preferences.read(context, observed_at=at))
         expires = activity.updated_at + timedelta(seconds=preferences.values["event_max_age_seconds"])
         if operation_id != marker["operation_id"] or marker["expires_at"] != stamp(expires) or at >= expires:

@@ -15,9 +15,9 @@ function setup() {
   const window = {AstrBotPluginPage: {
     async apiGet(route) {
       calls.push(["GET", route]);
-      return {active_root: "D:\\AstrBotData\\astrbot_plugin_private_companion_v2",
-        selected_path: "D:\\AstrBotData", desired_root: "D:\\AstrBotData\\astrbot_plugin_private_companion_v2",
-        selected_backup_path: "", backup_root: "D:\\AstrBotData\\astrbot_plugin_private_companion_v2\\backups",
+      return {active_root: "D:\\AstrBotData\\astrbot_plugin_private_companion",
+        selected_path: "D:\\AstrBotData", desired_root: "D:\\AstrBotData\\astrbot_plugin_private_companion",
+        selected_backup_path: "", backup_root: "D:\\AstrBotData\\astrbot_plugin_private_companion\\backups",
         restart_required: false, policy: {retention_count: 1, retention_days: 10},
         inventory: {total_bytes: 2048, free_bytes: 4096, backup_free_bytes: 4096, categories: {
           database: {bytes: 1024, files: 1}, backups: {bytes: 1024, files: 2}, other: {bytes: 0, files: 0}}},

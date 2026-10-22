@@ -60,6 +60,15 @@ from companion_v2.legacy.configuration_migration import (
 )
 from companion_v2.legacy.weather_migration import convert_weather_config
 from companion_v2.legacy.reality_migration import convert_reality_configuration
+from companion_v2.legacy.image_configuration_migration import convert_image_configuration
+from companion_v2.legacy.image_companion_configuration import convert_image_companion_configuration
+from companion_v2.legacy.content_configuration import convert_content_configuration
+from companion_v2.legacy.memory_configuration import convert_memory_configuration
+from companion_v2.legacy.native_extension_configuration import (
+    SOURCE_PLUGINS, REGISTRY_PLUGINS, WRITABLE_PLUGINS, REVIEW_ONLY_PLUGINS,
+    convert_native_extension_configuration, preview_value, review_configuration_differences,
+)
+from companion_v2.legacy.sqlite_snapshot import open_readonly_sqlite_snapshot
 
 
 # 目录里 ``source_paths`` 有的写成 ``host-config:<plugin_id>``：那不是文件，
@@ -125,6 +134,42 @@ class ConfigIntent:
     target_kind: str = "configuration_registry"
 
 
+def _intent_value_document(intent: ConfigIntent, field_id: str, value):
+    """Expose migration metadata without credentials, workflows or prompt bodies."""
+    if intent.target_kind == "reality_config" and field_id == "vision_provider_id":
+        return {"configured": bool(value)}
+    if field_id in {"weather.api_host", "weather.credential"} or (
+            intent.group_id == "weather" and field_id in {"api_host", "credential"}):
+        return "（已配置，值不在此显示）" if value not in (None, "") else "（未填写）"
+    if intent.target_kind in {"native_extension_config", "configuration_registry"}:
+        return preview_value(intent.group_id, field_id, value)
+    if intent.target_kind != "image_output_config":
+        return value
+    if field_id in {"comfyui", "sd_webui"} and isinstance(value, dict):
+        workflows = value.get("workflows")
+        return {"base_url": value.get("base_url", ""),
+                "timeout_seconds": value.get("timeout_seconds"),
+                "api_key_set": bool(value.get("api_key")),
+                "workflow_operations": sorted(workflows) if isinstance(workflows, dict) else [],
+                "parameters_set": bool(value.get("parameters"))}
+    if field_id != "endpoints":
+        return value
+    result = []
+    for endpoint in value if isinstance(value, list) else ():
+        if not isinstance(endpoint, dict):
+            continue
+        item = {key: endpoint.get(key) for key in (
+            "id", "name", "enabled", "platform", "model", "width", "height",
+            "quality", "max_reference_images", "base_url", "timeout_seconds", "ratio",
+        ) if key in endpoint}
+        headers = endpoint.get("custom_headers")
+        item["api_key_set"] = bool(endpoint.get("api_key"))
+        item["custom_headers_set"] = bool(headers)
+        item["custom_header_names"] = sorted(headers) if isinstance(headers, dict) else []
+        result.append(item)
+    return result
+
+
 @dataclass
 class MigrationPlan:
     """发现结果 + 试算结果。"""
@@ -159,7 +204,8 @@ class MigrationPlan:
             "intents": [
                 {"scope": item.scope, "group_id": item.group_id, "target_kind": item.target_kind,
                  "fields": sorted(item.changes),
-                 "values": dict(sorted(item.changes.items())),
+                 "values": {field: _intent_value_document(item, field, value)
+                            for field, value in sorted(item.changes.items())},
                  "confidence": dict(sorted(item.confidence.items())),
                  "sources": {key: list(value) for key, value in sorted(item.sources.items())},
                  "source_id": item.source_id}
@@ -211,7 +257,7 @@ def sqlite_tables(path: Path) -> tuple[str, ...] | None:
     if not path.is_file():
         return None
     try:
-        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        connection = open_readonly_sqlite_snapshot(path)
     except sqlite3.Error:
         return None
     try:
@@ -276,15 +322,35 @@ class LegacyMigration:
 
     def __init__(self, *, v1_root: str | Path, v1_configuration=None, configuration_registry=None,
                  host_accounts=(), configuration_scope_kind=None,
-                 v1_reality_configuration=None, v1_reality_configuration_issue="") -> None:
+                 v1_host_configuration_issue="", v1_reality_configuration=None,
+                 v1_reality_configuration_issue="", v1_image_configuration=None,
+                 v1_image_configuration_issue="", v1_native_configurations=None,
+                 v1_native_configuration_issues=None, native_extension_baselines=None) -> None:
         self.v1_root = Path(v1_root)
         # 宿主侧的插件配置（若拿得到）。给了它，「宿主配置段」这一条来源的存在性
         # 就不必依赖数据根里有没有转储——配置本来就在宿主的配置里。
         self.v1_configuration = v1_configuration if isinstance(v1_configuration, dict) else None
+        self.v1_host_configuration_issue = str(v1_host_configuration_issue or "")[:160]
         self.v1_reality_configuration = (
             v1_reality_configuration if isinstance(v1_reality_configuration, dict) else None
         )
         self.v1_reality_configuration_issue = str(v1_reality_configuration_issue or "")[:160]
+        self.v1_image_configuration = (
+            v1_image_configuration if isinstance(v1_image_configuration, dict) else None
+        )
+        self.v1_image_configuration_issue = str(v1_image_configuration_issue or "")[:160]
+        self.v1_native_configurations = {
+            name: value for name, value in (v1_native_configurations or {}).items()
+            if name in WRITABLE_PLUGINS | REVIEW_ONLY_PLUGINS and isinstance(value, dict)
+        }
+        self.v1_native_configuration_issues = {
+            name: str(value)[:160] for name, value in (v1_native_configuration_issues or {}).items()
+            if name in WRITABLE_PLUGINS | REVIEW_ONLY_PLUGINS and value
+        }
+        self.native_extension_baselines = {
+            name: value for name, value in (native_extension_baselines or {}).items()
+            if name in SOURCE_PLUGINS and isinstance(value, dict)
+        }
         self.configuration_registry = configuration_registry
         self.host_accounts = tuple(dict(item) for item in host_accounts if isinstance(item, dict))
         if configuration_scope_kind not in (None, "private", "group"):
@@ -292,8 +358,18 @@ class LegacyMigration:
         self.configuration_scope_kind = configuration_scope_kind
         context = json.dumps({"host_accounts": self.host_accounts,
                               "configuration_scope_kind": configuration_scope_kind,
+                              "v1_host_configuration": self.v1_configuration,
+                              "v1_host_configuration_issue": self.v1_host_configuration_issue,
                               "v1_reality_configuration": self.v1_reality_configuration,
-                              "v1_reality_configuration_issue": self.v1_reality_configuration_issue},
+                              "v1_reality_configuration_issue": self.v1_reality_configuration_issue,
+                              "v1_image_configuration": self.v1_image_configuration,
+                              "v1_image_configuration_issue": self.v1_image_configuration_issue,
+                              "v1_native_configurations": {
+                                  name: value for name, value in self.v1_native_configurations.items()
+                                  if name in WRITABLE_PLUGINS},
+                              "v1_native_configuration_issues": {
+                                  name: value for name, value in self.v1_native_configuration_issues.items()
+                                  if name in WRITABLE_PLUGINS}},
                              ensure_ascii=True, sort_keys=True, separators=(",", ":"),
                              default=str)
         self.configuration_context_fingerprint = hashlib.sha256(context.encode("utf-8")).hexdigest()
@@ -316,6 +392,24 @@ class LegacyMigration:
         present, located = _locate(self.v1_root, entry.source_paths)
         size = _size_of(located)
         configured = any(path.startswith(_CONFIG_PREFIX) for path in entry.source_paths)
+        native_name = entry.source_id.removesuffix(".configuration")
+        if (configured and native_name in REGISTRY_PLUGINS
+                and self.v1_native_configurations.get(native_name) is not None
+                and self.configuration_registry is None):
+            return SourceFinding(
+                entry.source_id, entry.owner, entry.action.value,
+                MigrationState.NO_HANDLER.value, entry.source_paths,
+                "新版配置注册表不可用，不能安全试算。",
+            )
+        if (configured and native_name in SOURCE_PLUGINS
+                and self.v1_native_configurations.get(native_name) is not None
+                and not all(isinstance(self.native_extension_baselines.get(native_name, {}).get(key), dict)
+                            for key in ("defaults", "schema"))):
+            return SourceFinding(
+                entry.source_id, entry.owner, entry.action.value,
+                MigrationState.NO_HANDLER.value, entry.source_paths,
+                "新版拓展配置 schema 不可用，不能安全试算。",
+            )
 
         if not present:
             # 只在数据根里找文件是不够的：宿主配置段的 ``source_paths`` 写的是
@@ -336,6 +430,27 @@ class LegacyMigration:
                     MigrationState.UNREADABLE.value, entry.source_paths,
                     "V1 Reality 配置存在但无法读取；原文件保持不变。",
                 )
+            if configured and entry.source_id == "image.configuration" and self.v1_image_configuration_issue:
+                return SourceFinding(
+                    entry.source_id, entry.owner, entry.action.value,
+                    MigrationState.UNREADABLE.value, entry.source_paths,
+                    "V1 Image 配置存在但无法读取；原文件保持不变。",
+                )
+            if (configured and native_name in WRITABLE_PLUGINS | REVIEW_ONLY_PLUGINS
+                    and self.v1_native_configuration_issues.get(native_name)):
+                return SourceFinding(
+                    entry.source_id, entry.owner, entry.action.value,
+                    MigrationState.UNREADABLE.value, entry.source_paths,
+                    "旧拓展配置存在但无法读取；原文件保持不变。",
+                )
+            if configured and entry.source_id == "private.host_configuration":
+                issue = self.v1_host_configuration_issue or self._configuration_dump_issue()
+                if issue:
+                    return SourceFinding(
+                        entry.source_id, entry.owner, entry.action.value,
+                        MigrationState.UNREADABLE.value, entry.source_paths,
+                        "V1 插件配置存在但无法读取；原文件保持不变。",
+                    )
             return SourceFinding(
                 entry.source_id, entry.owner, entry.action.value,
                 MigrationState.ABSENT.value, entry.source_paths,
@@ -406,13 +521,13 @@ class LegacyMigration:
         if state is MigrationState.DOCUMENTED_SKIP:
             return entry.disposition_reason
         return {
-            MigrationState.READY: "可以迁移到 V2。",
+            MigrationState.READY: "可以迁移到当前版本。",
             MigrationState.DATA_READY: "数据导入器已就绪；请在数据迁移步骤中预览并选择目标。",
             MigrationState.NO_HANDLER: "这份数据的转换器还没有写，本次迁移会跳过它。",
-            MigrationState.READ_ONLY: "保持原位可读，V2 不复制它。",
-            MigrationState.EXTERNAL: f"数据归 {entry.owner} 所有，V2 只报告它在哪里。",
+            MigrationState.READ_ONLY: "保持原位可读，当前版本不复制它。",
+            MigrationState.EXTERNAL: f"数据归 {entry.owner} 所有，当前版本只报告它在哪里。",
             MigrationState.HELD: "归属尚未确定，暂不迁移。",
-            MigrationState.DOCUMENTED_SKIP: "按数据归属与授权边界保留在 V1。",
+            MigrationState.DOCUMENTED_SKIP: "按数据归属与授权边界保留在旧版。",
             MigrationState.UNREADABLE: "数据存在但读不出来。",
             MigrationState.ABSENT: "这台机器上没有这份数据。",
         }[state]
@@ -438,12 +553,80 @@ class LegacyMigration:
         warnings: list[str] = []
 
         for finding in findings:
+            name = finding.source_id.removesuffix(".configuration")
+            if finding.state == MigrationState.DOCUMENTED_SKIP.value:
+                differences.extend(review_configuration_differences(
+                    name, self.v1_native_configurations.get(name)))
             if finding.state != MigrationState.READY.value:
                 continue
             converted = self._convert(finding)
             intents.extend(converted[0])
             differences.extend(converted[1])
             warnings.extend(converted[2])
+
+        for name, converter in (("content", convert_content_configuration),
+                                ("memory", convert_memory_configuration)):
+            source = next((item for item in findings
+                           if item.source_id == name + ".configuration"
+                           and item.state == MigrationState.READY.value), None)
+            if source is None:
+                continue
+            converted = converter(self.v1_native_configurations.get(name), self.configuration_registry)
+            differences.extend(converted.differences)
+            grouped = {}
+            for target, value in converted.changes.items():
+                group = self.configuration_registry.fields[target].group_id
+                grouped.setdefault(group, {})[target] = value
+            for group, values in grouped.items():
+                prior_index = next((index for index, intent in enumerate(intents)
+                                    if intent.target_kind == "configuration_registry"
+                                    and intent.group_id == group), None)
+                prior = intents[prior_index] if prior_index is not None else None
+                changes = dict(prior.changes) if prior else {}
+                sources = dict(prior.sources) if prior else {}
+                confidence = dict(prior.confidence) if prior else {}
+                for target, value in values.items():
+                    field_id = target.rsplit(".", 1)[-1]
+                    if field_id in changes and changes[field_id] != value:
+                        differences.append({"field": target, "kind": "source_precedence",
+                                            "explain": f"旧独立 {name} 已明确配置此项，以其设置为准；本体设置作为缺省来源。"})
+                    changes[field_id] = value
+                    sources[field_id] = converted.sources[target]
+                    confidence[field_id] = "high"
+                merged = ConfigIntent(scope=group, group_id=group,
+                    changes=changes, source_id=source.source_id,
+                    confidence=confidence, sources=sources)
+                if prior_index is None:
+                    intents.append(merged)
+                else:
+                    intents[prior_index] = merged
+
+        image_source = next((item for item in findings
+                             if item.source_id == "image.configuration"
+                             and item.state == MigrationState.READY.value), None)
+        if image_source is not None:
+            prior_index = next((index for index, intent in enumerate(intents)
+                                if intent.target_kind == "image_output_config"), None)
+            prior = intents[prior_index] if prior_index is not None else None
+            converted = convert_image_companion_configuration(
+                self.v1_image_configuration,
+                private_output=prior.changes if prior is not None else None,
+                private_sources=prior.sources if prior is not None else None,
+            )
+            differences.extend(converted.differences)
+            if converted.changes:
+                merged = ConfigIntent(
+                    scope="image.output", group_id="image.output",
+                    changes=converted.changes, source_id=image_source.source_id,
+                    confidence={field: "high" for field in converted.changes},
+                    sources=converted.sources, target_kind="image_output_config",
+                )
+                if prior_index is None:
+                    intents.append(merged)
+                else:
+                    intents[prior_index] = merged
+            else:
+                warnings.append("独立 Image 配置没有可执行的默认生图路线；已保留旧陪伴插件原有设置。")
 
         return Outcome.success(MigrationPlan(
             v1_root=str(self.v1_root),
@@ -460,6 +643,10 @@ class LegacyMigration:
         且值通过目标字段自己的类型与范围校验。
         """
         warnings: list[str] = []
+        if finding.source_id == "image.configuration" or finding.source_id.removesuffix(".configuration") in REGISTRY_PLUGINS:
+            # Merge each standalone source with its matching core settings in
+            # plan(), so every configuration group has one revisioned write.
+            return [], [], warnings
 
         if finding.source_id == "reality.configuration":
             if self.v1_reality_configuration is None:
@@ -481,6 +668,25 @@ class LegacyMigration:
             )
             return [intent], list(converted.differences), warnings
 
+        native_name = finding.source_id.removesuffix(".configuration")
+        if native_name in SOURCE_PLUGINS:
+            baseline = self.native_extension_baselines.get(native_name, {})
+            converted = convert_native_extension_configuration(
+                native_name, self.v1_native_configurations.get(native_name),
+                baseline.get("defaults"), baseline.get("schema"),
+            )
+            warnings.extend(converted.warnings)
+            if not converted.changes:
+                return [], list(converted.differences), warnings
+            fields = sorted(converted.changes)
+            return [ConfigIntent(
+                scope=f"{native_name}.settings", group_id=native_name,
+                changes=dict(converted.changes), source_id=finding.source_id,
+                confidence={field: "high" for field in fields},
+                sources={field: (SOURCE_PLUGINS[native_name] + "_config.json",) for field in fields},
+                target_kind="native_extension_config",
+            )], list(converted.differences), warnings
+
         if finding.source_id != "private.host_configuration":
             warnings.append(f"{finding.source_id} 的转换器还没有写，本次不会迁移它。")
             return [], [], warnings
@@ -495,7 +701,6 @@ class LegacyMigration:
         sources: dict[str, dict[str, tuple[str, ...]]] = {}
         full_confidence: dict[str, str] = {}
         full_sources: dict[str, tuple[str, ...]] = {}
-
         weather = convert_weather_config(self._weather_configuration(config))
         if weather.is_success:
             weather_migration = weather.unwrap()
@@ -512,6 +717,14 @@ class LegacyMigration:
             converted_changes = {}
             differences = []
             warnings.append(f"天气设置未能转换：{weather.failure.reason}")
+
+        image_configuration = convert_image_configuration(config)
+        differences.extend(image_configuration.differences)
+        for field_id, value in image_configuration.preferences.items():
+            target = "conversation.image_output." + field_id
+            converted_changes[target] = value
+            full_confidence[target] = "high"
+            full_sources[target] = image_configuration.preference_sources.get(field_id, ())
 
         if self.configuration_registry is not None:
             configuration = convert_configuration(
@@ -602,6 +815,15 @@ class LegacyMigration:
                 source_id=finding.source_id, confidence=semantic_confidence, sources=semantic_sources,
                 target_kind="semantic_config",
             ))
+        if image_configuration.output_changes:
+            intents.append(ConfigIntent(
+                scope="image.output", group_id="image.output",
+                changes=dict(image_configuration.output_changes),
+                source_id=finding.source_id,
+                confidence={field: "high" for field in image_configuration.output_changes},
+                sources=dict(image_configuration.output_sources),
+                target_kind="image_output_config",
+            ))
         return intents, differences, warnings
 
     @staticmethod
@@ -639,9 +861,35 @@ class LegacyMigration:
                 return loaded
         return None
 
+    def _configuration_dump_issue(self):
+        """Return a diagnostic marker when a known configuration dump exists but is unusable."""
+        issue = ""
+        for name in ("companion_config.json", "plugin_config.json", "config.json"):
+            path = self.v1_root / name
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                issue = "unreadable"
+                continue
+            if not path.is_file():
+                issue = "unreadable"
+                continue
+            loaded = read_json(path)
+            if isinstance(loaded, dict):
+                return ""
+            issue = "unreadable"
+        return issue
+
     def _configuration_for(self, entry: LegacyCatalogEntry):
+        native_name = entry.source_id.removesuffix(".configuration")
+        if native_name in WRITABLE_PLUGINS | REVIEW_ONLY_PLUGINS:
+            return self.v1_native_configurations.get(native_name)
         if entry.source_id == "reality.configuration":
             return self.v1_reality_configuration
+        if entry.source_id == "image.configuration":
+            return self.v1_image_configuration
         if entry.source_id == "private.host_configuration":
             return self._configuration()
         return None
@@ -652,7 +900,10 @@ class LegacyMigration:
 HANDLERS = frozenset({"v2.private-config-converter", "v2.role-journal-importer",
                       "v2.role-journal-and-worldbook-importer",
                       "v2.group-relationship-importer", "v2.reaction-asset-importer",
-                      "v2.memory-snapshot-archive", "v2.reality-config-migrator"})
+                      "v2.memory-snapshot-archive", "v2.reality-config-migrator",
+                      "v2.person-private-memory-importer", "v2.image-config-migrator",
+                      "v2.native-extension-config-migrator", "v2.content-config-migrator",
+                      "v2.memory-config-migrator"})
 
 # 转换器产出的键前段（``role.state`` / ``proactive.contact``）**就是** V2 的配置
 # 分组名——``role_work/state/configuration.py`` 的 ``GROUP`` 与

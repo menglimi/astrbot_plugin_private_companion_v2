@@ -19,3 +19,6 @@ coverage.xml
 /%SystemDrive%/
 /=ro
 *.log
+# 页面设计快照：由 tools/build_*.py 生成，落点 build/；留下本地文件但不再进版本库
+/pages/陪伴小屋/shell-preview.html
+/pages/陪伴小屋/shell-preview-mock.html

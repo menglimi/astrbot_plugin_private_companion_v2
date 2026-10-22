@@ -11,7 +11,8 @@ from math import isfinite
 
 from astrbot.api.web import request
 
-from companion_v2.conversation.forwards.models import ForwardIntakePolicy, MAX_DEPTH, MAX_FORWARDS, MAX_NODES
+from companion_v2.conversation.forwards.models import (DEFAULT_MAX_NODES, ForwardIntakePolicy, MAX_DEPTH,
+                                                        MAX_FORWARDS, MAX_NODES)
 from companion_v2.conversation.pokes import PokePolicy
 from companion_v2.conversation.voice_reply import VoiceReplyPolicy
 from companion_v2.execution.models import TaskError, digest
@@ -23,11 +24,11 @@ from .service_balance import (NEWAPI_DEFAULT_DIVISOR, configured_balance_port,
 from .weather_settings import WeatherHostSettings
 
 
-PREFIX = "/astrbot_plugin_private_companion_v2/host-options"
+PREFIX = "/astrbot_plugin_private_companion/host-options"
 VOICE_FIELDS = frozenset(("enabled", "probability", "private_probability", "group_probability"))
 POKE_FIELDS = frozenset(("enabled", "trigger_probability", "replies", "back_probability", "back_times",
                          "model_reply_enabled", "model_reply_probability"))
-FORWARD_FIELDS = frozenset(("max_forwards", "max_nodes", "max_depth"))
+FORWARD_FIELDS = frozenset(("max_forwards", "max_nodes", "max_depth", "parse_nested"))
 
 
 def _document(raw):
@@ -105,6 +106,7 @@ class HostOptionsWebAPI:
                 max_forwards=runtime_config.get("forward_max_forwards", defaults.max_forwards),
                 max_nodes=runtime_config.get("forward_max_nodes", defaults.max_nodes),
                 max_depth=runtime_config.get("forward_max_depth", defaults.max_depth),
+                parse_nested=runtime_config.get("forward_parse_nested", defaults.parse_nested),
             )
         except (TaskError, TypeError, ValueError) as error:
             raise TaskError("host_options_invalid", "check the host voice, received-poke and forward settings") from error
@@ -229,13 +231,14 @@ class HostOptionsWebAPI:
                 if type(section) is not dict:
                     raise TaskError("host_options_invalid", "the runtime settings section has an invalid shape")
                 names = {"max_forwards": "forward_max_forwards", "max_nodes": "forward_max_nodes",
-                         "max_depth": "forward_max_depth"}
+                         "max_depth": "forward_max_depth", "parse_nested": "forward_parse_nested"}
                 section.update({names[key]: value for key, value in changes.items()})
                 try:
                     policy = ForwardIntakePolicy(
                         max_forwards=section.get("forward_max_forwards", MAX_FORWARDS),
-                        max_nodes=section.get("forward_max_nodes", MAX_NODES),
+                        max_nodes=section.get("forward_max_nodes", DEFAULT_MAX_NODES),
                         max_depth=section.get("forward_max_depth", MAX_DEPTH),
+                        parse_nested=section.get("forward_parse_nested", True),
                     )
                 except (TaskError, TypeError, ValueError) as error:
                     raise TaskError("host_options_invalid", "forward limits must be integers within the structural ceilings") from error

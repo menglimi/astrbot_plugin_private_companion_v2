@@ -30,6 +30,16 @@ from tests.test_core_reply_pipeline import PipelineEvent, CoreAgentFixture
 
 
 class CoreDecisionPromptTests(unittest.TestCase):
+    def test_followup_decision_respects_closed_interjection_and_encourages_natural_closure(self):
+        questions = decision_questions({"scope_kind": "group", "candidate_reason": "reply_follow_up",
+            "group_participation_policy": {"question_enabled": False, "interjection_enabled": False},
+            "group_continuation": {"used_turns": 2, "max_turns": 3}}, {})
+        action = questions["action"]
+        self.assertIn("答疑", action["instructions"])
+        self.assertIn("上限", action["instructions"])
+        self.assertIn("逐句追答", action["criteria"]["silent"])
+        self.assertNotIn("interject", action["criteria"])
+
     def test_group_listening_criteria_do_not_change_private_questions(self):
         enabled = dict.fromkeys(CONFIGURABLE_DECISION_FIELDS, True)
         group = decision_questions({"scope_kind": "group"}, enabled)
@@ -223,9 +233,11 @@ class CoreReplyDecisionTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         self.clock.advance(timedelta(seconds=1))
         current = self.incoming("group-context-current", "安静点的")
         prepared = (await self.controller.prepare_core_reply(current, target)).unwrap()
-        prepared.update(channel="group", group_admission={"reason": "reply_follow_up"})
+        progress = {"used_turns": 2, "max_turns": 3}
+        prepared.update(channel="group", group_admission={"reason": "reply_follow_up", "continuation": progress})
         facts = core_decision_facts(current, prepared, self.app, at=self.clock.now())
         self.assertEqual(facts["user_text"], "安静点的")
+        self.assertEqual(facts["group_continuation"], progress)
         self.assertTrue(any("火锅" in item["text"] for item in facts["recent_group_bot_messages"]))
 
     async def test_repeat_participation_is_classified_before_literal_action_without_main_model(self):

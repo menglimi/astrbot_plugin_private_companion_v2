@@ -840,3 +840,39 @@ class ProactiveContactTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
         task = (await self.contact(app, self.opportunity("after-pause"))).unwrap().task
         await self.delivery_state(app, task.task_id, "delivered")
         self.assertEqual(len(self.called), 1)
+
+    async def test_role_state_reaches_contact_intent_and_pacing_settings(self):
+        app = await self.enabled()
+        context = self.contact_context()
+        with patch.object(app.role_state, "read", return_value={
+            "state": "active",
+            "values": {"energy": 25, "sleep": "昨晚熬夜有点困", "mood": "微倦但平静"},
+            "sleep_execution": {"state": "awake", "awake_minutes": 10},
+        }):
+            self.presentation_settings(app, {"enabled": True, "llm_controlled": True,
+                "rules_enabled": False, "part_gap_mode": "log", "part_gap_min_ms": 1500,
+                "part_gap_max_ms": 5000, **TEXT_DEFAULTS}).unwrap()
+            task = (await self.contact(app, self.opportunity("with-role-state"))).unwrap().task
+            await self.delivery_state(app, task.task_id, "delivered")
+        intent_material = next(m for m in self.called[-1].original.context.materials
+                               if m.purpose == "contact_intent")
+        payload = json.loads(intent_material.payload)
+        self.assertEqual(payload["role_state"]["energy"], 25)
+        self.assertEqual(payload["role_state"]["sleep"], "昨晚熬夜有点困")
+        row = app.runtime.read_one("SELECT record_json FROM proactive_contacts WHERE task_id = ?", (task.task_id,))
+        seg = json.loads(row["record_json"])["segmentation_settings"]
+        self.assertEqual(seg.get("role_energy"), 25)
+        self.assertTrue(seg.get("role_sleepy"))
+
+    async def test_awake_sleep_prose_does_not_force_sleepy_contact_pacing(self):
+        app = await self.enabled()
+        with patch.object(app.role_state, "read", return_value={
+            "state": "active", "values": {"energy": 85, "sleep": "睡得很好，不困了",
+                "conditions": [{"kind": "other", "text": "打算睡前再看一章"}]},
+            "sleep_execution": {"state": "awake", "awake_minutes": 120},
+        }):
+            task = (await self.contact(app, self.opportunity("awake-prose"))).unwrap().task
+        row = app.runtime.read_one("SELECT record_json FROM proactive_contacts WHERE task_id = ?", (task.task_id,))
+        self.assertFalse(json.loads(row["record_json"])["segmentation_settings"].get("role_sleepy", False))
+        intent = next(item for item in self.called[-1].original.context.materials if item.purpose == "contact_intent")
+        self.assertEqual(json.loads(intent.payload)["role_state"]["sleep"], "睡得很好，不困了")

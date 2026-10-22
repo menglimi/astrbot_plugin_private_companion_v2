@@ -28,7 +28,7 @@ from companion_v2.role_work.state.management import StateManagement
 from .management_identity import dashboard_operator
 
 
-PREFIX = "/astrbot_plugin_private_companion_v2/perception-native"
+PREFIX = "/astrbot_plugin_private_companion/perception-native"
 logger = logging.getLogger(__name__)
 ENVIRONMENT_STATUS_FIELDS = frozenset(("planning_timezone", "planning_annual_calendars",
                                        "planning_weather_enabled", "planning_weather_location",

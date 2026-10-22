@@ -6,7 +6,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from companion_v2.conversation.date_context import project_local_date
+from companion_v2.conversation.date_context import period_label, project_interaction_gap, project_local_date
 from companion_v2.conversation import date_context
 from companion_v2.agenda.annual_calendar import SCHEMA, parse_annual_calendar
 
@@ -18,6 +18,10 @@ class LocalDateContextTests(unittest.TestCase):
         self.assertEqual(result["weekday"], "星期五")
         self.assertEqual((result["local_time"], result["period"]), ("00:30", "凌晨"))
         self.assertEqual(result["timezone"], "Asia/Shanghai")
+
+    def test_period_label_is_one_vocabulary_for_every_prompt_path(self):
+        self.assertEqual([period_label(hour) for hour in (0, 5, 8, 11, 13, 18, 22, 23)],
+                         ["凌晨", "早上", "上午", "中午", "下午", "晚上", "夜里", "夜里"])
 
     def test_fixed_holiday_name_is_a_calendar_label(self):
         result = project_local_date(datetime(2026, 5, 1, 4, tzinfo=timezone.utc), "Asia/Shanghai")
@@ -200,6 +204,25 @@ class LocalDateContextTests(unittest.TestCase):
             {"date": "2027-01-01", "days_ahead": 2, "names": ["合成节气"]}])
         missing_year = project_local_date(at, "UTC", (current,))["configured_annual_calendar"]
         self.assertEqual(missing_year["upcoming_solar_terms"], [])
+
+    def test_project_interaction_gap_classifies_elapsed_intervals_by_local_calendar(self):
+        now = datetime(2026, 9, 25, 2, 0, tzinfo=timezone.utc)  # 10:00 in Asia/Shanghai
+        self.assertEqual(
+            project_interaction_gap(now, datetime(2026, 9, 25, 1, 45, tzinfo=timezone.utc), "Asia/Shanghai"),
+            {"band": "in_flow", "elapsed_minutes": 15, "days_apart": 0},
+        )
+        self.assertEqual(
+            project_interaction_gap(now, datetime(2026, 9, 24, 22, 0, tzinfo=timezone.utc), "Asia/Shanghai"),
+            {"band": "same_day_pause", "elapsed_minutes": 240, "days_apart": 0},
+        )
+        self.assertEqual(
+            project_interaction_gap(now, datetime(2026, 9, 24, 15, 0, tzinfo=timezone.utc), "Asia/Shanghai"),
+            {"band": "overnight", "elapsed_minutes": 660, "days_apart": 1},
+        )
+        self.assertEqual(
+            project_interaction_gap(now, datetime(2026, 9, 22, 15, 0, tzinfo=timezone.utc), "Asia/Shanghai"),
+            {"band": "days_apart", "elapsed_minutes": 3540, "days_apart": 3},
+        )
 
 
 if __name__ == "__main__":

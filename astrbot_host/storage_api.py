@@ -17,7 +17,7 @@ from .storage_location import (finish_backup_relocation, relocate_backup_storage
                                selected_backup_directory, selected_backup_root, selected_root)
 
 
-PREFIX = "/astrbot_plugin_private_companion_v2/storage"
+PREFIX = "/astrbot_plugin_private_companion/storage"
 
 
 class StorageWebAPI:
@@ -143,7 +143,7 @@ class StorageWebAPI:
                 save = getattr(self.controller, "save_plugin_config", None)
                 if not callable(save):
                     raise TaskError("storage_config_save_unavailable", "plugin configuration cannot be saved")
-                previous = deepcopy(self.controller.config)
+                previous = deepcopy(dict(self.controller.config))
                 candidate = deepcopy(previous)
                 storage = candidate.get("storage")
                 if not isinstance(storage, dict):

@@ -1,4 +1,4 @@
-"""Withdrawn-message transcription options, fixed per private window.
+"""Withdrawn-message transcription options, fixed per window.
 
 V1 kept a short-lived message cache purely so a withdrawn message could still be
 transcribed. V2 already stores every admitted input and marks withdrawal in place,
@@ -16,7 +16,10 @@ from companion_v2.execution.models import require
 GROUP = "conversation.recall"
 OWNER = GROUP
 DEFAULTS = {
-    "transcribe_enabled": False,
+    # 默认开启：撤回感知本身就是"看得到撤回"，用户不需要先去某个页面
+    # 找到开关。真正的边界在读取侧——只有核心管理员（memory.manage，
+    # core_only=True）能调用转写，普通聊天不会因此多出任何上下文。
+    "transcribe_enabled": True,
     "transcribe_max_items": 5,
     "transcribe_text_chars": 500,
     "transcribe_window_minutes": 10,

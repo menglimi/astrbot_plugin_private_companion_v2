@@ -15,7 +15,7 @@ async function run({output, bridgePath, python, sourceRoot}) {
     {cwd: root, encoding: "utf8"});
   assert.equal(templates.status, 0, templates.stderr);
   const {profile, layers} = JSON.parse(templates.stdout);
-  const sdk = await fs.readFile(bridgePath, "utf8"), HOST = "astrbot_plugin_private_companion_v2";
+  const sdk = await fs.readFile(bridgePath, "utf8"), HOST = "astrbot_plugin_private_companion";
   const model = "host/targets/qa/roles/qa/model", calls = [], writes = [], errors = [], checks = [];
   const edits = new Map(), inheritedNews = "保留原人格，分享一个亮点与具体感想。", token = () => String(revision).padStart(64, "0");
   let revision = 1, conflict = false;

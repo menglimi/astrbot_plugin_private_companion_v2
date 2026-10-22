@@ -21,7 +21,8 @@ from companion_v2.storage.repositories import OperationRepository
 from companion_v2.storage.versioned_records import owner_key
 from .planning_config import SCHEDULE_MODE_ORCHESTRATED, configured_weather_location, planning_values
 from .planning_inputs import capture, validate
-from .planning_output import INSTRUCTION, INTERVENTION_INSTRUCTION, parse_output
+from . import planning_observation
+from .planning_output import INSTRUCTION, INTERVENTION_INSTRUCTION, MODE_INSTRUCTIONS, parse_output
 from .models import AgendaError
 logger = logging.getLogger(__name__)
 
@@ -113,6 +114,7 @@ class CalendarPlanning:
 
     def _set_result(self, context, result):
         role_key = self.app.calendar.records.role_key(context)
+        result = planning_observation.save_result(self, context, result)
         self.results[role_key] = result
         for bound, _, _ in self._role_bindings().get(role_key, ()):
             self.results[bound.key] = result
@@ -359,10 +361,23 @@ class CalendarPlanning:
         await self.guard(context, job["instruction"])
         run.validate()
         trigger = BackgroundPromptTrigger(job["slot"], context.actor.principal, context.scope, at)
-        prompt_instruction = INTERVENTION_INSTRUCTION if job.get("intervention") else INSTRUCTION
+        mode_note = MODE_INSTRUCTIONS.get(job["mode"], "")
+        prompt_instruction = (INTERVENTION_INSTRUCTION if job.get("intervention")
+                              else INSTRUCTION + ("\n" + mode_note if mode_note else ""))
+        if ":review:" in job["slot"]:
+            prompt_instruction += ("\n当前是新时段对剩余一天的重新观察：按 now 之后的最新日历与角色状态重新考虑，"
+                "跳过已经过去的时段和已存在安排，不补写旧请求、不补造完成记录。")
+        materials = [PromptMaterial(OWNER, "planning_material", encode(job["material"]))]
+        if job.get("intervention"):
+            materials.append(PromptMaterial("conversation.native", "intervention_dialogue", encode({
+                "conversation": job.get("intervention_dialogue", ()),
+                "basis": "validated_private_native_dialogue",
+                "assistant_reply_returned": any(
+                    item["speaker"] == "assistant" for item in job.get("intervention_dialogue", ())),
+            })))
         request = PromptRequest(trigger, job["instruction"], SealedForegroundContext(
-            (PromptMaterial(OWNER, "planning_material", encode(job["material"])),), (), ()),
-            prompt_instruction, context.role_binding, output_format="calendar_planning")
+            tuple(materials), (), ()),
+            prompt_instruction, context.role_binding, output_format="calendar_planning", response_format="json_object")
         completion = await self.gateway.generate(run, request)
         try:
             if completion.draft is None:
@@ -430,6 +445,10 @@ class CalendarPlanning:
             slot = mode + ":" + settings["planning_timezone"] + ":" + period + ":settings:" + settings_token
             if not self.attempted(context, slot, automatic=True):
                 return mode, slot, None
+            if mode == "daily":
+                _, review_slot, _ = planning_observation.daily_observation(self, context, slot, local)
+                if review_slot is not None:
+                    return mode, review_slot, None
         page = self.app.calendar.occurrences(context, start=at,
             end=at + timedelta(minutes=settings["planning_refine_minutes"]))
         for item in page["items"]:
@@ -501,9 +520,14 @@ class CalendarPlanning:
         settings = self.app.role_state.settings(context)[0]
         role_key = self.app.calendar.records.role_key(context)
         next_check = self.next_checks.get(role_key, self.next_checks.get(context.key))
+        local = self.tasks.now().astimezone(ZoneInfo(settings["planning_timezone"]))
+        slot = "daily:" + settings["planning_timezone"] + ":" + local.date().isoformat() + ":settings:" + self.app.role_state.planning_settings_token(context)
+        daily_result, _, next_review = planning_observation.daily_observation(self, context, slot, local)
         return {"enabled": settings["planning_enabled"], "calendar_enabled": settings["calendar_enabled"],
             "schedule_simulation_mode": settings["schedule_simulation_mode"],
-            "running": role_key in self.workers, "last_result": self.results.get(role_key, self.results.get(context.key)),
+            "running": role_key in self.workers,
+            "last_result": self.results.get(role_key, self.results.get(context.key)) or planning_observation.stored_result(self, context),
+            "daily_result": daily_result, "next_review_at": next_review.isoformat() if next_review else None,
             "next_check": next_check.isoformat() if next_check is not None else None}
 
     @property

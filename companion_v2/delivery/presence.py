@@ -3,14 +3,20 @@
 import asyncio
 from datetime import timedelta
 import json
+import logging
 
 from companion_v2.execution.models import TaskContext, TaskError, digest, encode, stamp
+from companion_v2.foundation.refs import ScopeKind
+
+
+logger = logging.getLogger(__name__)
 
 
 class PresenceCoordinator:
     def __init__(self, app, port):
         self.app, self.runtime, self.port = app, app.runtime, port
         self.typing, self.suppressed, self.contexts, self.results = {}, {}, {}, {}
+        self.native_replies, self._typing_wakes = {}, {}
         self._result_contexts = {}
         self.status_worker = None
         self.closed = False
@@ -26,6 +32,49 @@ class PresenceCoordinator:
 
     def bind(self, context):
         self.contexts[context.key] = context
+
+    def begin_native_reply(self, context, turn_id):
+        """Hold typing from authenticated intake through the final native send.
+
+        Generation observations can complete before AstrBot starts delivery.
+        This live lease therefore belongs to the entire reply, not that row.
+        A route keeps its empty lease after completion so delayed observation
+        writes cannot restart typing. Concurrent turns share one refresh worker.
+        """
+        if self.closed or context.scope.kind is not ScopeKind.PRIVATE:
+            return
+        from companion_v2.conversation.reset import boundary
+        route, reset = self.route(context), boundary(self.runtime, context.scope)
+        lease = self.native_replies.get(route)
+        if lease is None or lease["context"] != context or lease["reset"] != reset:
+            lease = {"context": context, "reset": reset, "turns": {}}
+            self.native_replies[route] = lease
+        lease["turns"].setdefault(turn_id, {"batch_id": turn_id, "state": "prepared",
+                                          "execution_path": "astrbot_core"})
+        self.bind(context)
+        self._advance_typing()
+        self.app.notify()
+
+    def finish_native_reply(self, context, turn_id):
+        lease = self.native_replies.get(self.route(context))
+        if lease is not None and lease["context"] == context:
+            lease["turns"].pop(turn_id, None)
+            self._advance_typing()
+            self.app.notify()
+
+    def native_reply_stage(self, context, turn_id, stage):
+        lease = self.native_replies.get(self.route(context))
+        turn = (lease["turns"].get(turn_id)
+                if lease is not None and lease["context"] == context else None)
+        if turn is None:
+            return
+        turn["state"] = stage
+        if stage == "delivering":
+            # QQ can clear the indicator when a bubble arrives. Wake the same
+            # worker immediately instead of leaving the next part gap unmarked.
+            wake = self._typing_wakes.get(self.route(context))
+            if wake is not None:
+                wake.set()
 
     def _record_result(self, key, result, *context_keys):
         self.results[key] = {"recorded_at": stamp(self.app.now()), **result}
@@ -54,6 +103,14 @@ class PresenceCoordinator:
 
     def active_turn(self, context):
         """Presentation follows this recipient's turn, not the role's shared body."""
+        lease = self.native_replies.get(self.route(context))
+        if lease is not None:
+            if lease["context"] != context:
+                return None
+            from companion_v2.conversation.reset import boundary
+            if boundary(self.runtime, context.scope) != lease["reset"]:
+                lease["turns"].clear()
+            return next(reversed(lease["turns"].values()), None)
         from companion_v2.conversation.native_turns import latest_scope
         native = latest_scope(self.runtime, context.scope)
         if native is not None:
@@ -77,7 +134,10 @@ class PresenceCoordinator:
     async def _pulse(self, context):
         # One continuous lease covers the whole turn, including tools and part gaps.
         # Stop refreshing when the lease ends; don't issue an unverified protocol toggle.
+        wake = self._typing_wakes.setdefault(self.route(context), asyncio.Event())
+        reported_batch = None
         while not self.closed:
+            wake.clear()
             values = self._allowed(context, "typing_enabled", "platform.typing")
             turn = self.active_turn(context)
             def current():
@@ -89,11 +149,32 @@ class PresenceCoordinator:
             result = await asyncio.wait_for(self.port.typing(context, before_dispatch=current), timeout=3)
             self._record_result("typing:" + self.route(context),
                                 {**result, "batch_id": turn["batch_id"] if turn else None}, context.key)
+            batch = turn["batch_id"] if turn else None
+            if batch != reported_batch or result.get("state") != "accepted":
+                logger.info("[CompanionV2] QQ 输入提示 recipient=%s turn_id=%s state=%s code=%s",
+                            context.scope.native_scope_id, batch, result.get("state"), result.get("code", ""))
+                reported_batch = batch
             if result.get("state") != "accepted":
                 return
-            await asyncio.sleep(values["typing_refresh_seconds"])
+            try:
+                await asyncio.wait_for(wake.wait(), timeout=values["typing_refresh_seconds"])
+            except asyncio.TimeoutError:
+                pass
 
     def advance(self):
+        if self.closed:
+            return
+        self._advance_typing()
+        if self.status_worker and self.status_worker.done():
+            if not self.status_worker.cancelled():
+                error = self.status_worker.exception()
+                if error:
+                    self.results["presence"] = {"state": "unknown", "code": getattr(error, "code", "presence_failed")}
+            self.status_worker = None
+        if self.status_worker is None and self._candidates():
+            self.status_worker = asyncio.create_task(self._sync_status(), name="companion:presence")
+
+    def _advance_typing(self):
         if self.closed:
             return
         rows = self.runtime.read_all("""SELECT b.context_json, f.batch_id, f.sequence FROM conversation_flows f
@@ -102,20 +183,23 @@ class PresenceCoordinator:
         from companion_v2.conversation.native_turns import context_rows
         native = context_rows(self.runtime, kind="private")
         rows = (*rows, *({"context_json": row["context_json"], "batch_id": row["turn_id"]}
-                        for row in native if row["generation_state"] in ("prepared", "running")))
+                        for row in native if row["generation_state"] in ("prepared", "running")),
+                *({"context_json": encode(lease["context"]), "batch_id": turn["batch_id"]}
+                  for lease in self.native_replies.values() for turn in lease["turns"].values()))
         active = {}
         for row in rows:
             context = TaskContext.restore(json.loads(row["context_json"]))
             self.bind(context)
             try:
                 self._allowed(context, "typing_enabled", "platform.typing")
-                if self.active_turn(context) is None:
+                turn = self.active_turn(context)
+                if turn is None:
                     continue
             except TaskError:
                 continue
             route = self.route(context)
             if route not in active:
-                active[route] = (context, row["batch_id"])
+                active[route] = (context, turn["batch_id"])
         for key, (context, batch, worker) in tuple(self.typing.items()):
             current = active.get(key)
             if not current or current[0].key != context.key:
@@ -141,14 +225,6 @@ class PresenceCoordinator:
                 self.typing[key] = (context, batch, worker)
                 worker.add_done_callback(lambda done: self.app.notify())
         self.suppressed = {k: v for k, v in self.suppressed.items() if k in active}
-        if self.status_worker and self.status_worker.done():
-            if not self.status_worker.cancelled():
-                error = self.status_worker.exception()
-                if error:
-                    self.results["presence"] = {"state": "unknown", "code": getattr(error, "code", "presence_failed")}
-            self.status_worker = None
-        if self.status_worker is None and self._candidates():
-            self.status_worker = asyncio.create_task(self._sync_status(), name="companion:presence")
 
     def desired(self, context):
         return self.desired_status(context)["desired"]
@@ -272,6 +348,7 @@ class PresenceCoordinator:
 
     async def close(self):
         self.closed = True
+        self.native_replies.clear()
         self.cancel_running()
         workers = [w for _, _, w in self.typing.values()] + ([self.status_worker] if self.status_worker else [])
         if workers:

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+import tempfile
 import unittest
 
 from companion_v2.legacy.catalog import (
@@ -9,6 +12,7 @@ from companion_v2.legacy.catalog import (
     V1_SUPPORTED_VERSION,
     V1_SUPPORTED_VERSIONS,
 )
+from companion_v2.legacy.migration import LegacyMigration, MigrationState
 from companion_v2.legacy.surface_ledger import (
     LEGACY_SURFACE_LEDGER,
     SurfaceClassification,
@@ -28,6 +32,11 @@ class LegacyCompatibilityCatalogTests(unittest.TestCase):
             catalog.entry("private.core_profiles").source_plugin_id,
             V1_PLUGIN_ID,
         )
+        private_memory = catalog.entry("private.authoritative_memory")
+        self.assertEqual(private_memory.action, CatalogAction.DATA_CONVERTED)
+        self.assertEqual(private_memory.source_paths, ("companions.json",))
+        self.assertIn("当前账号/用户", private_memory.disposition_reason)
+        self.assertIn("历史查询库", private_memory.disposition_reason)
         self.assertTrue(catalog.entries_for_plugin("astrbot_plugin_reality_companion"))
         for entry in catalog.entries:
             self.assertTrue(entry.source_paths)
@@ -47,3 +56,14 @@ class LegacyCompatibilityCatalogTests(unittest.TestCase):
         for entry in ledger.entries:
             self.assertTrue(entry.v2_route)
             self.assertTrue(entry.acceptance_scope)
+
+    def test_v1_authoritative_private_memory_is_visible_as_a_separate_held_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "companions.json"
+            path.write_text(json.dumps({"_req041_private_memory": {"records": {"person-a": {}}}}),
+                            encoding="utf-8", newline="\n")
+
+            findings = LegacyMigration(v1_root=directory).discover().unwrap()
+
+        finding = next(item for item in findings if item.source_id == "private.authoritative_memory")
+        self.assertEqual(finding.state, MigrationState.DATA_READY.value)

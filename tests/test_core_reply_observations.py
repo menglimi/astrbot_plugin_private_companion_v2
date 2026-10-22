@@ -1,17 +1,18 @@
 """Native core chats feed memory without creating V2 replies or delivery receipts."""
 
+import asyncio
 from datetime import timedelta
 import json
 import unittest
 
 from companion_v2.conversation.native_observations import ASSISTANT_OWNER, INPUT_OWNER
+from companion_v2.conversation.native_history import dialogue
 from companion_v2.conversation.recalls import MessageRecall
 from companion_v2.execution.models import require, stamp
 from companion_v2.foundation.refs import RoleOwnerRef
 from companion_v2.memory.episodes import recent_dialogue_lines
 from companion_v2.memory.models import Proposal
 from companion_v2.role_work.journal.models import JournalContext, JournalKey, JournalKind
-from astrbot_host.core_reply_observations import may_be_intervention
 from tests.multi_host_support import MultiFixture
 
 
@@ -28,12 +29,6 @@ class CoreReplyObservationTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
     def sources(self, context, session_id="native-source-query"):
         self.app.memory.query.begin(context, session_id)
         return require(self.app.memory.query.query(context, session_id, query_intent="", kind="sources"))
-
-    async def test_intervention_prefilter_skips_user_only_topics_and_keeps_role_directives(self):
-        self.assertFalse(may_be_intervention("我今天很累，晚上想早点睡。"))
-        self.assertFalse(may_be_intervention("我这周的日程排得很满。"))
-        self.assertTrue(may_be_intervention("你今天太累了，早点休息吧。"))
-        self.assertTrue(may_be_intervention("明天的计划推迟到下午。"))
 
     async def test_real_native_input_becomes_memory_evidence_and_recall_source(self):
         prepared = await self.prepared()
@@ -81,6 +76,40 @@ class CoreReplyObservationTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replies[0]["excerpt"], "我读完了")
         self.assertEqual(replies[0]["delivery_state"], "send_returned")
         self.assertEqual(self.app.runtime.read_all("SELECT part_id FROM conversation_delivery_receipts", ()), ())
+
+    async def test_intervention_dialogue_contains_only_real_role_replies(self):
+        prepared = await self.prepared(identifier="native-intervention-dialogue", text="你早点休息吧")
+        await prepared["native_source_future"]
+        observer = self.controller.session.core_reply_observations
+        await observer.output(prepared, "我先想想", state="output_observed")
+
+        context = prepared["context"]
+        before_send = dialogue(self.app.messages, context, self.clock.now(), limit=16)
+        self.assertEqual([(item["speaker"], item["text"]) for item in before_send],
+                         [("user", "你早点休息吧")])
+
+        await observer.output(prepared, "那我去休息一会儿", state="send_returned")
+        after_send = dialogue(self.app.messages, context, self.clock.now(), limit=16)
+        self.assertEqual([(item["speaker"], item["text"]) for item in after_send], [
+            ("user", "你早点休息吧"), ("assistant", "那我去休息一会儿")])
+
+    async def test_intervention_is_queued_after_input_and_rechecked_after_role_reply(self):
+        observer = self.controller.session.core_reply_observations
+        queued = []
+        observer._queue_intervention = lambda context, ticket, **kwargs: queued.append((ticket, kwargs.get("delay")))
+
+        prepared = await self.prepared(identifier="native-intervention-input-only", text="那件事可以之后再说")
+        await prepared["native_source_future"]
+        await asyncio.sleep(0)
+
+        self.assertEqual(len(queued), 1)
+        input_ticket = queued[0][0]
+        await observer.output(prepared, "好，那就改到明天", state="send_returned")
+        await asyncio.sleep(0)
+
+        self.assertEqual(len(queued), 2)
+        self.assertIsNot(queued[1][0], input_ticket)
+        self.assertEqual(queued[1][1], 0.2)
 
     async def test_withdrawn_native_input_is_unavailable_to_memory(self):
         prepared = await self.prepared(identifier="native-recall-input")

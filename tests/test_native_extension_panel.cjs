@@ -278,7 +278,7 @@ test("camera confirmation and policy use the actual native action payload", asyn
     await page.getByRole("button", {name:"保存摄像头策略", exact:true}).click();
     await page.locator("[data-native-action-notice]").filter({hasText:"保存摄像头策略已完成"}).waitFor();
     await page.getByRole("button", {name:"扫描摄像头", exact:true}).click();
-    await page.getByText("测试摄像头", {exact:false}).waitFor();
+    await page.locator(".native-management-camera-devices li").filter({hasText:"测试摄像头"}).waitFor();
     await page.getByRole("button", {name:"测试摄像头调用", exact:true}).click();
     await page.locator("[data-native-camera-test]").filter({hasText:"合成测试画面"}).waitFor();
     assert.equal(await page.locator(".native-management-camera-preview").getAttribute("src"), "data:image/jpeg;base64,AA==");

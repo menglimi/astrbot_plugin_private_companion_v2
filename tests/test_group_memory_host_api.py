@@ -14,7 +14,7 @@ from companion_v2.identity_policy.models import AuthorizationTier
 from companion_v2.identity_policy.object_access import ObjectAccessPolicy
 
 
-PREFIX = "/astrbot_plugin_private_companion_v2"
+PREFIX = "/astrbot_plugin_private_companion"
 
 
 class GroupMemoryHostAPITests(GroupMemoryManagementFixture, unittest.IsolatedAsyncioTestCase):

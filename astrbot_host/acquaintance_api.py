@@ -41,7 +41,7 @@ from .display_names import display_names
 from .settings import HostControlError
 
 
-PREFIX = "/astrbot_plugin_private_companion_v2/acquaintance"
+PREFIX = "/astrbot_plugin_private_companion/acquaintance"
 AUTHORIZATION_PATH = PREFIX + "/authorization"
 ADMIN_NAME_PATH = PREFIX + "/admin-name"
 IDENTITY_PATH = PREFIX + "/identity"

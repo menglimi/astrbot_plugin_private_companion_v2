@@ -14,19 +14,31 @@ decision as a debt, and calling a field a feature when nothing reads it.
 from __future__ import annotations
 
 import json
+import argparse
+import csv
 import re
+import sys
 import unittest
 from collections import Counter, defaultdict
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
-V1_SCHEMA = _ROOT.parent / "astrbot_plugin_private_companion" / "_conf_schema.json"
-LEDGER = Path("docs/V1_V2_CONFIG_PROGRESS_20260926.csv")
+sys.path.insert(0, str(_ROOT))
+DEFAULT_V1_SCHEMA = _ROOT.parent / "astrbot_plugin_private_companion" / "_conf_schema.json"
+LEDGER = _ROOT / "docs/V1_V2_CONFIG_RESOLVED_20260928.csv"
 SOURCE_ROOTS = ("companion_v2", "astrbot_host", "main.py")
-# Dispositions that mean the key is accounted for, not owed.
-DECIDED = ("不迁入", "移交", "不做", "v1 专有", "范围待定", "已销账", "不适用")
-# Dispositions that mean the key is still owed.
-OWED = ("待接入", "待补齐", "待迁移", "未接入")
+_SPECIALIZED_V2_FIELDS = {
+    "basic_config.enable_environment_perception": (
+        "conversation.perception.calendar_enabled",
+        "conversation.perception.platform_enabled",
+        "conversation.perception.model_route_enabled",
+        "conversation.perception.configured_modalities_enabled",
+    ),
+}
+_SETTLED_VERDICTS = {
+    "already-in-v2", "renamed-equivalent", "implemented-elsewhere",
+    "not-migrated-by-design", "not-applicable",
+}
 
 
 def v1_leaves(node, prefix=""):
@@ -63,7 +75,7 @@ def dedupe_legacy_mirrors(leaves):
 def source_corpus():
     chunks = []
     for root in SOURCE_ROOTS:
-        base = Path(root)
+        base = _ROOT / root
         for path in ([base] if base.is_file() else base.rglob("*.py")):
             if "companion_v2/configuration/" in path.as_posix():
                 continue
@@ -74,8 +86,14 @@ def source_corpus():
     return "\n".join(chunks)
 
 
-def main():
-    schema = json.loads(V1_SCHEMA.read_text(encoding="utf-8-sig"))
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--v1-schema", type=Path, default=DEFAULT_V1_SCHEMA,
+                        help="path to the read-only V1 _conf_schema.json (defaults to the sibling plugin directory)")
+    args = parser.parse_args(argv)
+    if not args.v1_schema.is_file():
+        parser.error(f"V1 schema not found: {args.v1_schema}; pass --v1-schema with the 6.7.0 source schema")
+    schema = json.loads(args.v1_schema.read_text(encoding="utf-8-sig"))
     raw_leaves = list(v1_leaves(schema))
     leaves, mirrors = dedupe_legacy_mirrors(raw_leaves)
 
@@ -99,41 +117,32 @@ def main():
     # Ledger disposition per V1 key. The ledger names bare keys plus a group column,
     # while the schema uses dotted paths, so the join normalizes on the last segment.
     ledger = {}
-    by_group_leaf = {}
-    lines = LEDGER.read_text(encoding="utf-8-sig").splitlines()
-    header = lines[0].split(",")
-    idx_group, idx_key = header.index("V1配置组"), header.index("配置键")
-    idx_item, idx_sub, idx_next = (header.index("V2配置项进度"), header.index("V2子类进度"),
-                                   header.index("下一步"))
-    for line in lines[1:]:
-        cells = line.split(",")
-        if len(cells) <= max(idx_group, idx_key, idx_item, idx_sub, idx_next):
-            continue
-        note = " ".join(cells[i].strip() for i in (idx_item, idx_sub, idx_next))
-        ledger[normalize(cells[idx_key])] = note
-        if cells[idx_group].strip():
-            by_group_leaf[(cells[idx_group].strip(), normalize(cells[idx_key]))] = note
-
-    def ledger_note(path):
-        """Look a schema path up in the ledger by group and last segment."""
-        group, leaf = (path.rsplit(".", 1) if "." in path else ("", path))
-        return by_group_leaf.get((group, normalize(leaf))) or ledger.get(normalize(leaf))
+    with LEDGER.open(encoding="utf-8-sig", newline="") as stream:
+        for row in csv.DictReader(stream):
+            key = row.get("v1_key", "").strip()
+            if not key:
+                continue
+            ledger[key] = row
 
     def classify(path):
-        note = ledger_note(path)
-        if note is None:
+        row = ledger.get(path)
+        if row is None:
             return "no-ledger-row"
-        if any(mark in note for mark in DECIDED):
-            return "decided-not-migrated"
-        if any(mark in note for mark in OWED):
+        verdict = row.get("verified_verdict", "").strip()
+        if verdict == "owed":
             return "owed"
-        return "recorded-other"
+        if verdict in _SETTLED_VERDICTS:
+            return verdict
+        return "unverified"
 
     matched = []
     unmatched = []
     for path, _kind in leaves:
         leaf = path.rsplit(".", 1)[-1]
-        fields = by_key.get(leaf) or by_key.get(normalize(leaf)) or []
+        fields = list(dict.fromkeys(
+            by_key.get(leaf) or by_key.get(normalize(leaf))
+            or list(_SPECIALIZED_V2_FIELDS.get(path, ()))
+        ))
         (matched if fields else unmatched).append((path, fields))
 
     matched_keys = {path for path, _ in matched}
@@ -168,23 +177,26 @@ def main():
     print("MATCHED            ", len(matched), f"{100.0 * len(matched) / total:.1f}%")
     print("MATCHED_AND_WIRED  ", wired, f"{100.0 * wired / total:.1f}%")
     owed = sum(count for name, count in buckets.items() if name.endswith("/owed"))
-    decided = sum(count for name, count in buckets.items() if name.endswith("/decided-not-migrated"))
-    norow = sum(count for name, count in buckets.items() if name.endswith("/no-ledger-row"))
+    decided = sum(count for name, count in buckets.items()
+                  if name.rsplit("/", 1)[-1] in _SETTLED_VERDICTS)
+    norow = sum(count for name, count in buckets.items()
+                if name.endswith(("/no-ledger-row", "/unverified")))
     print("OWED (any)         ", owed, f"{100.0 * owed / total:.1f}%")
-    print("DECIDED_NOT_MIGRATED", decided, f"{100.0 * decided / total:.1f}%")
-    print("NO_LEDGER_ROW      ", norow, f"{100.0 * norow / total:.1f}%")
+    print("DECIDED_OR_MAPPED  ", decided, f"{100.0 * decided / total:.1f}%")
+    print("NO_VERIFIED_DISPOSITION", norow, f"{100.0 * norow / total:.1f}%")
     print("--- 30 matched examples")
     for path, fields in matched[:30]:
         print(f"   {path:52} -> {fields[0]}")
 
     # A per-key ledger so every number above can be checked line by line.
-    out = Path("docs/V1_V2_CONFIG_COVERAGE_AUDIT_20260927.csv")
+    out = _ROOT / "docs/V1_V2_CONFIG_COVERAGE_AUDIT_20260927.csv"
     rows = ["v1_key,v1_type,v2_field,v2_group,disposition"]
     for path, kind in leaves:
         leaf = path.rsplit(".", 1)[-1]
         fields = by_key.get(leaf) or by_key.get(normalize(leaf)) or []
-        rows.append(",".join((path, str(kind), fields[0] if fields else "",
-                              fields[0].rsplit(".", 1)[0] if fields else "", classify(path))))
+        groups = {field.rsplit(".", 1)[0] for field in fields}
+        rows.append(",".join((path, str(kind), "|".join(fields),
+                              "|".join(sorted(groups)), classify(path))))
     out.write_text("\n".join(rows) + "\n", encoding="utf-8", newline="\n")
     print("WROTE", out, len(rows) - 1, "rows")
     return 0

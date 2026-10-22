@@ -10,25 +10,41 @@ import regex
 
 from . import humanized_expression
 from .segment_control import control_token_ranges, protected_ranges
+from .voice_markup import VOICE_PROTOCOL_GT, VOICE_PROTOCOL_LT, VOICE_TAG_NAME_PATTERN
 
 
 MAX_TEXT = 65536
 MAX_STYLE_PROMPT = 4000
 REGEX_SECONDS = 0.05
+_PROTOCOL_LT = VOICE_PROTOCOL_LT
+_PROTOCOL_GT = VOICE_PROTOCOL_GT
+REACTION_EXPRESSION_TAG_NAME = r"p[\s._-]*c{1,2}[\s._-]*reaction[\s._-]*expression"
 _LITERALS = re.compile(
     r"(?P<url>(?:https?://|www\.)[^\s<>。！？，]+)"
-    r"|<(?P<tag>image|img|video|audio|voice|record|file|pc_tts|tts)\b[^>]*>.*?</(?P=tag)\s*>"
+    r"|<(?P<tag>image|img|video|audio|voice|record|file)\b[^>]*>.*?</(?P=tag)\s*>"
+    rf"|{_PROTOCOL_LT}\s*{VOICE_TAG_NAME_PATTERN}\b[^>]*?{_PROTOCOL_GT}.*?"
+    rf"{_PROTOCOL_LT}\s*/\s*{VOICE_TAG_NAME_PATTERN}\s*{_PROTOCOL_GT}"
+    rf"|{_PROTOCOL_LT}\s*{VOICE_TAG_NAME_PATTERN}\b[^>]*?{_PROTOCOL_GT}"
     r"|<(?:image|img|video|audio|voice|record|file|pc_tts|tts)\b[^>]*>",
     re.IGNORECASE | re.DOTALL,
 )
-_PROTOCOL_LT = r"(?:<|&lt;|&#0*60;|&#x0*3c;)"
-_PROTOCOL_GT = r"(?:>|&gt;|&#0*62;|&#x0*3e;)"
 _REACTION_EXPRESSION_BLOCK = re.compile(
-    rf"(?is){_PROTOCOL_LT}\s*pc_reaction_expression\b[^>]*?{_PROTOCOL_GT}.*?"
-    rf"(?:{_PROTOCOL_LT}\s*/\s*pc_reaction_expression\s*{_PROTOCOL_GT}|\Z)"
+    rf"(?is){_PROTOCOL_LT}\s*{REACTION_EXPRESSION_TAG_NAME}\b[^>]*?{_PROTOCOL_GT}.*?"
+    rf"(?:{_PROTOCOL_LT}\s*/\s*{REACTION_EXPRESSION_TAG_NAME}\s*{_PROTOCOL_GT}|\Z)"
 )
 _REACTION_EXPRESSION_TAG = re.compile(
-    rf"(?is){_PROTOCOL_LT}\s*/?\s*pc_reaction_expression\b[^>]*?{_PROTOCOL_GT}"
+    rf"(?is){_PROTOCOL_LT}\s*/?\s*{REACTION_EXPRESSION_TAG_NAME}\b[^>]*?{_PROTOCOL_GT}"
+)
+_REACTION_EXPRESSION_BARE_TAG = re.compile(
+    rf"(?is){_PROTOCOL_LT}\s*/?\s*{REACTION_EXPRESSION_TAG_NAME}\b(?![^>]*>)"
+)
+_REACTION_EXPRESSION_OPEN_PROTOCOL = regex.compile(
+    rf"{_PROTOCOL_LT}\s*{REACTION_EXPRESSION_TAG_NAME}\b[^>]*?{_PROTOCOL_GT}",
+    regex.IGNORECASE | regex.DOTALL,
+)
+_REACTION_EXPRESSION_CLOSE_PROTOCOL = regex.compile(
+    rf"{_PROTOCOL_LT}\s*/\s*{REACTION_EXPRESSION_TAG_NAME}\s*{_PROTOCOL_GT}",
+    regex.IGNORECASE | regex.DOTALL,
 )
 _PAIRS = {"(": ")", "[": "]", "{": "}", "（": "）", "【": "】", "《": "》",
           "〈": "〉", "「": "」", "『": "』", "“": "”", "‘": "’", '"': '"'}
@@ -161,7 +177,63 @@ def strip_internal_expression_protocol(text):
     if type(text) is not str:
         return text
     text = _REACTION_EXPRESSION_BLOCK.sub("", text)
-    return _REACTION_EXPRESSION_TAG.sub("", text)
+    text = _REACTION_EXPRESSION_TAG.sub("", text)
+    return _REACTION_EXPRESSION_BARE_TAG.sub("", text)
+
+
+def _partial_protocol_match(pattern, text):
+    match = pattern.search(text, partial=True)
+    if match is not None and match.partial and match.start() == match.end():
+        return None
+    return match
+
+
+class InternalExpressionProtocolFilter:
+    """Remove internal reaction tags even when a native stream splits them."""
+
+    def __init__(self):
+        self._pending = ""
+        self._inside_block = False
+
+    def feed(self, text):
+        if type(text) is not str:
+            return ""
+        buffer = self._pending + text
+        self._pending = ""
+        visible = []
+        while buffer:
+            if self._inside_block:
+                closing = _partial_protocol_match(_REACTION_EXPRESSION_CLOSE_PROTOCOL, buffer)
+                if closing is None:
+                    break
+                if closing.partial:
+                    self._pending = buffer[closing.start():]
+                    break
+                buffer = buffer[closing.end():]
+                self._inside_block = False
+                continue
+
+            opening = _partial_protocol_match(_REACTION_EXPRESSION_OPEN_PROTOCOL, buffer)
+            closing = _partial_protocol_match(_REACTION_EXPRESSION_CLOSE_PROTOCOL, buffer)
+            matches = [(match.start(), kind, match) for kind, match in
+                       (("open", opening), ("close", closing)) if match is not None]
+            if not matches:
+                visible.append(buffer)
+                break
+            _, kind, match = min(matches, key=lambda item: item[0])
+            visible.append(buffer[:match.start()])
+            if match.partial:
+                self._pending = buffer[match.start():]
+                break
+            buffer = buffer[match.end():]
+            self._inside_block = kind == "open"
+        return "".join(visible)
+
+    def finish(self):
+        """Discard an incomplete protocol tail; it must never reach the user."""
+        self._pending = ""
+        self._inside_block = False
+        return ""
 
 
 @dataclass(frozen=True)

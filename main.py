@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace as replace_dataclass
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -11,6 +12,11 @@ from uuid import uuid4
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools, register
+
+from .astrbot_host.upgrade_source import preserve_host_configuration
+
+# AstrBot can prune keys unknown to the new schema before constructing the Star.
+preserve_host_configuration()
 
 from .astrbot_host.import_lifecycle import activate_plugin_imports, retire_plugin_imports
 
@@ -33,6 +39,7 @@ from .astrbot_host.core_reply import (
 from .astrbot_host.core_reply_tools import inject_core_reply_tools
 from .astrbot_host.core_reply_preparation import measure_core_preparation
 from .astrbot_host.core_reply_decision import prepare_core_reply_decision
+from .astrbot_host.core_reply_closing import prepare_private_closing_decision
 from .astrbot_host.native import warm_session_settings
 from .astrbot_host.core_reply_tool_dispatch import observe_core_tool_dispatch_begin, restore_core_tool_dispatch
 from .astrbot_host.core_reply_native_send import inject_core_reply_send_tool
@@ -57,19 +64,21 @@ from .astrbot_host.core_reply_telemetry import (
     observe_core_reply_suppressed,
 )
 from .astrbot_host.calendar_command import parse_calendar_command
+from .astrbot_host.private_debounce import PrivateDebounce
 from .astrbot_host.event_routing import (
     COMPANION_INTAKE_PRIORITY, competing_command_handler, suppress_default_reply,
 )
 from .astrbot_host.shared_host_migration import migrate_single_target_config
-from .astrbot_host.storage_location import prepare_storage_root
+from .astrbot_host.storage_location import prepare_storage_root, resolve_data_root
 from companion_v2.product import PRODUCT_VERSION
 from companion_v2.diagnostics.inbound import InboundNoReplyLedger, SUPPRESSED, UNMET
+from companion_v2.conversation.private_reply_context import merged_input_sequence
 from .astrbot_host.integration_registry import UnifiedCompanionExtensionAPI
 from .astrbot_host.recalls import is_notice_event
 from .astrbot_host.stranger_notice import refuse_stranger
 
 
-PLUGIN_NAME = "astrbot_plugin_private_companion_v2"
+PLUGIN_NAME = "astrbot_plugin_private_companion"
 PLUGIN_VERSION = PRODUCT_VERSION
 # 婉拒陌生号里，只有"该发却发不出去"才算预期未回。开关关闭、冷却、当日额度、
 # 权限或文案不可用，都是设计内的安静，连排障台账都不该记。
@@ -121,7 +130,7 @@ class PrivateCompanionV2StagingPlugin(Star):
             self._startup_failure_at = 0.0
             self._session_settings_warm_task = None
             self.config = config if config is not None else {}
-            default_data_root = Path(StarTools.get_data_dir(PLUGIN_NAME)).resolve()
+            default_data_root = resolve_data_root(Path(StarTools.get_data_dir(PLUGIN_NAME)).resolve())
             data_root = prepare_storage_root(default_data_root, self.config)
             data_root.mkdir(parents=True, exist_ok=True)
             migrated, changed = migrate_single_target_config(self.config)
@@ -209,6 +218,48 @@ class PrivateCompanionV2StagingPlugin(Star):
                 logger.error("[CompanionV2] 未回复排障记录写入失败 event_ref=%s error_type=%s",
                              event_ref, type(error).__name__)
         return event_ref
+
+    def _private_debounce_manager(self):
+        manager = getattr(self, "_private_debounce", None)
+        if manager is None:
+            manager = PrivateDebounce()
+            self._private_debounce = manager
+        return manager
+
+    def _suppress_merged_private_event(self, event, target, event_ref, *, reason="private_debounce_merged"):
+        suppress_default_reply(event)
+        self._record_no_reply(event, reason, origin_key=getattr(target, "key", None),
+                              channel="private", event_ref=event_ref, stage="intake",
+                              turn=event_ref, expected=False)
+
+    def _suppress_debounced_private_event(self, event, target, event_ref, manager, reservation,
+                                          *, reason="private_debounce_merged"):
+        if manager.superseded_by_same_event(reservation, event):
+            return False
+        self._suppress_merged_private_event(event, target, event_ref, reason=reason)
+        return True
+
+    @staticmethod
+    def _core_reply_plan_with_text(plan, text):
+        captured = getattr(plan, "captured", None)
+        if captured is None:
+            return plan
+        try:
+            updated = replace_dataclass(captured, text=text)
+        except (TypeError, ValueError):
+            try:
+                captured.text = text
+            except (AttributeError, TypeError):
+                return plan
+            return plan
+        try:
+            return replace_dataclass(plan, captured=updated)
+        except (TypeError, ValueError):
+            try:
+                plan.captured = updated
+            except (AttributeError, TypeError):
+                return plan
+            return plan
 
     def _origin_key_for_event(self, event):
         target_for_event = getattr(self.staging, "target_for_event", None)
@@ -487,6 +538,16 @@ class PrivateCompanionV2StagingPlugin(Star):
         origin_key = self._origin_key_for_event(event)
         kind = getattr(getattr(getattr(event, "message_obj", None), "type", None), "value", None)
         channel = "private" if kind == "FriendMessage" else "group" if kind == "GroupMessage" else "unknown"
+        is_calendar_command = (channel == "private"
+                               and parse_calendar_command(str(getattr(event, "message_str", "") or "")))
+        debounce_manager = None
+        debounce_pending = None
+        if channel == "private" and not is_calendar_command:
+            plain_text = PrivateDebounce.private_plain_text(event)
+            target_key = getattr(target, "target_id", None)
+            if plain_text is not None and isinstance(target_key, str) and target_key:
+                debounce_manager = self._private_debounce_manager()
+                debounce_pending = debounce_manager.reserve(target_key, event, plain_text)
         group_admission = None
         if channel == "group":
             try:
@@ -518,6 +579,10 @@ class PrivateCompanionV2StagingPlugin(Star):
             logger.warning("[CompanionV2] 会话回复开关暂不可读，继续核心授权检查 event_ref=%s error_type=%s",
                            event_ref, type(error).__name__)
         if not reply_enabled:
+            if debounce_pending is not None:
+                await debounce_manager.abort(debounce_pending, event=event)
+                if debounce_manager.superseded_by_same_event(debounce_pending, event):
+                    return
             suppress_default_reply(event)
             self._record_no_reply(event, "session_reply_disabled", origin_key=origin_key,
                                   channel=channel, event_ref=event_ref, turn=event_ref)
@@ -531,7 +596,7 @@ class PrivateCompanionV2StagingPlugin(Star):
                         event_ref, group_admission.get("reason") or "role_choice", policy.get("question_enabled"),
                         policy.get("interjection_enabled"), reference.get("score"), policy.get("question_threshold"))
 
-        if channel == "private" and parse_calendar_command(str(getattr(event, "message_str", "") or "")):
+        if is_calendar_command:
             suppress_default_reply(event)
             try:
                 result = await self.staging.receive_core_command(event)
@@ -552,9 +617,59 @@ class PrivateCompanionV2StagingPlugin(Star):
         # model must never receive a repeat candidate as ordinary conversation.
         if channel == "group" and group_admission is not None and group_admission.get("reason") == "repeat":
             suppress_default_reply(event)
+        core_reply_plan = None
+        debounced_entries = None
+        if debounce_pending is not None:
+            prepare_context = getattr(self.staging, "prepare_core_reply_context", None)
+            context_result = None
+            if callable(prepare_context):
+                try:
+                    context_result = await prepare_context(event, target, group_admission=None)
+                except Exception as error:
+                    logger.warning("[CompanionV2] 私聊防抖上下文读取失败，保留原核心回复 event_ref=%s error_type=%s",
+                                   event_ref, type(error).__name__)
+            if context_result is not None and context_result.failure is None:
+                core_reply_plan = context_result.unwrap()
+                policy = getattr(core_reply_plan, "debounce", None)
+            else:
+                policy = None
+            status = await debounce_manager.configure(debounce_pending, event, policy)
+            if status == "configuring":
+                status = await debounce_manager.wait_for_resolution(debounce_pending, event)
+            if status == "active":
+                status = await debounce_manager.wait_for_quiet(debounce_pending, event)
+                if status == "ready":
+                    debounced_entries = await debounce_manager.finish(debounce_pending, event)
+                    if debounced_entries is None:
+                        status = "superseded"
+                if status == "ready" and debounced_entries:
+                    merged_text = debounce_manager.combined(debounce_pending, debounced_entries)
+                    if not PrivateDebounce.replace_private_plain_text(event, merged_text):
+                        suppress_default_reply(event)
+                        self._record_no_reply(event, "private_debounce_merge_failed", origin_key=origin_key,
+                                              channel="private", event_ref=event_ref, stage="intake",
+                                              turn=event_ref)
+                        logger.warning("[CompanionV2] 私聊防抖合并失败 event_ref=%s", event_ref)
+                        return
+                    if core_reply_plan is not None:
+                        core_reply_plan = self._core_reply_plan_with_text(core_reply_plan, merged_text)
+                    if len(debounced_entries) > 1:
+                        logger.info("[CompanionV2] 私聊防抖合并 event_ref=%s target=%s count=%s chars=%s",
+                                    event_ref, target.target_id, len(debounced_entries), len(merged_text))
+            if status == "superseded":
+                self._suppress_debounced_private_event(
+                    event, target, event_ref, debounce_manager, debounce_pending)
+                return
+            if status in {"closed", "aborted", "finished"}:
+                self._suppress_debounced_private_event(
+                    event, target, event_ref, debounce_manager, debounce_pending,
+                    reason="private_debounce_cancelled")
+                return
         try:
-            admission = await self.staging.prepare_core_reply(
-                event, target, group_admission=group_admission)
+            prepare_kwargs = {"group_admission": group_admission}
+            if core_reply_plan is not None:
+                prepare_kwargs["plan"] = core_reply_plan
+            admission = await self.staging.prepare_core_reply(event, target, **prepare_kwargs)
         except Exception as error:
             logger.warning("[CompanionV2] V2 回复材料准备失败，继续 AstrBot 核心回复 event_ref=%s error_type=%s",
                          event_ref, type(error).__name__)
@@ -579,13 +694,25 @@ class PrivateCompanionV2StagingPlugin(Star):
         prepared["event_ref"] = event_ref
         prepared["origin_key"] = origin_key
         prepared["channel"] = channel
+        if debounced_entries is not None and len(debounced_entries) > 1:
+            prepared["debounced_inputs"] = merged_input_sequence(debounced_entries)
+            prepared["debounced_message_count"] = len(debounced_entries)
         if group_admission is not None:
             prepared["group_admission"] = dict(group_admission)
         application = getattr(getattr(self.staging, "session", None), "application", None)
         decision = await prepare_core_reply_decision(event, prepared, application=application, now=self.staging.now)
+        closing = {"suppress_reply": False, "action": "reply", "reason": "not_private"}
+        if channel == "private":
+            try:
+                closing = prepare_private_closing_decision(
+                    event, prepared, application=application, now=self.staging.now)
+            except Exception as error:
+                logger.warning("[CompanionV2] 私聊收尾判断暂不可用，继续核心回复 event_ref=%s error_type=%s",
+                               event_ref, type(error).__name__)
+        suppress_reply = bool(decision.get("suppress_reply") or closing.get("suppress_reply"))
 
         if (channel == "group" and group_admission is not None and group_admission.get("reason") == "repeat"
-                and not decision["suppress_reply"]):
+                and not suppress_reply):
             suppress_default_reply(event)
             self._observe_session(event)
             try:
@@ -670,21 +797,31 @@ class PrivateCompanionV2StagingPlugin(Star):
                     submit=getattr(observer, "submit", None))
         prepare_core_reply_segmentation(event)
         self._observe_session(event)
-        if decision["suppress_reply"]:
+        if suppress_reply:
             suppress_default_reply(event)
-            action = decision["applied_decision"]["action"]
-            observe_core_group_participation(event, {
-                "mode": "skip", "reason": "Laya 判断本轮行动为 " + action,
-                "act": "", "signature": "", "source": "laya", "decision_action": action})
+            if decision.get("suppress_reply"):
+                action = decision["applied_decision"]["action"]
+                observe_core_group_participation(event, {
+                    "mode": "skip", "reason": "Laya 判断本轮行动为 " + action,
+                    "act": "", "signature": "", "source": "laya", "decision_action": action})
+                reason_code, stage = "laya_" + action, "decision"
+            else:
+                action = str(closing.get("action") or "silent")
+                reason_code = "private_closing_" + str(closing.get("reason") or "closing")
+                stage = "closing"
             finish_core_reply_tracking(event)
             observe_core_reply_suppressed(event, prepared, application=application,
                 submit=getattr(observer, "submit", None), now=self.staging.now)
             self._observe_core_phase(prepared, "completed")
-            self._record_no_reply(event, "laya_" + action, origin_key=origin_key,
-                channel=channel, event_ref=event_ref, stage="decision", turn=prepared.get("turn_id"), expected=False)
+            self._record_no_reply(event, reason_code, origin_key=origin_key,
+                channel=channel, event_ref=event_ref, stage=stage, turn=prepared.get("turn_id"), expected=False)
             restore_core_reply_event(event)
-            logger.info("[CompanionV2] Laya 决策跳过主模型 event_ref=%s turn_id=%s action=%s",
-                        event_ref, prepared.get("turn_id"), action)
+            if decision.get("suppress_reply"):
+                logger.info("[CompanionV2] Laya 决策跳过主模型 event_ref=%s turn_id=%s action=%s",
+                            event_ref, prepared.get("turn_id"), action)
+            else:
+                logger.info("[CompanionV2] 私聊收尾判断跳过主模型 event_ref=%s turn_id=%s action=%s reason=%s",
+                            event_ref, prepared.get("turn_id"), action, closing.get("reason"))
             return
         prepare_core_reply_streaming_boundary(event)
         event.is_wake = True
@@ -873,6 +1010,12 @@ class PrivateCompanionV2StagingPlugin(Star):
             logger.info("[CompanionV2] 窗口临时上下文已清理")
 
     async def terminate(self) -> None:
+        debounce_manager = getattr(self, "_private_debounce", None)
+        if debounce_manager is not None:
+            try:
+                await debounce_manager.close()
+            except Exception as error:
+                logger.warning("[CompanionV2] 私聊防抖停机清理失败 error_type=%s", type(error).__name__)
         settings_task = getattr(self, "_session_settings_warm_task", None)
         self._session_settings_warm_task = None
         if settings_task is not None and not settings_task.done():

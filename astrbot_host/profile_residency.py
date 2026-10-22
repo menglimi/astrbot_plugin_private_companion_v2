@@ -18,6 +18,8 @@ import json
 from pathlib import Path
 import sqlite3
 
+from companion_v2.storage.sqlite_path import readonly_uri
+
 # A store file must be at least this large to count as "holds data". An empty
 # provisioned store is a few dozen KB of schema, so size alone is a poor signal; the
 # caller's row check does the real work and this only screens out tiny leftovers.
@@ -54,7 +56,7 @@ def _store_holds_data(runtime: Path) -> bool:
     if not store.is_file() or store.stat().st_size < MIN_STORE_BYTES:
         return False
     try:
-        connection = sqlite3.connect(f"file:{store}?mode=ro", uri=True, timeout=2.0)
+        connection = sqlite3.connect(readonly_uri(store), uri=True, timeout=2.0)
     except sqlite3.Error:
         return False
     try:

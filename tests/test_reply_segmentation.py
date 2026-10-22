@@ -87,6 +87,23 @@ class ReplySegmentationTests(unittest.TestCase):
         self.assertEqual(replace(policy, threshold=3).parts("甲。乙。"), ("甲。乙。",))
         self.assertEqual(replace(policy, rule_mode="paragraphs").parts("甲。乙。\n\n丙。"), ("甲。乙。\n\n", "丙。"))
 
+    def test_rule_boundaries_are_balanced_within_the_segment_limit(self):
+        policy = replace(self.policy, llm_controlled=False, threshold=500,
+                         min_segment_chars=1, max_segments=5)
+        source = "甲。乙。丙。丁。戊。己。庚。辛。壬。癸。"
+        parts = policy.parts(source)
+        self.assertEqual(parts, ("甲。乙。", "丙。丁。", "戊。己。", "庚。辛。", "壬。癸。"))
+        self.assertEqual("".join(parts), source)
+
+    def test_excess_model_boundaries_do_not_leave_one_long_tail(self):
+        source = f"\n{MARKER}\n".join(("先接住。", "再回应对方。", "补充原因。", "接着说一点。",
+                                             "再补一层。", "收住这一段。", "回应后续问题。", "最后自然结束。"))
+        parts = replace(self.policy, max_segments=4).parts(source)
+        self.assertEqual(len(parts), 4)
+        self.assertEqual("".join(parts), source.replace(f"\n{MARKER}\n", "\n"))
+        lengths = tuple(sum(not char.isspace() for char in part) for part in parts)
+        self.assertLessEqual(max(lengths) - min(lengths), 20)
+
     def test_legacy_rules_switch_cannot_disable_rule_completion(self):
         legacy = replace(self.policy, rules_enabled=False, threshold=500,
                          min_segment_chars=1, max_segments=3)

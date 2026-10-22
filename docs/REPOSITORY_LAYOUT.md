@@ -2,7 +2,11 @@
 
 更新时间：2026-10-10。V2 根目录只提供 AstrBot 插件入口和工程导航，功能代码按宿主边界和领域归属组织。
 
-普通聊天的 AstrBot 核心接入集中在 `astrbot_host/core_reply*.py`：背景、原生工具和媒体、真实发送复核、后台观察及统计分别维护。原生消息和领域工具的数据适配归 `companion_v2/conversation/native_*.py`，核心用量与效率投影归 `companion_v2/model_gateway/`，新增持久表归 `companion_v2/storage/`。核心领域不反向导入 SDK；具体执行归属见 [核心回复路径](V2_CORE_REPLY_PATH_DESIGN.md)。
+自然语言生图、自拍的核心工具提示与请求专属工具说明归 `astrbot_host/core_reply_image_prompt.py`，通用图片偏好归 `conversation/media/output_settings.py`。角色参考素材经 `core_reply_perception.py` 放入临时 user 上下文，生成与发送继续复用既有 Image 提供方、AstrBot 缓存及当前会话发送工具，见[自然语言生图接线](NATURAL_IMAGE_CORE_REPLY_20261020.md)。
+
+私聊短跟进的真实时序投影归 `conversation/private_reply_context.py`，复用原生历史的输入与发送回调，在 `core_reply_perception.py` 的临时上下文中区分输入到达前后，并保留原回复轮次。防抖只转发各输入到达时间，不做关键词指代判定；见[私聊回复承接](PRIVATE_REPLY_CONTINUATION_20261020.md)。
+
+普通聊天的 AstrBot 核心接入集中在 `astrbot_host/core_reply*.py`：背景、原生工具和媒体、真实发送复核、后台观察及统计分别维护。`core_reply_closing.py` 在私聊模型请求前读取已授权原生对话并执行确定性的收尾判断；可脱离宿主的收尾词、窗口与提示词逻辑归 `companion_v2/conversation/private_closing.py`。纯文本私聊的连续输入合并由 `astrbot_host/private_debounce.py` 管理状态与并行准备，窗口规则归 `companion_v2/conversation/private_debounce.py`。原生消息和领域工具的数据适配归 `companion_v2/conversation/native_*.py`，核心用量与效率投影归 `companion_v2/model_gateway/`，新增持久表归 `companion_v2/storage/`。核心领域不反向导入 SDK；具体执行归属见[核心回复路径](V2_CORE_REPLY_PATH_DESIGN.md)、[私聊收尾沉默](PRIVATE_CLOSING_GUARD_20261020.md)和[私聊连续输入防抖](PRIVATE_DEBOUNCE_20261020.md)。
 
 Content、Image、Screen、Reality、Together、Game、Live 是同一 V2 插件内的七项原生拓展。`astrbot_host/native_extensions/builtins.py` 组装这些模块，`__init__.py` 管理能力注册及生命周期；`settings.py`、`image_settings.py` 管理 V2 内部配置，`service.py` 提供宿主服务接线。运行代码、默认设置、schema、网页和供应商运行资产全部随单个 V2 ZIP 交付；`main.py` 保持唯一 Star 及插件注册入口。新单包构建和验收状态见 [整合验收](INTEGRATION_ACCEPTANCE_V2_0.md)。
 

@@ -10,13 +10,13 @@ from starlette.requests import Request
 from astrbot_host.page_api import PageWebAPI, PREFIX
 
 
-PLUGIN_NAME = "astrbot_plugin_private_companion_v2"
+PLUGIN_NAME = "astrbot_plugin_private_companion"
 
 
 class WorkspaceEntryApiTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.page_service = NS(get_plugin_page_entry_config=AsyncMock(return_value={
-            "content_path": "/api/plugin/page/content/astrbot_plugin_private_companion_v2/%E9%99%AA%E4%BC%B4%E5%B0%8F%E5%B1%8B/?asset_token=fresh",
+            "content_path": "/api/plugin/page/content/astrbot_plugin_private_companion/%E9%99%AA%E4%BC%B4%E5%B0%8F%E5%B1%8B/?asset_token=fresh",
         }))
         self.app = NS(state=NS(services=NS(plugin_pages=self.page_service)))
         self.handler = next(
@@ -71,7 +71,7 @@ class WorkspaceEntryApiTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_rejects_entries_without_a_fresh_asset_token(self):
         self.page_service.get_plugin_page_entry_config.return_value = {
-            "content_path": "/api/plugin/page/content/astrbot_plugin_private_companion_v2/%E9%99%AA%E4%BC%B4%E5%B0%8F%E5%B1%8B/",
+            "content_path": "/api/plugin/page/content/astrbot_plugin_private_companion/%E9%99%AA%E4%BC%B4%E5%B0%8F%E5%B1%8B/",
         }
 
         response = await self.request()

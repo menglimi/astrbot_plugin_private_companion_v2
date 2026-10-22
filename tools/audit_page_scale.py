@@ -90,9 +90,9 @@ MIGRATED = ("memory-page.css", "learning-page.css", "contact-page.css",
 #     workbench.css          字号 32   间距 68   圆角 10
 #     config-editor.css      字号 5    间距 5    圆角 1
 #
-# 这一轮之后 OTHERS 只剩 shell.css：全站 31 个 .css 里 30 个零写死，
-# 唯一的例外是 0 字节的 perception-page-shell.css（它被 index.html 引用着，
-# 但没有一行样式，既没有写死值也没有下界问题——留在这里当观察记录）。
+# 这一轮之后 OTHERS 只剩 shell.css：全站 30 个 .css 里 29 个零写死。
+# （此前这里是 31 个，多出来的一个是 0 字节的 perception-page-shell.css：
+#  它不在 index.html 的引用列表里——那句注释是过期结论——已随本轮清理删除。）
 #
 # 三处工具自身的问题，这一轮一并修掉（不是"手工绕过"）：
 #   · migrate_page_scale.py 的 FONT 表只覆盖 9–36px，两端（7/8 与 38–46）

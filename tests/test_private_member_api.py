@@ -106,6 +106,27 @@ class PrivateMemberTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
                                     **({"reset_to_inherit": resets[section]} if section in resets else {})}
                          for section in names}})
 
+    async def test_member_settings_read_failure_is_isolated_to_its_section(self):
+        await self.ready()
+
+        class BrokenGrowth:
+            def __init__(self, app, context):
+                pass
+
+            def status(self, operator):
+                raise RuntimeError("simulated corrupt growth configuration")
+
+        with patch.dict("companion_v2.relationships.private_management.EDITORS", {"growth": BrokenGrowth}):
+            with self.assertLogs("companion_v2.relationships.private_management", level="ERROR") as captured:
+                result = await self.send("member_settings")
+
+        self.assertEqual(result["status"], "ok", result)
+        self.assertIn("reply", result["data"]["sections"])
+        self.assertNotIn("growth", result["data"]["sections"])
+        self.assertEqual(result["data"]["section_errors"]["growth"]["code"],
+                         "member_settings_section_failed")
+        self.assertTrue(any("section=growth" in line for line in captured.output))
+
     async def test_profile_is_the_prompt_source_and_accounts_are_isolated(self):
         app = await self.ready()
         written = await self.configure({"profile": {"default_nickname": "小舟", "role_relation": "搭档",

@@ -4,14 +4,15 @@ import html
 import json
 import re
 
-from companion_v2.conversation.text_processing import strip_internal_expression_protocol
+from companion_v2.conversation.text_processing import (
+    REACTION_EXPRESSION_TAG_NAME, strip_internal_expression_protocol,
+)
+from companion_v2.conversation.voice_markup import VOICE_PROTOCOL_GT, VOICE_PROTOCOL_LT
 
 
-_LT = r"(?:<|&lt;|&#0*60;|&#x0*3c;)"
-_GT = r"(?:>|&gt;|&#0*62;|&#x0*3e;)"
 _BLOCK = re.compile(
-    rf"(?is){_LT}\s*pc_reaction_expression\b[^>]*?{_GT}(.*?)"
-    rf"{_LT}\s*/\s*pc_reaction_expression\s*{_GT}"
+    rf"(?is){VOICE_PROTOCOL_LT}\s*{REACTION_EXPRESSION_TAG_NAME}\b[^>]*?{VOICE_PROTOCOL_GT}(.*?)"
+    rf"{VOICE_PROTOCOL_LT}\s*/\s*{REACTION_EXPRESSION_TAG_NAME}\s*{VOICE_PROTOCOL_GT}"
 )
 INSTRUCTION = """本轮已启用角色图库表达。完成正文后判断有没有适合用图片补充的态度；轻松接话、问候、亲昵、庆祝或安慰可考虑，严肃、敏感、冲突或没有贴合表达时只用文字。
 在末尾用内部格式 <pc_reaction_expression>{"intent":"交流用途、态度与当前语境"}</pc_reaction_expression> 给出检索意图；不需要表情时 intent 填空字符串。描述整段回复想表达什么，不只抄用户原话的名词，不猜具体图片或编地址。

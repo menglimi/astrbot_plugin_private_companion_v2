@@ -63,6 +63,8 @@
 .host-options-replies textarea { min-height: 92px; padding: var(--sp-2); resize: vertical; line-height: 1.5; }
 .host-options-footer { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; padding-top: var(--sp-2); }
 .host-options-message,
+.host-options-jumps { display:flex; flex-wrap:wrap; gap:var(--sp-2); margin:0 0 var(--sp-3); }
+.host-options-jumps a { text-decoration:none; }
 .host-options-warning,
 .host-options-empty { margin: 0; color: var(--t-text-soft); font-size: var(--fs-micro); line-height: 1.5; }
 .host-options-warning { padding-left: var(--sp-3); border-left: 2px solid var(--t-warn); color: var(--t-warn-ink); }

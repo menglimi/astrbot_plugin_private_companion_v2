@@ -465,7 +465,7 @@ class MobileSnapshotOwner:
             state = self._sync(claims)
             return {
                 "schema_version": "companion.reality.view.request.v1", "capability_id": "reality.view.query",
-                "capability_version": "1.0", "provider_id": "astrbot_plugin_private_companion_v2.reality",
+                "capability_version": "1.0", "provider_id": "astrbot_plugin_private_companion.reality",
                 "provider_generation": self.generation, "scope": claims["scope"],
                 "binding_ref": "binding:mobile:" + hashlib.sha256(claims["user_id"].encode("utf-8")).hexdigest()[:24],
                 "context": {"caller_ref": claims["caller_ref"], "subject": {"kind": "user", "ref": claims["subject_ref"]},

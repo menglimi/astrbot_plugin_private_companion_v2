@@ -100,13 +100,14 @@ class MultiFixture:
         await wait_for_batch(self.controller.session, batch)
         return TaskContext.restore(json.loads(app.messages.batch(batch)["context_json"])), batch
 
-    def proposal_request(self, app, context, batch, *, key="save", pending=False):
+    def proposal_request(self, app, context, batch, *, key=None, pending=False):
         row = app.runtime.read_one("SELECT event_json FROM conversation_inputs WHERE batch_id = ?", (batch,))
         source = codec.source(json.loads(row["event_json"])["source"])
         wire = app.memory_commands
         return dict(schema_version=wire.schema_version, capability_id=wire.capability_id, capability_version="1.0",
             provider_id=wire.provider_id, provider_generation=wire.provider_generation,
-            request_id="request", trace_id="trace", idempotency_key=key,
+            request_id="request", trace_id="trace",
+            idempotency_key=key if key is not None else f"save:{batch}",
             deadline_at=stamp(self.clock.now() + timedelta(minutes=2)), scope=wire.scope_for_context(context),
             budget=dict(max_input_bytes=65536, max_output_bytes=65536, max_model_calls=0),
             payload=dict(namespace="personal", visibility="private", purpose="reply", proposal_id="proposal",

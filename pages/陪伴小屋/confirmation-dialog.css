@@ -9,9 +9,10 @@
   background: var(--t-surface-raised);
   border: 1px solid var(--t-line-firm);
   border-radius: var(--r-lg);
-  box-shadow: 0 22px 70px rgba(25, 29, 37, .24);
+  box-shadow: 0 22px 70px color-mix(in srgb, var(--t-text) 26%, transparent);
 }
-.confirmation-dialog::backdrop { background: rgba(28, 31, 38, .4); backdrop-filter: blur(3px); }
+/* 遮罩跟着主题走：暗色主题下写死的深灰会和背景糊成一片。 */
+.confirmation-dialog::backdrop { background: var(--scrim); backdrop-filter: blur(3px); }
 .confirmation-dialog[open] { animation: confirmation-enter .18s cubic-bezier(.2,.8,.2,1) both; }
 .confirmation-dialog[open]::backdrop { animation: confirmation-fade .18s ease-out both; }
 .confirmation-copy { display: grid; grid-template-columns: 38px minmax(0, 1fr); gap: var(--sp-4); align-items: start; padding: var(--sp-6); }

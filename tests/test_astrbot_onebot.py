@@ -1,6 +1,7 @@
 import base64
 from dataclasses import replace
 import unittest
+from unittest.mock import patch
 
 from companion_v2.conversation.delivery import DeliveryEnvelope
 from companion_v2.conversation.media.models import PromptImage
@@ -116,7 +117,7 @@ class OneBotSenderTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         api = self.native.platform.client._api._wsr_api
         for change in ("revoke", "persona", "disconnect"):
             with self.subTest(change=change):
-                self.native.selected = "original"
+                self.select_window_persona("original")
                 clients["100"] = original
                 authorized = True
 
@@ -128,7 +129,7 @@ class OneBotSenderTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
                     if change == "revoke":
                         authorized = False
                     elif change == "persona":
-                        self.native.selected = "changed"
+                        self.select_window_persona("changed")
                     else:
                         clients.pop("100")
                     return {"type": "record", "data": {"file": "base64://YQ=="}}
@@ -143,20 +144,20 @@ class OneBotSenderTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.native_sender.send(replace(envelope, before_dispatch=None))).status, "not_sent")
         actor = replace(envelope.context.actor, principal=replace(envelope.context.actor.principal, native_account_id="201"))
         self.assertEqual((await self.native_sender.send(replace(envelope, context=replace(envelope.context, actor=actor)))).status, "not_sent")
-        self.native.selected = "changed"
+        self.select_window_persona("changed")
         with self.assertLogs("companion_v2.adapters.astrbot.onebot", level="WARNING") as captured:
             receipt = await self.native_sender.send(envelope)
         self.assertEqual(receipt.status, "not_sent")
         self.assertIn("stage=final_dispatch_check", captured.output[0])
-        self.assertIn("reason=host_persona_unmapped", captured.output[0])
+        self.assertIn("reason=host_persona_window_unbound", captured.output[0])
         self.assertEqual(self.native.platform.client._api._wsr_api.calls, [])
 
     async def test_text_delivery_verifies_live_persona_once_at_dispatch(self):
         envelope = await self.envelope()
-        lookups = self.native.role_lookups
-        receipt = await self.native_sender.send(envelope)
+        with patch.object(self.bridge, "verify_role", wraps=self.bridge.verify_role) as verify:
+            receipt = await self.native_sender.send(envelope)
+            self.assertEqual(verify.await_count, 1)
         self.assertEqual(receipt.status, "delivered")
-        self.assertEqual(self.native.role_lookups - lookups, 1)
 
     async def test_persona_change_after_poke_keeps_combined_result_unknown(self):
         envelope = await self.envelope()
@@ -166,7 +167,7 @@ class OneBotSenderTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         async def action(name, **params):
             result = await original(name, **params)
             if name == "friend_poke":
-                self.native.selected = "changed"
+                self.select_window_persona("changed")
             return result
 
         api.call_action = action

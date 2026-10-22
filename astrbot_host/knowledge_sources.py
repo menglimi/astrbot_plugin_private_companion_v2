@@ -20,6 +20,8 @@ import json
 from pathlib import Path
 import sqlite3
 
+from companion_v2.storage.sqlite_path import readonly_uri
+
 from companion_v2.knowledge.catalog import KnowledgeCatalog, SourceBinding
 from companion_v2.knowledge.configuration import read_installation_settings
 from companion_v2.knowledge.importer import (
@@ -324,7 +326,7 @@ def import_configured_sources(runtime, *, data_root, binding: SourceBinding, at,
 
 
 def _connect(path: Path):
-    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    connection = sqlite3.connect(readonly_uri(path), uri=True)
     connection.row_factory = sqlite3.Row
     return connection
 

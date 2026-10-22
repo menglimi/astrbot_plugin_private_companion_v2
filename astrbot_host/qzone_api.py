@@ -20,7 +20,7 @@ from companion_v2.qzone.comment_scan import candidate_for
 from .management_identity import dashboard_operator
 
 
-PREFIX = "/astrbot_plugin_private_companion_v2/qzone-extension"
+PREFIX = "/astrbot_plugin_private_companion/qzone-extension"
 MAX_BODY_BYTES = 8192
 
 

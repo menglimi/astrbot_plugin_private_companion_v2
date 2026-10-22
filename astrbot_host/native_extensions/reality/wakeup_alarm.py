@@ -767,6 +767,10 @@ class WakeupAlarmMixin(RealityTouchCameraMixin, RealityTouchAudioMixin):
                 user.get("umo")
                 or user.get("reality_touch_consent")
                 or user.get("reality_touch_policy")
+                or user.get("reality_touch_camera_consent")
+                or user.get("reality_touch_camera_policy")
+                or user.get("reality_touch_pending_consent")
+                or user.get("reality_touch_reminders")
                 or user.get("wakeup_alarm")
             )
         ] if isinstance(users, dict) else []
@@ -819,7 +823,9 @@ class WakeupAlarmMixin(RealityTouchCameraMixin, RealityTouchAudioMixin):
                         "telemetry": context.get("telemetry") if isinstance(context.get("telemetry"), dict) else {},
                     }
                 )
-        mihome_snapshot = {}
+        unavailable_reason = getattr(self, "mihome_unavailable_reason", None)
+        mihome_snapshot = {"available": False, "reason": unavailable_reason()
+                           if callable(unavailable_reason) else "米家运行时尚未初始化"}
         mihome_api_getter = getattr(self, "_mihome_api", None)
         mihome_api = mihome_api_getter() if callable(mihome_api_getter) else None
         snapshotter = getattr(mihome_api, "page_snapshot", None) if mihome_api is not None else None
@@ -831,7 +837,7 @@ class WakeupAlarmMixin(RealityTouchCameraMixin, RealityTouchAudioMixin):
                 else:
                     mihome_snapshot = {"available": True, **mihome_snapshot}
             except Exception:
-                mihome_snapshot = {"available": False}
+                mihome_snapshot = {"available": False, "reason": "米家运行状态暂不可读取，请重载后核对"}
         return {
             "global_enabled": bool(getattr(self, "enable_experimental_bluetooth_wakeup", False)),
             "consent_version": self._REALITY_TOUCH_CONSENT_VERSION,

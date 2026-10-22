@@ -49,6 +49,7 @@ class OutboxRecord:
     payload_hash: str
     state: str
     created_at: datetime
+    receipt_ref: str | None = None
 
 
 @dataclass(frozen=True)

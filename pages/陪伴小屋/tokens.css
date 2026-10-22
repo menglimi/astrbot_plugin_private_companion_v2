@@ -32,7 +32,8 @@
   --t-text:#3b3730;
   --t-text-strong:#282520;
   --t-text-soft:#6d675b;
-  --t-text-faint:#8c857a;
+  /* 弱化文字要能读：原 #8c857a 对画布只有 3.24:1，正文级字号不达 4.5:1。 */
+  --t-text-faint:#726d65;
   --t-text-invert:#fffdf8;
   --t-accent:#9a6f45;
   --t-accent-hover:#7d5936;
@@ -52,7 +53,9 @@
   --t-risk:#a86055;
   --t-risk-quiet:#f7e9e5;
   --t-risk-ink:#8a4c43;
-  --t-focus:rgba(154,111,69,.26);
+  /* 焦点环必须是实色。带 alpha 的环合成到背景后只有 1.3–2.2:1，
+     WCAG 1.4.11 要求指示器 ≥3:1；六套主题一律改成不透明强调色。 */
+  --t-focus:#896540;
   --t-shadow:0 8px 28px rgba(96,80,60,.07);
   --t-shadow-lift:0 14px 36px rgba(96,80,60,.13);
   --t-brand:#a87d52;
@@ -77,7 +80,7 @@
   --t-text:#333a33;
   --t-text-strong:#212822;
   --t-text-soft:#616b60;
-  --t-text-faint:#828c80;
+  --t-text-faint:#687068;
   --t-text-invert:#fdfefb;
   --t-accent:#4a7c50;
   --t-accent-hover:#3a6540;
@@ -97,7 +100,7 @@
   --t-risk:#a5524a;
   --t-risk-quiet:#f7e9e6;
   --t-risk-ink:#874139;
-  --t-focus:rgba(74,124,80,.24);
+  --t-focus:#46754c;
   --t-shadow:0 8px 28px rgba(58,80,60,.06);
   --t-shadow-lift:0 14px 36px rgba(58,80,60,.12);
   --t-brand:#57875d;
@@ -120,7 +123,7 @@
   --t-text:#453831;
   --t-text-strong:#312721;
   --t-text-soft:#7a685e;
-  --t-text-faint:#9b887c;
+  --t-text-faint:#796b64;
   --t-text-invert:#fffaf4;
   --t-accent:#b85f42;
   --t-accent-hover:#9b4b32;
@@ -140,7 +143,7 @@
   --t-risk:#ab4f45;
   --t-risk-quiet:#fae7e4;
   --t-risk-ink:#8d3f36;
-  --t-focus:rgba(184,95,66,.24);
+  --t-focus:#a7553b;
   --t-shadow:0 8px 28px rgba(110,74,54,.08);
   --t-shadow-lift:0 14px 36px rgba(110,74,54,.14);
   --t-brand:#c26c4d;
@@ -165,7 +168,7 @@
   --t-text:#e5e6ec;
   --t-text-strong:#f5f5f9;
   --t-text-soft:#a5a8b8;
-  --t-text-faint:#7b7f90;
+  --t-text-faint:#878b9a;
   --t-text-invert:#171920;
   --t-accent:#93a8d8;
   --t-accent-hover:#7b92c8;
@@ -173,7 +176,7 @@
   --t-accent-ink:#b3c3e8;
   --t-accent-solid:#61749f;
   --t-accent-solid-hover:#7b92c8;
-  --t-on-solid:#12141b;
+  --t-on-solid:#ffffff;
   --t-line:rgba(255,255,255,.10);
   --t-line-firm:rgba(255,255,255,.20);
   --t-ok:#6fbf9a;
@@ -185,7 +188,7 @@
   --t-risk:#d18f98;
   --t-risk-quiet:#301f23;
   --t-risk-ink:#dda1aa;
-  --t-focus:rgba(147,168,216,.30);
+  --t-focus:#93a8d8;
   --t-shadow:0 10px 26px rgba(0,0,0,.32);
   --t-shadow-lift:0 14px 32px rgba(0,0,0,.46);
   --t-brand:#8b9ed0;
@@ -208,7 +211,7 @@
   --t-text:#e8e2d6;
   --t-text-strong:#f5f0e6;
   --t-text-soft:#b3aa99;
-  --t-text-faint:#8a8171;
+  --t-text-faint:#948c7d;
   --t-text-invert:#1a1713;
   --t-accent:#b5926a;
   --t-accent-hover:#c8a67f;
@@ -216,7 +219,7 @@
   --t-accent-ink:#d0b28e;
   --t-accent-solid:#8a6c4a;
   --t-accent-solid-hover:#a3805a;
-  --t-on-solid:#1a1713;
+  --t-on-solid:#ffffff;
   --t-line:rgba(232,226,214,.12);
   --t-line-firm:rgba(232,226,214,.22);
   --t-ok:#8aa87a;
@@ -228,7 +231,7 @@
   --t-risk:#c98a80;
   --t-risk-quiet:#2f2220;
   --t-risk-ink:#d79f96;
-  --t-focus:rgba(181,146,106,.28);
+  --t-focus:#b5926a;
   --t-shadow:0 10px 26px rgba(0,0,0,.34);
   --t-shadow-lift:0 14px 32px rgba(0,0,0,.48);
   --t-brand:#aa8a63;
@@ -271,7 +274,7 @@
   --t-risk:#a80016;
   --t-risk-quiet:#fde5e8;
   --t-risk-ink:#840012;
-  --t-focus:rgba(0,51,204,.40);
+  --t-focus:#0033cc;
   --t-shadow:0 2px 0 rgba(0,0,0,.28);
   --t-shadow-lift:0 3px 0 rgba(0,0,0,.42);
   --t-brand:#0033cc;
@@ -280,6 +283,22 @@
   --skin-canvas-pattern:none;
   --skin-canvas-size:auto;
   --skin-r-2xs:0px;--skin-r-xs:1px;--skin-r-sm:2px;--skin-r-md:3px;--skin-r-lg:4px;--skin-r-xl:6px;
+}
+
+/* === 语义别名 ===
+ * 页面里已经在用、但 tokens.css 从未声明的六个令牌。它们此前各自靠
+ * var(--t-status-error, #b14d54) 这种兜底色值撑着：兜底只解决「不空」，
+ * 不解决「跟着主题走」——切到暗色主题时这些点仍然是浅色版的绿/黄/红，
+ * 而且审计会把兜底色值记成「绕开令牌的硬编码」。
+ * 这里一次性接到既有语义令牌上，兜底色值随之删干净。
+ * 用别名而不是复制色值：底层令牌本来就按主题分组声明，别名会跟着变。 */
+:root{
+  --t-status-success: var(--t-ok);
+  --t-status-warning: var(--t-warn);
+  --t-status-error: var(--t-risk);
+  --t-surface-hover: var(--t-surface-soft);
+  --t-accent-soft: var(--t-accent-quiet);
+  --t-on-accent: var(--t-on-solid);
 }
 
 /* === 尺寸：圆角 / 间距 / 字号 === */

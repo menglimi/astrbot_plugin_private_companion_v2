@@ -13,7 +13,7 @@ from companion_v2.storage.repositories import OperationRepository
 
 
 EXTENSION = "companion.screen.native"
-PACKAGE_ID = "astrbot_plugin_private_companion_v2.screen"
+PACKAGE_ID = "astrbot_plugin_private_companion.screen"
 PROVIDER = "screen.native"
 ACTION = "screen.capture"
 CAPABILITIES = ("screen.read", "screen.process")

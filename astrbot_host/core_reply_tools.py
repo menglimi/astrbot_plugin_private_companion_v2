@@ -127,8 +127,10 @@ class _OfferedTool:
 
 class CoreReplyFunctionTool(FunctionTool):
     def __init__(self, session, offered):
-        super().__init__(name=native_tool_name(offered.spec.action), description=offered.spec.description,
-                         parameters=json.loads(offered.spec.parameters_json))
+        from .core_reply_image_prompt import core_image_tool_contract
+        description, parameters = core_image_tool_contract(offered.spec.action, offered.spec.description,
+                                                          json.loads(offered.spec.parameters_json))
+        super().__init__(name=native_tool_name(offered.spec.action), description=description, parameters=parameters)
         self._session, self._action = session, offered.spec.action
 
     async def call(self, context, **kwargs):
@@ -485,7 +487,8 @@ def inject_core_reply_tools(event, req, *, application):
             or session.prepared is not state.get("prepared")):
         session = CoreReplyToolSession(event, state, application)
         state["_tool_session"] = session
-    offered = session.catalog()
+    from .core_reply_image_prompt import core_image_tools, inject_core_image_prompt
+    offered, image_values = core_image_tools(session, session.catalog())
     semantic = getattr(application.tools, "semantic", None)
     if semantic is not None:
         from .core_reply_reaction_delivery import inject_core_reaction_instruction
@@ -506,6 +509,7 @@ def inject_core_reply_tools(event, req, *, application):
                 req.system_prompt += "\n\n" + AUTHORING_INSTRUCTION
     elif getattr(req, "func_tool", None) is not None:
         req.func_tool = ToolSet(tools=existing)
+    inject_core_image_prompt(session, req, offered, image_values)
     return tuple(tool._action for tool in appended)
 
 

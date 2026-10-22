@@ -13,7 +13,7 @@ from companion_v2.foundation.outcome import Outcome
 from .management_identity import dashboard_operator
 
 
-PREFIX = "/astrbot_plugin_private_companion_v2/reply"
+PREFIX = "/astrbot_plugin_private_companion/reply"
 
 
 class ReplyWebAPI:

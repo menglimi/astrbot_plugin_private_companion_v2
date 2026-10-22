@@ -13,3 +13,7 @@ sounddevice>=0.5
 soundfile>=0.13
 # Local Reality camera capture and JPEG encoding.
 opencv-python-headless>=4.11,<4.12
+# Embedded MiHome SDK; keep its MCP dependency on AstrBot's verified v1 contract.
+mijiaAPI==4.1.3
+fastmcp==3.4.2
+mcp>=1.26,<2

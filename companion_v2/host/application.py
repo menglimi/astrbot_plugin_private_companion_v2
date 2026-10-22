@@ -102,6 +102,8 @@ from companion_v2.screen.configuration import (ScreenConfigurationOwner, ScreenS
     configuration_fields as screen_configuration_fields)
 from companion_v2.screen.interpretation import ScreenInterpretationService
 from companion_v2.screen.peek import ScreenPeekService
+from companion_v2.conversation.relay_settings import (RelayConfigurationOwner, RelaySettings,
+    configuration_fields as relay_configuration_fields)
 from companion_v2.conversation.recall_settings import (RecallConfigurationOwner, RecallSettings,
     configuration_fields as recall_configuration_fields)
 from companion_v2.library.configuration import (LibraryConfigurationOwner, LibrarySettings,
@@ -160,6 +162,9 @@ from companion_v2.memory.configuration import extend_registry
 from companion_v2.memory.person.configuration import (AcquaintanceSettings,
     configuration_fields as person_configuration_fields,
     learning_configuration_fields as person_learning_configuration_fields)
+from companion_v2.role_work.awareness import RoleAwareness
+from companion_v2.conversation.awareness_context import ConversationAwarenessContext
+from companion_v2.host.role_attention import RoleAttention
 from companion_v2.proactive.configuration import ContactConfigurationOwner, GROUP as CONTACT_GROUP, with_contact_fields
 from companion_v2.proactive.service import ProactiveContacts
 from companion_v2.proactive.scheduling import ContactSchedule
@@ -194,7 +199,7 @@ class CompanionApplication:
                  weather_port=None, weather_alert_port=None, balance_port=None, news_port=None,
                  solar_term_port=None, budget_soft=None, capability_owners=(),
                  qzone_transport=None, default_provider_resolver=None,
-                 knowledge=None, memory_owner=DEFAULT_MEMORY_OWNER, memory_push=DEFAULT_MEMORY_PUSH):
+                 knowledge=None, memory_owner=DEFAULT_MEMORY_OWNER, memory_push=DEFAULT_MEMORY_PUSH, wake_port=None):
         if type(owns_runtime) is not bool or not any(p.kind == REPLY_KIND and p.lane is Lane.FOREGROUND for p in profiles):
             raise ValueError("assembly requires a foreground reply profile and explicit runtime ownership")
         if external is not None and (external.runtime is not runtime or external.messages is not None):
@@ -204,6 +209,7 @@ class CompanionApplication:
             raise ValueError("external tools need capacity for both parent and child")
         self.runtime, self.owns_runtime = runtime, owns_runtime
         self.now = now or (lambda: datetime.now(timezone.utc))
+        self.role_attention = RoleAttention()
         self.external = external
         self.semantics = None
         # Optional Laya resolver is attached by the host after assembly.  It is
@@ -235,6 +241,7 @@ class CompanionApplication:
             *wardrobe_configuration_fields(),
             *qzone_configuration_fields(),
             *private_access_configuration_fields(),
+            *relay_configuration_fields(),
             *(field for owner in capability_owners for field in owner.fields),
             *content_authoring_configuration_fields(), *content_cover_configuration_fields()) if f.field_id not in registry.fields)
         if extra:
@@ -253,6 +260,7 @@ class CompanionApplication:
                     ReactionConfigurationOwner(runtime), BusyGateConfigurationOwner(runtime),
                     GroupParticipationConfigurationOwner(runtime), KnowledgeConfigurationOwner(runtime),
                     ScreenConfigurationOwner(runtime), RecallConfigurationOwner(runtime),
+                    RelayConfigurationOwner(runtime),
                     LibraryConfigurationOwner(runtime),
                     reference_configuration_owner,
                     WardrobeConfigurationOwner(runtime),
@@ -262,6 +270,7 @@ class CompanionApplication:
         self.perception_settings = PerceptionSettings(self.configuration)
         self.screen_settings = ScreenSettings(self.configuration)
         self.recall_settings = RecallSettings(self.configuration)
+        self.relay_settings = RelaySettings(self.configuration)
         self.library_settings = LibrarySettings(self.configuration)
         self.reference_settings = ReferenceSettings(reference_configuration_owner)
         self.wardrobe_settings = WardrobeSettings(self.configuration)
@@ -446,13 +455,17 @@ class CompanionApplication:
         # proactive body cannot contradict a stored fact. Memory stays optional:
         # an unwired host keeps generating contacts without it.
         self.proactive.attach_memory(self.memory)
+        self.proactive.role_state = self.role_state
+        self.proactive.life_context = self.life_context
         self.proactive.expression_context = self.expression_style_context
         self.proactive.expression_review = self.expression_draft_review
         self.contact_schedule = ContactSchedule(self.proactive, self.messages, role_life=self.role_life,
+                                                role_growth=self.role_growth,
                                                 role_journal=self.role_journal, calendar=self.calendar,
+                                                relationships=self.relationship_memories,
                                                 role_state=self.role_state, weather_port=weather_port,
                                                 weather_alert_port=weather_alert_port, balance_port=balance_port,
-                                                news_port=news_port, screen_peek=self.screen_peek,
+                                                news_port=news_port, screen_peek=self.screen_peek, wake_port=wake_port,
                                                 notify=self.notify)
         self.proactive.schedule = self.contact_schedule
         self.role_reader.attach(self.gateway, self.role_reading, require_running=self.require_running,
@@ -480,6 +493,11 @@ class CompanionApplication:
         self.messages.perception_settings = self.perception_settings
         self.acquaintance_settings = AcquaintanceSettings(self.configuration)
         self.messages.acquaintance.settings = self.acquaintance_settings
+        self.role_attention.settings = self.acquaintance_settings
+        self.cross_window = RoleAwareness(runtime, acquaintance=self.messages.acquaintance,
+                                          source_validator=self.messages.sources)
+        self.messages.cross_window = self.cross_window
+        self.messages.cross_window_context = ConversationAwarenessContext(self.cross_window)
         self.generator = LocalReplyGenerator(self.messages, self.gateway, split=split, segmentation=segmentation,
                                              voice_policy=voice_policy)
         self.flow = ConversationFlow(self.messages, self.delivery, policy=policy)
@@ -810,9 +828,16 @@ class CompanionApplication:
     async def _execute(self, run):
         # The supervisor remembers only that a worker stopped; the turn's own
         # reply diagnosis needs the code the owner actually raised.
+        lease, attention_note = None, ""
         try:
             if run.task.spec.kind == REPLY_KIND:
-                result = await self.generator.generate(run)
+                attention = getattr(self, "role_attention", None)
+                if attention is not None:
+                    context = run.task.spec.context
+                    lease = await attention.acquire(context, run.task.spec.task_id,
+                                                    window=context.scope.kind.value)
+                    attention_note = attention.note(lease)
+                result = await self.generator.generate(run, attention_note=attention_note)
                 if self.semantics is not None:
                     self.semantics.schedule_memory(run.task.spec.context)
                 return result
@@ -820,6 +845,9 @@ class CompanionApplication:
         except TaskError as error:
             self.flow.note_failure(run.task.task_id, error.code)
             raise
+        finally:
+            if lease is not None:
+                self.role_attention.finish(lease)
         if result.result_ref:
             self._mark_reaction_sent(result.result_ref)
         return result

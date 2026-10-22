@@ -23,7 +23,7 @@ from companion_v2.execution.models import TaskError, digest
 from companion_v2.foundation.refs import ScopeKind
 
 
-async def send_private_notice(controller, event, *, text, route):
+async def send_private_notice(controller, event, *, text, route, transport=None):
     """平台直发一句纯文本；返回有界回执，供诊断与"为什么回了这个人"查证。
 
     ``route`` 需要 ``platform_id`` / ``login``（self_id）/ ``peer``（对方 user_id）
@@ -31,7 +31,7 @@ async def send_private_notice(controller, event, *, text, route):
     """
     if not text or not str(text).strip():
         return {"state": "skipped", "reason": "blank_line"}
-    api = _transport(controller, route)
+    api = transport if transport is not None else _transport(controller, route)
     try:
         result = await api.call_action("send_private_msg", self_id=route.login, user_id=int(route.peer),
                                       message=[{"type": "text", "data": {"text": str(text)}}])
@@ -40,6 +40,13 @@ async def send_private_notice(controller, event, *, text, route):
     identifier = result.get("message_id") if isinstance(result, Mapping) else None
     return {"state": "delivered", "message_id": identifier,
             "receipt": digest(["private-notice.v1", route.platform_id, route.login, route.peer, str(text)])}
+
+
+def prepare_private_notice_transport(controller, route):
+    """Validate the pinned native route before an effectful dispatch barrier."""
+    if not isinstance(getattr(route, "peer", None), str) or not route.peer.isdigit():
+        raise TaskError("host_notice_route_invalid", "private destination must be a numeric account ID")
+    return _transport(controller, route)
 
 
 def _transport(controller, route):

@@ -9,7 +9,7 @@ from tests.g6_support import G6Fixture, NOW, descriptor
 
 class NativeCatalogUpgradeTests(G6Fixture):
     def replacement(self):
-        return replace(descriptor(), package_id="astrbot_plugin_private_companion_v2.screen",
+        return replace(descriptor(), package_id="astrbot_plugin_private_companion.screen",
                        package_version="2.1.0", artifact_hash="new-native-artifact")
 
     def upgrade(self, new=None):

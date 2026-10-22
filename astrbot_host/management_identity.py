@@ -7,19 +7,34 @@ from companion_v2.identity_policy.object_access import ObjectAccessPolicy
 from companion_v2.identity_policy.repository import PersistentIdentityDirectory
 
 
+def _authenticated_api_key(username):
+    """Only the host's scoped extension dispatcher can supply a service identity."""
+    if not isinstance(username, str) or not username.startswith("api_key:") or not username[8:]:
+        return False
+    try:
+        from astrbot.api.web import request
+        from starlette.requests import Request
+        return (request.username == username and isinstance(request._request, Request)
+                and request.path.startswith("/api/v1/plugins/extensions/"))
+    except (RuntimeError, AttributeError):
+        return False
+
+
 def dashboard_operator(runtime, username, *, at):
     # username must come from astrbot.api.web.request, never a query/body/header claim.
     if (type(username) is not str or not username.strip() or username != username.strip()
-            or len(username) > 128 or username.startswith("api_key:")):
+            or len(username) > 128 or (username.startswith("api_key:") and not _authenticated_api_key(username))):
         raise TaskError("dashboard_identity_required", "sign in to the AstrBot Dashboard as an administrator")
     identifier = "dashboard:" + digest([runtime.installation_id, username])
-    principal = AuthenticatedHostPrincipal(runtime.installation_id, "astrbot-dashboard",
+    service = username.startswith("api_key:")
+    principal = AuthenticatedHostPrincipal(runtime.installation_id,
+                                            "astrbot-dashboard-api-key" if service else "astrbot-dashboard",
                                             "dashboard", username)
     identities = PersistentIdentityDirectory(runtime)
     with runtime.transaction():
         resolved = identities.resolve_authenticated(principal, observed_at=at)
         if resolved.failure is not None and resolved.failure.code == "unbound_identity":
-            subject = SubjectRef(runtime.installation_id, SubjectKind.HUMAN, identifier)
+            subject = SubjectRef(runtime.installation_id, SubjectKind.SERVICE if service else SubjectKind.HUMAN, identifier)
             identities.bind(binding_id=identifier, principal=principal, subject=subject,
                 valid_from=at, expected_revision=identities.revision)
             policy = ObjectAccessPolicy(runtime)

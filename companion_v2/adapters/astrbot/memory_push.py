@@ -28,7 +28,7 @@ from companion_v2.capabilities.memory_push import (
 
 logger = logging.getLogger(__name__)
 
-PUSH_SOURCE_PLUGIN = "astrbot_plugin_private_companion_v2"
+PUSH_SOURCE_PLUGIN = "astrbot_plugin_private_companion"
 """牢插件用它区分来源；必须稳定，重复推送同一条记录时不能被改写。"""
 
 CONTENT_LIMIT = 4000

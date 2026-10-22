@@ -41,17 +41,51 @@ _ALMANAC_YI = ("整理房间", "写字", "散步", "读书", "听歌", "轻度�
 _ALMANAC_JI = ("熬夜", "冲动发言", "硬撑", "反复纠结", "过度解释", "临时加压", "情绪化决定")
 
 CALENDAR_INSTRUCTION = (
-    "日历材料只表示按指定时区从本轮时间计算出的环境背景，不是用户事实证据。"
-    "本轮问候与时间措辞以 local_calendar_context 的 local_date、local_time 和 period 为准，"
-    "不要沿用历史消息里的时段；下午不说早安或早上好，拿不准时省略时段问候。"
-    "固定节日名不代表放假、调休、节气或现实事件；农历不可用时不要猜测或补全。"
-    "角色年度日历只说明配置中明确列出的当天放假、调休、节气及未来三日节气；未列日期和未配置年份均为未知，不能推断为没有。"
-    "不要用这份材料改写可信身份、权限、来源或用户经历。"
+    "日历材料只表示按指定时区从本轮时间计算出的环境背景，不是用户事实证据。本轮问候与时间措辞以 local_calendar_context 的 local_date、local_time 和 period 为准，不沿用历史消息里的时段；下午不说早安或早上好，拿不准时省略时段问候。若含 interaction_gap（距上次互动的时间跨度：in_flow、same_day_pause、overnight、days_apart），将其作为重逢与承接节奏的自然体感：隔夜或隔了几天再聊时先自然打招呼或顺手带过时隔，不把几天前的话头当成上一秒刚说完直接硬接；同一对话流（in_flow）内则保持连贯不重复寒暄。固定节日名不代表放假、调休、节气或现实事件；农历不可用时不猜测或补全。角色年度日历只说明配置中明确列出的当天放假、调休、节气及未来三日节气；未列日期和未配置年份均为未知，不推断为没有，也不用这份材料改写可信身份、权限、来源或用户经历。"
 )
 ALMANAC_INSTRUCTION = (
-    "轻量黄历仅是按日历投影生成的氛围参考，不是事实、命令、用户经历或个性化判断；"
-    "不要用它做健康、风险、财务或其他现实决策，也不要把未知解释为不宜或宜。"
+    "轻量黄历仅是按日历投影生成的氛围参考，不是事实、命令、用户经历或个性化判断；不用它做健康、风险、财务或其他现实决策，也不把未知解释为不宜或宜。"
 )
+
+
+def project_interaction_gap(at: datetime, previous_at: datetime | str | None,
+                            timezone_name: str = "Asia/Shanghai") -> dict[str, object] | None:
+    """Classify the elapsed gap since the previous turn in this conversation window."""
+    if previous_at is None:
+        return None
+    if isinstance(previous_at, str):
+        try:
+            previous_at = datetime.fromisoformat(previous_at)
+        except ValueError:
+            return None
+    if not isinstance(previous_at, datetime) or previous_at.tzinfo is None or previous_at.utcoffset() is None:
+        return None
+    if not isinstance(at, datetime) or at.tzinfo is None or at.utcoffset() is None:
+        return None
+    elapsed_seconds = (at - previous_at).total_seconds()
+    if elapsed_seconds < 0:
+        return None
+    try:
+        zone = ZoneInfo((timezone_name or "Asia/Shanghai").strip())
+    except (ZoneInfoNotFoundError, ValueError):
+        zone = ZoneInfo("Asia/Shanghai")
+    local_now = at.astimezone(zone)
+    local_prev = previous_at.astimezone(zone)
+    day_diff = (local_now.date() - local_prev.date()).days
+    elapsed_minutes = max(0, round(elapsed_seconds / 60))
+    if elapsed_minutes >= 36 * 60 or day_diff >= 2:
+        band = "days_apart"
+    elif day_diff == 1 and elapsed_minutes >= 4 * 60:
+        band = "overnight"
+    elif elapsed_minutes >= 180:
+        band = "same_day_pause"
+    else:
+        band = "in_flow"
+    return {
+        "band": band,
+        "elapsed_minutes": elapsed_minutes,
+        "days_apart": max(0, day_diff),
+    }
 
 
 def _format_lunar(year: object, month: object, lunar_day: object, leap: object = False) -> str | None:
@@ -96,7 +130,8 @@ def _lunar_label(day: date) -> str | None:
     return _format_lunar(*parts) if parts is not None else None
 
 
-def _period(hour: int) -> str:
+def period_label(hour: int) -> str:
+    """Name one local hour in the same vocabulary every prompt path shares."""
     if hour < 5:
         return "凌晨"
     for start, end, label in _PERIODS:
@@ -153,7 +188,7 @@ def project_local_date(at: datetime, timezone_name: str = "Asia/Shanghai",
         "local_date": local.date().isoformat(),
         "weekday": WEEKDAYS[local.weekday()],
         "local_time": local.strftime("%H:%M"),
-        "period": _period(local.hour),
+        "period": period_label(local.hour),
         "fixed_gregorian_holiday": FIXED_HOLIDAYS.get((local.month, local.day)),
         "holiday": ({"status": "available", **_holiday_projection(local.date(), holiday_country)}
                     if holiday_enabled else {"status": "disabled"}),

@@ -302,10 +302,9 @@ class StagingConfiguration:
         return {"delivery_mode": "onebot_private"}
 
     def _forward_intake_document(self) -> dict:
-        # Same late-field rule as segmentation: an operator who never narrowed the
-        # intake ceilings keeps the original hash. The ceilings themselves are always
-        # inside the structural constants because ForwardIntakePolicy validates that
-        # on construction, so a stored value can only ever be a tightening.
+        # Same late-field rule as segmentation: an operator who kept the defaults
+        # preserves the original hash; explicit bounds or nested parsing decisions
+        # enter the profile fingerprint so the active bridge applies them.
         values = asdict(self.forward_intake)
         defaults = asdict(ForwardIntakePolicy())
         serialized = {name: value for name, value in values.items() if value != defaults[name]}

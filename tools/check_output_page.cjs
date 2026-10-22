@@ -6,7 +6,7 @@ const {chromium} = require("playwright");
 const ROOT = path.resolve(process.env.COMPANION_SOURCE_ROOT || path.join(__dirname, ".."));
 const PAGE = path.join(ROOT, "pages", "陪伴小屋");
 const HOST_ROOT = process.env.COMPANION_HOST_ROOT || path.resolve(__dirname, "../../../..");
-const HOST = "astrbot_plugin_private_companion_v2", TOKEN = "synthetic-output-qa";
+const HOST = "astrbot_plugin_private_companion", TOKEN = "synthetic-output-qa";
 const PREFIX = "/api/plugin/page/content/" + HOST + "/" + encodeURIComponent("陪伴小屋") + "/";
 const ROLE = "host/targets/first/roles/role-a";
 const ok = data => ({status: "ok", data});
@@ -29,7 +29,7 @@ with tempfile.TemporaryDirectory(prefix="output-page-qa-") as data_root:
     root, sections = Path.cwd(), {}
     page = root / "pages" / "陪伴小屋"
     service = PluginPageService(SimpleNamespace(plugin_store_path=str(root.parent)))
-    query, args = {"asset_token":"synthetic-output-qa"}, ("astrbot_plugin_private_companion_v2","陪伴小屋")
+    query, args = {"asset_token":"synthetic-output-qa"}, ("astrbot_plugin_private_companion","陪伴小屋")
     assets = {"index.html":service.rewrite_plugin_page_html((page/"index.html").read_text(encoding="utf-8"),*args,"index.html",theme="light",extra_query_params=query)}
     for css in page.glob("*.css"):
         assets[css.name] = service.rewrite_plugin_page_css(css.read_text(encoding="utf-8"),*args,css.name,extra_query_params=query)

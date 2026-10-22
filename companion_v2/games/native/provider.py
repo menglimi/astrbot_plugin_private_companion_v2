@@ -33,7 +33,7 @@ from .context import SNAPSHOT_ACTIONS, conversation_records, public_game_fact, s
 
 
 SCHEMA = "companion.native-provider.v1"
-PLUGIN_ID = "astrbot_plugin_private_companion_v2.game"
+PLUGIN_ID = "astrbot_plugin_private_companion.game"
 PROVIDER_ID = "game.native"
 READ = "game.tictactoe.snapshot"
 CREATE = "game.tictactoe.create"

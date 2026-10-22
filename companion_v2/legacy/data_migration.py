@@ -23,6 +23,7 @@ from companion_v2.legacy.profile_source import (
     read_json as _read_json,
     read_sqlite as _read_persona_sqlite,
 )
+from companion_v2.legacy.sqlite_snapshot import open_readonly_sqlite_snapshot
 
 
 MAX_REACTION_ASSETS = 1000
@@ -195,6 +196,7 @@ class LegacyDataPlan:
     reference_image_rejected: tuple[dict, ...] = ()
     wardrobe_items: tuple[LegacyWardrobeItem, ...] = ()
     wardrobe_rejected: tuple[dict, ...] = ()
+    expression_profiles: tuple[dict, ...] = ()
 
     def document(self, *, source_group_id="", existing_reaction_ids=(),
                  existing_journal_heads=None, existing_reference_hashes=(),
@@ -245,7 +247,8 @@ class LegacyDataPlan:
                 worldbook_groups[group_id] = worldbook_groups.get(group_id, 0) + 1
         conflict_dates = [{"kind": item.kind, "date": item.local_date,
                            "state": heads[item.key].get("state", "unknown"),
-                           "imported": bool(heads[item.key].get("imported"))}
+                           "imported": bool(heads[item.key].get("imported")),
+                           "content_matches": bool(heads[item.key].get("content_matches"))}
                           for item in journal_conflicts[:30]]
         reference_hashes = set(existing_reference_hashes)
         wardrobe_ids = set(existing_wardrobe_ids)
@@ -284,6 +287,8 @@ class LegacyDataPlan:
                 "total": len(self.journals) + len(self.journal_rejected),
                 "ready": len(ready_journals),
                 "already_present": len(journal_conflicts),
+                "identical_count": sum(bool(heads[item.key].get("content_matches"))
+                                       for item in journal_conflicts),
                 "batch_count": len(journal_batch),
                 "batch_bytes": sum(item.size for item in journal_batch),
                 "remaining_after_batch": max(0, len(ready_journals) - len(journal_batch)),
@@ -1546,7 +1551,7 @@ def _readonly_sqlite_summary(path: Path, *, state_columns=()):
             or info.st_size > 1024 * 1024 * 1024):
         return {"state": "unsafe_or_too_large", "tables": {}, "states": {}}
     try:
-        connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)
+        connection = open_readonly_sqlite_snapshot(path, timeout=2)
         try:
             connection.execute("PRAGMA query_only=ON")
             names = {str(row[0]) for row in connection.execute(
@@ -1662,6 +1667,8 @@ def build_data_plan(v1_root: str | Path, *, source_persona_id="", v1_configurati
     worldbook_rejected = tuple((*worldbook_rejected, *group_profile_rejected))
     member_profiles, member_profile_rejected = _member_profiles(profile)
     profile_data = _profile_data(profile)
+    from .expression_data import expression_profiles
+    learned_expressions = expression_profiles(profile_data, source_persona_id)
     reference_images, reference_image_rejected = _reference_assets(
         root, profile_data, v1_configuration, source_persona_id)
     wardrobe_items, wardrobe_rejected = _wardrobe_items(
@@ -1675,6 +1682,7 @@ def build_data_plan(v1_root: str | Path, *, source_persona_id="", v1_configurati
             "worldbook_entries": 0, "diary_entries": 0,
             "dream_fragments": 0, "non_equivalent_reason": profile_error}
     material = {
+        "expression_profiles": learned_expressions,
         "source_persona_id": source_persona_id,
         "selected_path": selected_path,
         "reactions": [{"sha256": item.sha256, "metadata": item.metadata, "size": item.size,
@@ -1717,7 +1725,7 @@ def build_data_plan(v1_root: str | Path, *, source_persona_id="", v1_configurati
         journal_rejected, worldbook_items, worldbook_rejected, member_profiles,
         member_profile_rejected, persona_sources, source_persona_id, profile_summary,
         work_delivery, world_assets, fingerprint, tuple(warnings + group_warnings),
-        reference_images, reference_image_rejected, wardrobe_items, wardrobe_rejected)
+        reference_images, reference_image_rejected, wardrobe_items, wardrobe_rejected, learned_expressions)
 
 
 def load_reaction_asset(v1_root: str | Path, item: ReactionAsset) -> bytes:

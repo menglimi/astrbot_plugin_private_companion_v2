@@ -9,15 +9,16 @@ from __future__ import annotations
 
 import csv
 import json
+import argparse
 from collections import defaultdict
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
-V1_SCHEMA = _ROOT.parent / "astrbot_plugin_private_companion" / "_conf_schema.json"
-AUDIT = Path("docs/V1_V2_CONFIG_COVERAGE_AUDIT_20260927.csv")
-OUT = Path(".verify-shards")
+DEFAULT_V1_SCHEMA = _ROOT.parent / "astrbot_plugin_private_companion" / "_conf_schema.json"
+AUDIT = _ROOT / "docs/V1_V2_CONFIG_COVERAGE_AUDIT_20260927.csv"
+OUT = _ROOT / ".verify-shards"
 SHARD_SIZE = 16
-PENDING = ("no-ledger-row", "recorded-other")
+PENDING = frozenset({"owed", "no-ledger-row", "unverified"})
 
 
 def v1_index(node, prefix=""):
@@ -32,14 +33,20 @@ def v1_index(node, prefix=""):
             yield path, spec
 
 
-def main():
-    schema = json.loads(V1_SCHEMA.read_text(encoding="utf-8-sig"))
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--v1-schema", type=Path, default=DEFAULT_V1_SCHEMA,
+                        help="path to the read-only V1 _conf_schema.json")
+    args = parser.parse_args(argv)
+    if not args.v1_schema.is_file():
+        parser.error(f"V1 schema not found: {args.v1_schema}; pass --v1-schema with the 6.7.0 source schema")
+    schema = json.loads(args.v1_schema.read_text(encoding="utf-8-sig"))
     declarations = dict(v1_index(schema))
     rows = list(csv.DictReader(AUDIT.open(encoding="utf-8", newline="")))
-    # Verify what is still undecided: no V2 field yet, or a field that exists while the
-    # ledger still records the key as owed. Keys already matched and settled are done.
+    # The resolved ledger is authoritative: an intentionally different V2 landing
+    # need not have a field with the same name, while a stale name match can still be owed.
     pending = [row for row in rows
-               if not row["v2_field"] or row["disposition"] == "owed"]
+               if row["disposition"] in PENDING]
 
     # Shard by V1 group so one reviewer sees a coherent area.
     by_group = defaultdict(list)

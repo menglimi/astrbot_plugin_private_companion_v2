@@ -6,7 +6,7 @@ from companion_v2.configuration.models import ConfigurationError
 from companion_v2.conversation.reply_preparation import prepare_reply
 from companion_v2.conversation.reply_settings import validate
 from companion_v2.conversation.segmentation import SegmentationPolicy, LLM_SEGMENT_MARKER as MARKER
-from companion_v2.conversation.text_processing import ReplyTextPolicy, TEXT_DEFAULTS
+from companion_v2.conversation.text_processing import InternalExpressionProtocolFilter, ReplyTextPolicy, TEXT_DEFAULTS
 from companion_v2.conversation.voice_reply import VoiceReplyPolicy
 
 
@@ -85,12 +85,29 @@ class ReplyTextProcessingTests(unittest.TestCase):
                                     "&#x3C;/pc_reaction_expression&#x3E;", SegmentationPolicy(), policy())
         self.assertEqual(hexadecimal.parts, ("正文。",))
 
+    def test_internal_reaction_expression_metadata_is_removed_across_stream_chunks(self):
+        protocol = InternalExpressionProtocolFilter()
+        visible = "".join((
+            protocol.feed("正文。<pc_reaction_"),
+            protocol.feed('expression\">{\"intent\":\"内部态度，害羞\"}'),
+            protocol.feed("</pc_reaction_"),
+            protocol.feed("expression>后续正文。"),
+            protocol.finish(),
+        ))
+        self.assertEqual(visible, "正文。后续正文。")
+
     def test_voice_wrappers_are_not_visible_when_voice_is_disabled(self):
         prepared = prepare_reply("<pc_tts>前置。</pc_tts>普通正文。", SegmentationPolicy(), policy())
         self.assertEqual(prepared.parts, ("前置。普通正文。",))
         self.assertNotIn("pc_tts", prepared.visible)
         encoded = prepare_reply("&#x3C;pc_tts&#x3E;正文。&#x3C;/pc_tts&#x3E;", SegmentationPolicy(), policy())
         self.assertEqual(encoded.parts, ("正文。",))
+
+    def test_voice_tag_variants_remain_protected_from_content_replacement(self):
+        presentation = policy(content_replacement_enabled=True,
+                              content_replacements='["preserve => changed"]')
+        source = "&lt;PC-TTS lang='ja'&gt;preserve\nstill spoken.</PCC_TTS>"
+        self.assertEqual(presentation.replace_text(source), source)
 
     def test_ordered_replacements_precede_rule_length_and_support_tokens(self):
         presentation = policy(content_replacement_enabled=True,

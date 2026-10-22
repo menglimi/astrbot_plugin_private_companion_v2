@@ -417,7 +417,7 @@ class ExpressionGroupPipelineTests(GroupFixture, unittest.IsolatedAsyncioTestCas
 
     async def request(self, suffix, data=None, *, query=""):
         from companion_v2.execution.models import digest
-        path = "/astrbot_plugin_private_companion_v2/host/targets/group-a/roles/" + digest("role-a") + "/reply" + suffix
+        path = "/astrbot_plugin_private_companion/host/targets/group-a/roles/" + digest("role-a") + "/reply" + suffix
         body = json.dumps(data, ensure_ascii=False).encode("utf-8") if data is not None else b""
         method = "POST" if data is not None else "GET"
         async def receive():

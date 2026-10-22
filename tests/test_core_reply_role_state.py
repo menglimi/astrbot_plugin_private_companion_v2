@@ -127,8 +127,11 @@ class CoreReplyRoleStateTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("角色当前状态", prompt.context_instruction)
                 self.assertIn("精力很低", prompt.context_instruction)
                 self.assertIn("可感知的状态色彩", prompt.context_instruction)
-                self.assertIn("我昨晚没休息好，今天有点困", prompt.context_instruction)
-                self.assertIn("只有当前对话或明确相关的历史表明用户本人披露了同一件状况", prompt.context_instruction)
+                # An absent sleep value must not be primed by an insomnia
+                # example, and the role's own symptoms are not user symptoms.
+                self.assertNotIn("我昨晚没休息好，今天有点困", prompt.context_instruction)
+                self.assertIn("没有吃睡记录不等于没吃没睡", prompt.context_instruction)
+                self.assertIn("角色自己的状态不表示用户也有同样经历", prompt.context_instruction)
                 if scope_kind is ScopeKind.GROUP:
                     self.assertIn("group_speaker", prompt.sections)
 

@@ -36,7 +36,7 @@ from companion_v2.role_work.state.ownership import role_schedule_key
 from companion_v2.storage.versioned_records import VersionedRecords
 from companion_v2.sources.models import SourceRecord
 from tests.test_management_access import NOW
-from tests.test_role_state import StateFixture, calendar_data
+from tests.test_role_state import StateFixture, calendar_data, state_data
 from tests.test_role_tool_loop import answered
 
 
@@ -156,7 +156,11 @@ class PlanningOutputTests(unittest.TestCase):
         self.assertEqual(rejected, ({"index": 1, "code": "invalid_intervention_change"},))
         with self.assertRaises(TaskError):
             parse_output(json.dumps({"changes": [{"action": "cancel", "id": "user-report", "revision": 3}]}), job)
-        self.assertIn("绝不修改 user_report、commitment", INTERVENTION_INSTRUCTION)
+        self.assertIn("不得修改 user_report、commitment", INTERVENTION_INSTRUCTION)
+        self.assertIn("不要求角色复述确认", INTERVENTION_INSTRUCTION)
+        self.assertIn("按上下文对安排影响的大小与确定程度", INTERVENTION_INSTRUCTION)
+        self.assertNotIn("普通关心、建议、邀请或假设", INTERVENTION_INSTRUCTION)
+        self.assertNotIn("只有角色真实送达的 assistant 回复", INTERVENTION_INSTRUCTION)
 
 
 class CalendarRefinementTests(StateFixture, unittest.IsolatedAsyncioTestCase):
@@ -564,6 +568,27 @@ class CalendarPlanningTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job["material"]["memories"], [])
         self.assertEqual(job["material"]["planning_scope"], "role")
 
+    async def test_planning_material_injects_role_state_and_mode_specific_instruction(self):
+        app, context, manager = await self.ready()
+        self.grant(context.actor, context.scope, "role.life.read")
+        self.configure(manager, enabled=True, mood_enabled=True)
+        app.role_state.write(context, data=state_data(energy=55, sleep="刚醒不久", mood="安稳专注"),
+                             expected_revision=0, operation_key="seed-planning-state")
+        app.role_life.add_activity(RoleActivity("morning-reading",
+            context.role_binding.role.subject_id, context.scope, NOW, RoleActivityState.ACTIVE,
+            description="翻看散文集"))
+        instruction = app.state_maintenance.bindings[context.key][1]
+
+        job = capture(app.calendar_planning, context, instruction, "daily", "state-aware-daily")
+        self.assertEqual(job["material"]["role_state"]["energy"], 55)
+        self.assertEqual(job["material"]["role_state"]["sleep"], "刚醒不久")
+        self.assertEqual(job["material"]["role_state"]["mood"], "安稳专注")
+        self.assertEqual(job["material"]["recent_life"][0]["description"], "翻看散文集")
+
+        result = await self.plan(app, context, slot="state-aware-run", mode="daily", manual=True)
+        self.assertEqual(result["state"], "succeeded", result)
+        self.assertIn("当前为短期（当日）规划", self.called[-1].original.instruction)
+
     async def test_calendar_material_is_bounded_and_marks_omitted_details(self):
         app, context, manager = await self.ready()
         self.configure(manager, planning_prompt="保留空闲" * 800, planning_annual_calendars=json.dumps([
@@ -594,7 +619,7 @@ class CalendarPlanningTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         horizon = capture(app.calendar_planning, context, instruction, "horizon", "calendar-horizon")
         self.assertEqual(horizon["material"]["calendar_context"]["fixed_gregorian_holidays_in_window"],
                          [{"date": "2026-10-01", "name": "国庆节"}, {"date": "2027-01-01", "name": "元旦"}])
-        self.assertIn("不代表放假", INSTRUCTION)
+        self.assertIn("不等于放假", INSTRUCTION)
 
     async def test_capture_uses_configured_annual_dates_and_rejects_stale_settings(self):
         app, context, manager = await self.ready()
@@ -669,6 +694,99 @@ class CalendarPlanningTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(result["state"], "succeeded")
         self.assertEqual(app.calendar.inventory(context)["items"], [])
         self.assertTrue((await self.plan(app, context))["replayed"])
+        self.assertEqual(len(self.called), 1)
+
+    async def test_failed_midnight_plan_is_observed_again_with_new_future_material_after_restart(self):
+        app, context, _ = await self.ready()
+        zone = ZoneInfo("Asia/Shanghai")
+        local_midnight = datetime.combine(NOW.astimezone(zone).date() + timedelta(days=1), time(), zone)
+        self.clock.advance(local_midnight - self.clock.now())
+        planner = app.calendar_planning
+        settings = app.role_state.settings(context)[0]
+        mode, original_slot, _ = planner.opportunity(context, settings, self.clock.now())
+        instruction = app.state_maintenance.bindings[context.key][1]
+        async def timed_out(_):
+            raise TaskError("provider_wait_timed_out", "unknown remote processing; no local plan")
+        self.model_behavior = timed_out
+        failed = await planner.run(context, instruction, mode=mode, slot=original_slot, automatic=True)
+        self.assertEqual(failed["state"], "failed")
+        self.assertTrue((await planner.run(context, instruction, mode=mode, slot=original_slot, automatic=True))["replayed"])
+        self.assertEqual(planner.status(context)["daily_result"]["code"], "provider_wait_timed_out")
+        self.assertEqual(datetime.fromisoformat(planner.status(context)["next_review_at"]).hour, 6)
+        self.assertEqual(len(self.called), 1)
+
+        restarted = CalendarPlanning(self.runtime)
+        restarted.attach(app)
+        self.assertEqual(restarted.status(context)["daily_result"]["code"], "provider_wait_timed_out")
+        self.clock.advance(timedelta(hours=13))
+        planner.next_checks[context.key] = self.clock.now() + timedelta(days=1)
+        mode, new_slot, _ = restarted.opportunity(context, settings, self.clock.now())
+        self.assertEqual(mode, "daily")
+        self.assertEqual(new_slot, original_slot + ":review:12")
+        self.assertNotEqual(restarted.identifier(context, new_slot), failed["task_id"])
+        self.model_behavior = self.response
+        # The real host creates a fresh registration with its fresh planner on
+        # restart; this fixture keeps the original supervisor registration, so
+        # run through the original owner after checking the durable restart view.
+        result = await planner.run(context, instruction, mode=mode, slot=new_slot, automatic=True)
+        self.assertEqual(result["state"], "succeeded", result)
+        material = json.loads(self.called[-1].original.context.materials[0].payload)
+        self.assertEqual(datetime.fromisoformat(material["now"]), self.clock.now())
+        self.assertEqual(self.called[-1].original.response_format, "json_object")
+        self.assertEqual(len(app.calendar.inventory(context)["items"]), 1)
+        self.assertTrue(restarted.attempted(context, original_slot, automatic=True))
+        self.assertEqual(len(self.called), 2)
+        await restarted.close()
+
+    async def test_intentionally_empty_daily_plan_is_not_regenerated_by_daypart(self):
+        app, context, _ = await self.ready()
+        planner = app.calendar_planning
+        settings = app.role_state.settings(context)[0]
+        mode, slot, _ = planner.opportunity(context, settings, NOW)
+        self.model_behavior = lambda env: asyncio.sleep(0, result=answered('{"items":[]}'))
+        result = await planner.run(context, app.state_maintenance.bindings[context.key][1],
+                                   mode=mode, slot=slot, automatic=True)
+        self.assertEqual(result["state"], "succeeded", result)
+        self.assertEqual(result["saved"], 0)
+        self.clock.advance(timedelta(hours=6))
+        self.assertEqual(planner.opportunity(context, settings, self.clock.now())[0], "horizon")
+        self.assertIsNone(planner.status(context)["next_review_at"])
+
+    async def test_daily_review_waits_between_failures_and_does_not_catch_up_old_dayparts(self):
+        app, context, _ = await self.ready()
+        planner = app.calendar_planning
+        settings = app.role_state.settings(context)[0]
+        mode, slot, _ = planner.opportunity(context, settings, NOW)
+        async def failed(_):
+            raise TaskError("provider_wait_timed_out", "model wait timed out")
+        self.model_behavior = failed
+        instruction = app.state_maintenance.bindings[context.key][1]
+        await planner.run(context, instruction, mode=mode, slot=slot, automatic=True)
+        self.assertEqual(planner.opportunity(context, settings, self.clock.now())[0], "horizon")
+        self.clock.advance(timedelta(hours=5))
+        opportunity = planner.opportunity(context, settings, self.clock.now())
+        self.assertEqual(opportunity[1], slot + ":review:12")
+        await planner.run(context, instruction, mode=opportunity[0], slot=opportunity[1], automatic=True)
+        self.assertEqual(planner.opportunity(context, settings, self.clock.now())[0], "horizon")
+        self.assertEqual(len(self.called), 2)
+        self.assertEqual(datetime.fromisoformat(planner.status(context)["next_review_at"]).hour, 18)
+
+    async def test_daily_review_reports_the_actual_wait_within_a_daypart(self):
+        app, context, _ = await self.ready()
+        planner = app.calendar_planning
+        settings = app.role_state.settings(context)[0]
+        mode, slot, _ = planner.opportunity(context, settings, NOW)
+        async def failed(_):
+            raise TaskError("provider_wait_timed_out", "model wait timed out")
+        self.model_behavior = failed
+        await planner.run(context, app.state_maintenance.bindings[context.key][1],
+                          mode=mode, slot=slot, automatic=True)
+        next_review = datetime.fromisoformat(planner.status(context)["next_review_at"])
+        self.assertEqual(next_review, NOW + timedelta(hours=1))
+        self.clock.advance(timedelta(minutes=59))
+        self.assertEqual(planner.opportunity(context, settings, self.clock.now())[0], "horizon")
+        self.clock.advance(timedelta(minutes=1))
+        self.assertEqual(planner.opportunity(context, settings, self.clock.now())[1], slot + ":review:6")
         self.assertEqual(len(self.called), 1)
 
     async def test_shutdown_cancels_planning_and_restart_keeps_attempt_ledger(self):

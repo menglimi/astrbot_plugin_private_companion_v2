@@ -60,6 +60,11 @@ class LegacyGroupDataWebAPI:
                 raise ValueError("required group migration fields are missing")
         if type(query) is not dict or set(query) - allowed:
             raise ValueError("unexpected group migration fields")
+        # The shared page query omits empty values. An omitted persona on a
+        # read-only plan selects companions.json, as in the other V1 previews.
+        # Apply still requires the explicit persona and reviewed plan token.
+        if not body:
+            query = {"source_persona_id": "", **query}
         if (type(query.get("source_persona_id")) is not str or len(query["source_persona_id"]) > 96
                 or type(query.get("source_group_id")) is not str or not query["source_group_id"]
                 or len(query["source_group_id"]) > 256):
@@ -166,7 +171,8 @@ class LegacyGroupDataWebAPI:
                 if controller._terminated:
                     raise TaskError("staging_host_terminated", "plugin is stopped")
                 username = request.username
-                if type(username) is not str or not username.strip() or username.startswith("api_key:"):
+                from .management_identity import _authenticated_api_key
+                if type(username) is not str or not username.strip() or (username.startswith("api_key:") and not _authenticated_api_key(username)):
                     raise TaskError("dashboard_identity_required", "sign in to the AstrBot Dashboard")
                 dashboard_operator(controller.runtime, username, at=controller.now())
                 target, session = self._target()

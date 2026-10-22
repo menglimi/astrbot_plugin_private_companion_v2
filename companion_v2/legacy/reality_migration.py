@@ -10,13 +10,45 @@ from dataclasses import dataclass
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .native_extension_configuration import _leaves
+
+
+REALITY_INTEGER_BOUNDS = {
+    "camera.min_interval_seconds": (10, 3600),
+    "camera.capture_timeout_seconds": (2, 20),
+    "camera.analysis_timeout_seconds": (5, 90),
+    "camera.proactive_min_tier": (1, 5),
+    "camera.proactive_max_daily": (0, 10),
+    "camera.proactive_cooldown_minutes": (10, 1440),
+    "audio.default_playback_volume": (0, 100),
+    "home.request_timeout_seconds": (1, 30),
+    "health.ttl_seconds": (60, 604800),
+    "mobile.session_ttl_hours": (1, 720),
+    "mobile.location_ttl_seconds": (60, 86400),
+    "mobile.amap_cache_ttl_seconds": (60, 604800),
+    "mobile.amap_request_timeout_seconds": (1, 20),
+    "mobile.telemetry_ttl_seconds": (60, 604800),
+    "mobile.activity_ttl_seconds": (60, 86400),
+}
 
 REALITY_SETTING_DEFAULTS = {
     "camera.enabled": False,
     "camera.min_interval_seconds": 60,
     "camera.capture_timeout_seconds": 5,
     "camera.analysis_timeout_seconds": 25,
+    "camera.proactive_min_tier": 4,
+    "camera.proactive_max_daily": 1,
+    "camera.proactive_cooldown_minutes": 240,
     "audio.default_playback_volume": 35,
+    "home.request_timeout_seconds": 5,
+    "health.ttl_seconds": 3600,
+    "mobile.session_ttl_hours": 168,
+    "mobile.location_ttl_seconds": 900,
+    "mobile.amap_cache_ttl_seconds": 1800,
+    "mobile.amap_request_timeout_seconds": 5,
+    "mobile.telemetry_ttl_seconds": 3600,
+    "mobile.activity_ttl_seconds": 900,
+    "vision_provider_id": "",
     "timezone": "Asia/Shanghai",
 }
 
@@ -29,6 +61,8 @@ class RealityConfigurationMigration:
 
 
 def _value_at(config: Any, dotted_key: str, default=None):
+    if isinstance(config, Mapping) and dotted_key in config:
+        return config[dotted_key]
     current = config
     for part in dotted_key.split("."):
         if not isinstance(current, Mapping) or part not in current:
@@ -82,22 +116,21 @@ def convert_reality_configuration(source) -> RealityConfigurationMigration:
 
     changes: dict[str, Any] = {}
     differences: list[dict[str, str]] = []
-    camera = source.get("camera") if isinstance(source.get("camera"), dict) else {}
-    audio = source.get("audio") if isinstance(source.get("audio"), dict) else {}
+    missing = object()
+    raw = _value_at(source, "camera.enabled", missing)
+    if raw is not missing:
+        boolean = _boolean(raw)
+        if boolean is None:
+            differences.append({"field": "reality.camera.enabled", "kind": "invalid_value",
+                                "explain": "旧摄像头开关不可识别，未迁移。"})
+        else:
+            changes["camera.enabled"] = boolean
 
-    boolean = _boolean(camera.get("enabled"))
-    if boolean is not None:
-        changes["camera.enabled"] = boolean
-
-    for key, minimum, maximum in (
-        ("min_interval_seconds", 10, 3600),
-        ("capture_timeout_seconds", 2, 20),
-        ("analysis_timeout_seconds", 5, 90),
-    ):
-        if key not in camera:
+    for target, (minimum, maximum) in REALITY_INTEGER_BOUNDS.items():
+        raw = _value_at(source, target, missing)
+        if raw is missing:
             continue
-        converted = _bounded_int(camera[key], minimum, maximum)
-        target = f"camera.{key}"
+        converted = _bounded_int(raw, minimum, maximum)
         if converted is None:
             differences.append({
                 "field": f"reality.{target}",
@@ -107,63 +140,47 @@ def convert_reality_configuration(source) -> RealityConfigurationMigration:
         else:
             changes[target] = converted
 
-    if "default_playback_volume" in audio:
-        volume = _bounded_int(audio["default_playback_volume"], 0, 100)
-        if volume is None:
-            differences.append({
-                "field": "reality.audio.default_playback_volume",
-                "kind": "invalid_value",
-                "explain": "V1 音量不是 0 到 100 的整数，已跳过此项。",
-            })
+    if "timezone" in source:
+        timezone = source["timezone"]
+        try:
+            if type(timezone) is not str or not timezone.strip() or len(timezone.strip()) > 80:
+                raise ValueError()
+            ZoneInfo(timezone.strip())
+        except (ValueError, ZoneInfoNotFoundError):
+            differences.append({"field": "reality.timezone", "kind": "invalid_value",
+                                "explain": "旧时区在当前环境不可用，已跳过此项。"})
         else:
-            changes["audio.default_playback_volume"] = volume
+            changes["timezone"] = timezone.strip()
 
-    timezone = source.get("timezone")
-    if isinstance(timezone, str) and timezone.strip():
-        timezone = timezone.strip()
-        if len(timezone) <= 80:
-            try:
-                ZoneInfo(timezone)
-            except (ValueError, ZoneInfoNotFoundError):
-                differences.append({
-                    "field": "reality.timezone",
-                    "kind": "invalid_value",
-                    "explain": "V1 时区在当前环境不可用，已跳过此项。",
-                })
-            else:
-                changes["timezone"] = timezone
+    if "vision_provider_id" in source:
+        provider = source["vision_provider_id"]
+        if type(provider) is str and len(provider.strip()) <= 160:
+            if provider.strip():
+                changes["vision_provider_id"] = provider.strip()
+        else:
+            differences.append({"field": "reality.vision_provider_id", "kind": "invalid_value",
+                                "explain": "旧视觉模型选择不符合新版字段要求，未迁移。"})
 
-    if "index" in camera:
-        differences.append({
-            "field": "reality.camera.index",
-            "kind": "device_mapping_required",
-            "before": str(camera["index"])[:24],
-            "explain": "摄像头索引由当前设备扫描确定，V1 索引不会直接复用。",
-        })
-    if camera.get("proactive_curiosity_enabled") is True:
-        differences.append({
-            "field": "reality.camera.proactive_curiosity_enabled",
-            "kind": "v2_confirmation_required",
-            "explain": "主动摄像头策略不从旧配置启用；请在 V2 按当前角色和授权单独设置。",
-        })
-    if source.get("vision_provider_id"):
-        differences.append({
-            "field": "reality.vision_provider_id",
-            "kind": "provider_reselection_required",
-            "explain": "视觉提供方 ID 属于宿主安装配置，请在 V2 重新选择。",
-        })
-    if source.get("authorized_user_ids"):
-        differences.append({
-            "field": "reality.authorized_user_ids",
-            "kind": "identity_rebinding_required",
-            "explain": "旧版用户授权不会迁成 V2 身份授权，请在 V2 按当前私聊身份重新确认。",
-        })
+    for path, _ in _leaves(source):
+        if path in REALITY_SETTING_DEFAULTS:
+            continue
+        if path == "camera.index":
+            kind, explain = "device_mapping_required", "摄像头索引由当前设备扫描确定，旧索引不会直接复用。"
+        elif path == "camera.proactive_curiosity_enabled":
+            kind, explain = "v2_confirmation_required", "主动摄像头需按当前角色及管理员授权确认；其频率偏好可以接续。"
+        elif path == "authorized_user_ids" or path.endswith(("allowed_user_id", "admin_only", "allowed_devices")):
+            kind, explain = "identity_rebinding_required", "身份、管理员权限与设备授权按新版身份确认，未扩大采集或控制权限。"
+        elif path == "enabled" or path.startswith(("home.", "health.", "mobile.", "mihome.")):
+            kind, explain = "manual_review_required", "连接凭据、配对、设备或采集开关需在对应新版页面确认；本次不启动外部服务。"
+        else:
+            kind, explain = "unmapped", "当前没有核实过的同义消费入口，旧配置保留并列入核对。"
+        differences.append({"field": "reality." + path, "kind": kind, "explain": explain})
 
     return RealityConfigurationMigration(
         changes=changes,
         differences=tuple(differences),
         warnings=(
-            "本次只迁移摄像头基础参数、默认音量及时区；V2 已有非默认设置会保留。",
-            "设备索引、授权、视觉提供方、扬声器路由、提醒与历史数据不会从 V1 复制。",
+            "迁移摄像头、音量、时区及超时和有效期偏好；视觉模型仅在当前宿主兼容时接续，已有非默认设置保留。",
+            "设备索引、授权、配对凭据、采集和外部服务开关需核对；提醒与历史数据不会随配置复制。",
         ),
     )

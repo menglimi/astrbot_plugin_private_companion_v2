@@ -1,6 +1,6 @@
 "use strict";
 window.CompanionMaintenancePage = (() => {
-  const PREFIX = "/astrbot_plugin_private_companion_v2";
+  const PREFIX = "/astrbot_plugin_private_companion";
   const MEMORY_SAMPLE_INTERVAL_MS = 10000;
   const MEMORY_SAMPLE_DURATION_MS = 180000;
   const MEMORY_SAMPLE_LIMIT = 19;
@@ -233,7 +233,8 @@ window.CompanionMaintenancePage = (() => {
         : source?.available ? "已连接" : source?.installed ? "暂不可用" : key === "main" ? "待同步"
         : nativeTokenSources.has(key) ? "未就绪" : "未安装";
       return fmt(
-      '<button type="button" data-token-source="{{0}}" role="tab" aria-selected="{{1}}" class="{{2}}"><i data-lucide="{{3}}"></i><span>{{4}}</span><small data-state="{{5}}">{{5}}</small></button>',
+      /* 统计来源是 tablist，受控面板是下面整块统计区（id 见 tokenDashboardControlsMarkup）。 */
+      '<button type="button" data-token-source="{{0}}" role="tab" aria-controls="maint-token-source-panel" aria-selected="{{1}}" class="{{2}}"><i data-lucide="{{3}}"></i><span>{{4}}</span><small data-state="{{5}}">{{5}}</small></button>',
       key, state.tokenSource === key, state.tokenSource === key ? "is-active" : "", sourceIcons[key], label, status);
     }).join("");
   }
@@ -247,7 +248,7 @@ window.CompanionMaintenancePage = (() => {
       : reason);
     const explanation = summary?.reason || detail;
     return '<div class="maint-source-unavailable" role="status"><div class="maint-source-glyph"><i data-lucide="plug-zap"></i></div><div class="maint-source-copy">' +
-      '<span class="maint-eyebrow">SOURCE / ' + (summary?.installed ? "BRIDGE UNAVAILABLE" : "NOT CONNECTED") + '</span><strong>' + escapeHtml(pluginTitle) + '</strong><p>' + escapeHtml(status) + '</p><small>' + escapeHtml(explanation) +
+      '<span class="maint-eyebrow">来源 / ' + (summary?.installed ? "桥不可用" : "未连接") + '</span><strong>' + escapeHtml(pluginTitle) + '</strong><p>' + escapeHtml(status) + '</p><small>' + escapeHtml(explanation) +
       '</small><div class="maint-source-boundary">' + (local
         ? '<span><i data-lucide="layers-3"></i>当前角色分项</span><span><i data-lucide="receipt"></i>原始回执已保留</span>'
         : '<span><i data-lucide="circle-off"></i>独立账本未混算</span><span><i data-lucide="wallet-cards"></i>服务端余额未接入</span><span><i data-lucide="shield-check"></i>V2 角色预算保持独立</span>') + '</div>' +
@@ -357,7 +358,7 @@ window.CompanionMaintenancePage = (() => {
   function externalCacheUnavailableMarkup(source) {
     const name = escapeHtml(source?.display_name || "外部来源");
     return '<div class="maint-source-unavailable" role="status"><div class="maint-source-glyph"><i data-lucide="receipt-text"></i></div><div class="maint-source-copy">' +
-      '<span class="maint-eyebrow">CACHE / EXTERNAL SOURCE</span><strong>' + name + '缓存诊断</strong><p>该来源没有提供请求前缀签名和完整缓存诊断数据。</p>' +
+      '<span class="maint-eyebrow">缓存 / 外部来源</span><strong>' + name + '缓存诊断</strong><p>该来源没有提供请求前缀签名和完整缓存诊断数据。</p>' +
       '<small>Token 统计页仅展示该来源实际回传的缓存回执；V2 缓存诊断保持独立。</small><div class="maint-source-boundary"><span><i data-lucide="receipt"></i>来源回执独立展示</span><span><i data-lucide="circle-off"></i>不套用 V2 缓存数据</span></div>' +
       '<button type="button" class="maint-source-return" data-maint-nav="overview"><i data-lucide="arrow-left"></i><span>返回 Token 统计</span></button></div></div>';
   }
@@ -1543,7 +1544,7 @@ window.CompanionMaintenancePage = (() => {
         row.flow_state === "collecting" ? "预计收口 " + time(row.due_at) : "时限 " + time(row.deadline_at));
     }).join("") : '<div class="maint-empty"><span class="maint-empty-mark">—</span><p>当前角色还没有可展示的消息收口防抖轨迹。</p></div>';
     const sections = [];
-    if (show(["identity"])) sections.push('<section data-evidence-kind="identity" data-focus-target="identity-evidence"><div class="maint-subhead"><strong>统一身份与隔离</strong><span>REQ-041 / 本次管理请求</span></div>' +
+    if (show(["identity"])) sections.push('<section data-evidence-kind="identity" data-focus-target="identity-evidence"><div class="maint-subhead"><strong>统一身份与隔离</strong><span>本次管理请求</span></div>' +
       '<div class="maint-identity-checks">' + identityRows + '</div><p class="maint-evidence-note">只显示鉴权与账本边界的通过状态，不返回身份、账号、会话或角色标识。</p></section>');
     if (show(["storage", "model"])) sections.push('<section data-evidence-kind="storage" data-focus-target="storage-block"><div class="maint-subhead"><strong>V2 SQLite 存储</strong><span>' +
       escapeHtml(String(storage.journal_mode || "状态未知").toUpperCase()) + '</span></div><div class="maint-evidence-stats">' +
@@ -1673,7 +1674,7 @@ window.CompanionMaintenancePage = (() => {
         ["测试会产生费用或发送消息吗？", "文本探测与 TTS 合成会调用所选 Provider，可能计费；图片检查与 SQLite 检查只读，不会向联系人发送内容。", "test-zone", "查看测试"],
       ],
       identity: [
-        ["REQ-041 结果为什么只显示状态？", "管理身份与角色授权通过后才会返回本页；页面只给出当前请求的校验结论，不显示身份、账号、会话或角色标识。", "identity-evidence", "查看隔离证据"],
+        ["管理身份校验为什么只显示结论？", "管理身份与角色授权通过后才会返回本页；页面只给出当前请求的校验结论，不显示身份、账号、会话或角色标识。", "identity-evidence", "查看隔离证据"],
         ["Token 统计范围包含哪些对象？", "当前角色的 AstrBot 核心回复、历史 V2 回复和插件附加任务组成角色总用量，各来源只合计一次。其他 AstrBot 会话和外部插件不并入。", "identity-evidence", "查看账本边界"],
       ],
       model: [
@@ -1767,7 +1768,7 @@ window.CompanionMaintenancePage = (() => {
       : state.memoryComplete ? "检测完成 · " + samples.length + " 个样本"
         : state.memoryStopReason ? state.memoryStopReason + " · " + samples.length + " 个样本"
           : samples.length ? "已采集 " + samples.length + " 个样本" : "尚未运行";
-    return '<section class="maint-memory-diagnostic" aria-labelledby="maint-memory-heading"><div class="maint-memory-heading"><div><span class="maint-eyebrow">PROCESS / MEMORY</span><h4 id="maint-memory-heading">内存增长检测</h4><p>按需观察 AstrBot 进程 RSS；包含 AstrBot 与所有插件，不能单独归因到 V2。</p></div><div class="maint-memory-actions"><button type="button" data-memory-start ' + startDisabled + '><i data-lucide="play"></i><span>' + (state.memoryRunning ? "采样进行中" : "开始 3 分钟检测") + '</span></button><button type="button" data-memory-stop ' + stopHidden + '><i data-lucide="square"></i><span>停止</span></button></div></div>' +
+    return '<section class="maint-memory-diagnostic" aria-labelledby="maint-memory-heading"><div class="maint-memory-heading"><div><span class="maint-eyebrow">进程 / 内存</span><h4 id="maint-memory-heading">内存增长检测</h4><p>按需观察 AstrBot 进程 RSS；包含 AstrBot 与所有插件，不能单独归因到 V2。</p></div><div class="maint-memory-actions"><button type="button" data-memory-start ' + startDisabled + '><i data-lucide="play"></i><span>' + (state.memoryRunning ? "采样进行中" : "开始 3 分钟检测") + '</span></button><button type="button" data-memory-stop ' + stopHidden + '><i data-lucide="square"></i><span>停止</span></button></div></div>' +
       '<div class="maint-memory-result" data-state="' + assessment.state + '"><strong>' + escapeHtml(assessment.label) + '</strong><span>' + escapeHtml(assessment.detail) + '</span></div>' +
       '<div class="maint-memory-content"><div class="maint-memory-chart-wrap">' + memoryChartMarkup(samples) + '<div class="maint-memory-progress" role="progressbar" aria-label="内存采样进度" aria-valuemin="0" aria-valuemax="' + MEMORY_SAMPLE_LIMIT + '" aria-valuenow="' + samples.length + '"><i style="--progress:' + progress + '%"></i></div></div>' +
       '<div class="maint-memory-metrics"><div><span>当前 RSS</span><strong>' + (latest ? memorySize(latest.rss_bytes) : "—") + '</strong></div><div><span>Python 堆（仅已开启追踪）</span><strong>' + heap + '</strong></div><div><span>采样来源</span><strong>' + escapeHtml(source) + '</strong></div><div><span>检测状态</span><strong>' + escapeHtml(status) + '</strong></div></div></div>' +
@@ -1902,12 +1903,12 @@ window.CompanionMaintenancePage = (() => {
       '<nav class="maint-diagnostic-categories" role="group" aria-label="问题类型">' +
       categoriesMarkup(items, data, stats) + '</nav></aside>';
     const signalsMarkup = '<section class="maint-diagnostic-signals" aria-labelledby="maint-diagnostic-signals-heading">' +
-      '<div class="maint-diagnostic-section-heading"><div><span class="maint-eyebrow">SIGNALS / 02</span>' +
+      '<div class="maint-diagnostic-section-heading"><div><span class="maint-eyebrow">信号 / 02</span>' +
       '<h4 id="maint-diagnostic-signals-heading">其他运行诊断</h4><p>先处理当前分类信号，再运行按需检测</p></div>' +
       '<div class="maint-diagnostic-filter" role="group" aria-label="按严重程度筛选">' + severityButtons + '</div></div>' +
       '<div class="maint-diagnostic-items">' + issueRows + '</div></section>';
     const checksMarkup = '<section class="maint-diagnostic-checks" aria-labelledby="maint-diagnostic-checks-heading">' +
-      '<div class="maint-diagnostic-section-heading"><div><span class="maint-eyebrow">CHECKS / 03</span>' +
+      '<div class="maint-diagnostic-section-heading"><div><span class="maint-eyebrow">检查 / 03</span>' +
       '<h4 id="maint-diagnostic-checks-heading">按需检测</h4><p>真实投递需确认；Provider 与 TTS 可能计费。</p></div></div>' +
       proactiveTestMarkup() + memoryDiagnosticMarkup() + integrationsMarkup(data) + '</section>';
     const laneTitle = state.category === "all" ? "事件时间线"
@@ -1924,7 +1925,7 @@ window.CompanionMaintenancePage = (() => {
       escapeHtml((diagnosticCategories.find(item => item[0] === state.category) || ["", "全部"])[1]) +
       '</summary><div>' + diagnosticFaqMarkup(data, stats) + '</div></details>';
     return '<section class="maint-diagnostics-panel" aria-labelledby="maint-diagnostics-heading"><div class="maint-panel-heading"><div>' +
-      '<span class="maint-eyebrow">DIAGNOSTICS / 01</span><h3 id="maint-diagnostics-heading">排障与测试</h3></div>' +
+      '<span class="maint-eyebrow">诊断 / 01</span><h3 id="maint-diagnostics-heading">排障与测试</h3></div>' +
       '<div class="maint-diagnostic-heading-actions"><span class="maint-check-state" data-state="' + (errors || warnings ? "warn" : "ok") + '">' +
       (errors ? errors + " 项错误" : warnings ? warnings + " 项关注" : "运行正常") + '</span>' + clearResultsButton + refreshButton +
       '</div></div>' + resultNotice + '<div class="maint-diagnostic-workspace">' + overviewMarkup +
@@ -2484,7 +2485,7 @@ window.CompanionMaintenancePage = (() => {
       const known = Math.max(0, (Number(row?.calls) || 0) - (Number(row?.unconfirmed_calls) || 0));
       return known ? (Number(row.cache_reported_calls) || 0) * 100 / known : 0;
     };
-    return '<section class="maint-cache-panel" aria-labelledby="maint-cache-heading"><div class="maint-panel-heading"><div><span class="maint-eyebrow">CACHE / 02</span><h3 id="maint-cache-heading">缓存诊断</h3><p class="maint-scope-note">' + escapeHtml(localSourceNames[state.tokenSource] || "角色总用量") + '</p></div>' +
+    return '<section class="maint-cache-panel" aria-labelledby="maint-cache-heading"><div class="maint-panel-heading"><div><span class="maint-eyebrow">缓存 / 02</span><h3 id="maint-cache-heading">缓存诊断</h3><p class="maint-scope-note">' + escapeHtml(localSourceNames[state.tokenSource] || "角色总用量") + '</p></div>' +
       fmt('<span class="maint-cache-chip" data-state="{{0}}">{{1}}</span></div>',
         noTelemetry || noHitSamples || stats.cacheRate == null ? "unknown" : stats.cacheRate < 40 ? "warn" : "ok",
         noTelemetry ? "等待确认" : stats.cacheRate == null ? "暂无命中率" : percent(stats.cacheRate) + " 命中") + cacheControlsMarkup(localDay(data.generated_at)) +
@@ -2555,10 +2556,11 @@ window.CompanionMaintenancePage = (() => {
   }
 
   function tokenDashboardControlsMarkup(today, roleData) {
+    /* 工具栏之后紧跟的统计区就是「统计来源」这一组 tab 的受控面板。 */
     return '<div class="maint-token-toolbar"><div class="maint-token-source-control"><span>统计来源</span><div class="maint-source-tabs" role="tablist" aria-label="Token 统计来源">' + sourceTabsMarkup() + '</div></div>' +
-      periodControlsMarkup(today, "Token 统计时间范围") + '</div><div class="maint-token-calibration-row"><span><i data-lucide="shield-check"></i>Provider 已确认用量；未知调用不估算，外部账本独立统计。</span>' +
+      periodControlsMarkup(today, "Token 统计时间范围") + '</div><div id="maint-token-source-panel" role="tabpanel" aria-label="Token 统计明细"><div class="maint-token-calibration-row"><span><i data-lucide="shield-check"></i>Provider 已确认用量；未知调用不估算，外部账本独立统计。</span>' +
       '<details class="maint-source-details"><summary><i data-lucide="info"></i><span>统计口径</span></summary><div class="maint-source-grid"><article data-state="active"><span>纳入统计</span><strong>当前角色的核心回复与插件任务</strong><small>核心观测、历史 V2 回复和插件任务分列；对话合计与角色总量各计一次</small></article><article data-state="limited"><span>其他来源</span><strong>AstrBot 全部会话与外部插件</strong><small>全局统计未接入；外部来源不并入角色预算</small></article><article data-state="limited"><span>可用性</span><strong>实际多轮与最后响应分列</strong><small>核心费用未知；SDK 默认缓存 0 不等同缓存实报</small></article></div></details>' +
-      '<details class="maint-token-source-comparison"><summary>来源同周期对照</summary>' + sourceComparisonMarkup(roleData) + '</details></div>';
+      '<details class="maint-token-source-comparison"><summary>来源同周期对照</summary>' + sourceComparisonMarkup(roleData) + '</details></div></div>';
   }
 
   function localTokenDashboardMarkup(data, stats, label, today, periodComparison, providerRows, taskRows, chartData) {
@@ -2955,20 +2957,20 @@ window.CompanionMaintenancePage = (() => {
       : '<div class="maint-empty"><span class="maint-empty-mark">—</span><p>' +
         (report ? "近 7 日暂无对话样本。" : "回复效率数据暂不可用。") + '</p></div>';
     return '<div class="maint-efficiency-page"><section class="maint-efficiency-panel" aria-label="近七日耗时概览">' +
-      '<div class="maint-panel-heading"><div><span class="maint-eyebrow">REPLY / 7 DAYS</span><h3>近 7 日耗时概览</h3></div><span class="maint-efficiency-count">' +
+      '<div class="maint-panel-heading"><div><span class="maint-eyebrow">回复 / 近 7 天</span><h3>近 7 日耗时概览</h3></div><span class="maint-efficiency-count">' +
       number(sampleCount) + ' 条对话 · ' + (hasCore ? number(summary.send_returned_samples) + ' 条核心发送返回 · ' +
         number(report?.by_source?.legacy_v2_conversation?.completed) + ' 条历史完整送达' : number(summary.completed) + ' 条完整送达') + ' · Laya ' + number(summary.laya_calls || 0) +
       ' 次调用 / ' + number(summary.laya_skipped || 0) + ' 次跳过 / ' + number(summary.laya_failed || 0) + ' 次失败</span></div><div class="maint-efficiency-metrics">' +
       metricMarkup + '</div>' + (hasCore ? '<p class="maint-scope-note">核心指标以原生发送方法返回为终点；流式发送可能早于 Agent 完成。平台确认未观测，历史平台回执另列。</p>' : "") + '</section><div class="maint-efficiency-analysis"><section class="maint-efficiency-panel" aria-label="阶段观测覆盖率">' +
-      '<div class="maint-panel-heading"><div><span class="maint-eyebrow">OBSERVABILITY</span><h3>阶段观测覆盖</h3></div></div>' +
+      '<div class="maint-panel-heading"><div><span class="maint-eyebrow">可观测性</span><h3>阶段观测覆盖</h3></div></div>' +
       (coverageStages.length && sampleCount ? '<div class="maint-efficiency-coverage">' + coverageMarkup + '</div>' : emptyMarkup) +
-      '</section><section class="maint-efficiency-panel maint-efficiency-trend-panel" aria-label="每日回复趋势"><div class="maint-panel-heading"><div><span class="maint-eyebrow">DAILY / P50</span><h3>每日回复时长</h3></div><span class="maint-efficiency-count">每日中位数</span></div>' +
+      '</section><section class="maint-efficiency-panel maint-efficiency-trend-panel" aria-label="每日回复趋势"><div class="maint-panel-heading"><div><span class="maint-eyebrow">每日 / P50</span><h3>每日回复时长</h3></div><span class="maint-efficiency-count">每日中位数</span></div>' +
       (dailyValues.length ? '<div class="maint-efficiency-daily"><div class="maint-efficiency-legend">' + dailyLegend +
         '</div><div class="maint-efficiency-trend-meta"><span>单位：' + dailyUnit[1] + '</span><span>' + escapeHtml(dailyRange) + '</span></div><div class="maint-efficiency-trend-chart" role="group" aria-label="每日回复时长中位数柱状图，共用纵轴"><div class="maint-efficiency-trend-axis" aria-hidden="true">' +
         dailyAxis + '</div><div class="maint-efficiency-trend-plot"><div class="maint-efficiency-trend-guides" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div><div class="maint-efficiency-trend-columns" style="--day-count:' + daily.length + '">' +
         dailyMarkup + '</div></div></div></div>' : '<div class="maint-empty"><span class="maint-empty-mark">—</span><p>' +
         (hasCore ? '暂无核心发送返回或历史回执样本。' : '暂无完整送达样本。') + '</p></div>') +
-      '</section></div><section class="maint-efficiency-panel maint-efficiency-recent" aria-label="近期回复样本"><div class="maint-panel-heading"><div><span class="maint-eyebrow">RECENT / ' +
+      '</section></div><section class="maint-efficiency-panel maint-efficiency-recent" aria-label="近期回复样本"><div class="maint-panel-heading"><div><span class="maint-eyebrow">最近 / ' +
       number(samples.length) + '</span><h3>近期回复样本</h3></div></div>' +
       (recentMarkup || emptyMarkup) + '</section></div>';
   }
@@ -3034,11 +3036,11 @@ window.CompanionMaintenancePage = (() => {
       recent: "最近调用", prompts: "任务提示词"};
     const boardDescriptions = {efficiency: "近 7 日 · 核心发送耗时与历史投递耗时"};
     const boardTitle = boardTitles[state.activeMaintenanceNav] || "运行态势";
-    root.innerHTML = '<div class="maint-board"><header class="maint-board-head"><div class="maint-board-copy"><span class="maint-eyebrow">COMPANION / SIGNAL ROOM</span><h2>' + boardTitle + '</h2><p>' +
+    root.innerHTML = '<div class="maint-board"><header class="maint-board-head"><div class="maint-board-copy"><span class="maint-eyebrow">陪伴 / 信号室</span><h2>' + boardTitle + '</h2><p>' +
       (boardDescriptions[state.activeMaintenanceNav] || "运行态势 · 当前角色用量、预算与调用构成。") + '</p></div>' +
       '<div class="maint-board-actions"><span class="maint-live" data-state="' + (state.error ? "warn" : "ok") + '"><i></i>' + (state.loading ? "正在同步" : state.error ? "同步异常" : "已连接") +
       '</span><span class="maint-updated">同步于 ' + escapeHtml(time(data.generated_at)) + '</span>' + exportMarkup + '<button class="maint-refresh" type="button" data-refresh ' + (state.loading ? "disabled" : "") + ' aria-label="刷新运行统计" title="刷新运行统计"><i data-lucide="refresh-cw"></i><span>' + (state.loading ? "同步中" : "刷新") +
-      '</span></button></div></header>' + navMarkup + '<section class="maint-view" data-maint-view="overview"' + (state.activeMaintenanceNav === "overview" ? "" : " hidden") + '><section class="maint-token-section" id="maint-token-section" aria-labelledby="maint-usage-heading"><div class="maint-panel-heading"><div><span class="maint-eyebrow">TOKENS / 00</span><h3 id="maint-usage-heading">Token 统计管理</h3><p class="maint-scope-note"><i data-lucide="shield-check"></i> ' +
+      '</span></button></div></header>' + navMarkup + '<section class="maint-view" data-maint-view="overview"' + (state.activeMaintenanceNav === "overview" ? "" : " hidden") + '><section class="maint-token-section" id="maint-token-section" aria-labelledby="maint-usage-heading"><div class="maint-panel-heading"><div><span class="maint-eyebrow">令牌 / 00</span><h3 id="maint-usage-heading">Token 统计管理</h3><p class="maint-scope-note"><i data-lucide="shield-check"></i> ' +
       escapeHtml(tokenScopeNote) +
       '</p></div></div>' +
       '<div class="maint-token-redesign">' + tokenDashboardControlsMarkup(today, roleData) + (localSource
@@ -3049,7 +3051,7 @@ window.CompanionMaintenancePage = (() => {
       '<section class="maint-view" data-maint-view="cache"' + (state.activeMaintenanceNav === "cache" ? "" : " hidden") + '>' + cacheView + '</section>' +
       '<section class="maint-view" data-maint-view="efficiency"' + (state.activeMaintenanceNav === "efficiency" ? "" : " hidden") + '>' +
       replyEfficiencyMarkup(roleData.reply_efficiency) + '</section>' +
-      '<section class="maint-view" data-maint-view="recent"' + (state.activeMaintenanceNav === "recent" ? "" : " hidden") + '><section class="maint-recent-panel" id="maint-recent" aria-labelledby="maint-recent-heading"><div class="maint-panel-heading"><div><span class="maint-eyebrow">TRACE / 03</span><h3 id="maint-recent-heading">最近调用</h3></div><div class="maint-trace-controls"><span class="maint-recent-count">' +
+      '<section class="maint-view" data-maint-view="recent"' + (state.activeMaintenanceNav === "recent" ? "" : " hidden") + '><section class="maint-recent-panel" id="maint-recent" aria-labelledby="maint-recent-heading"><div class="maint-panel-heading"><div><span class="maint-eyebrow">追踪 / 03</span><h3 id="maint-recent-heading">最近调用</h3></div><div class="maint-trace-controls"><span class="maint-recent-count">' +
       escapeHtml(recentSourceLabel) + ' · ' + number(recentMatches.length) + ' / ' + number(recentData?.recent?.length || 0) + ' 条</span><input type="search" data-call-search aria-label="搜索 Provider、任务、失败类型或日期" placeholder="筛 Provider / 任务 / 失败" value="' + escapeHtml(state.callQuery) + '"><select data-call-filter aria-label="筛选最近调用"><option value="all" ' + (state.callFilter === "all" ? "selected" : "") + '>全部记录</option><option value="failed" ' + (state.callFilter === "failed" ? "selected" : "") +
       '>失败</option><option value="uncertain" ' + (state.callFilter === "uncertain" ? "selected" : "") + '>未确认</option><option value="cache-low" ' + (state.callFilter === "cache-low" ? "selected" : "") + '>低缓存命中</option></select>' +
       (state.traceFilter ? '<button type="button" class="maint-text-action" data-clear-trace>清除排行筛选</button>' : "") + '<button type="button" class="maint-text-action" data-toggle-calls>' + (state.showAllCalls ? "收起" : "查看更多") +

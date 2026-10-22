@@ -9,6 +9,7 @@ remain on their user, device or relationship routes.
 """
 
 import json
+import logging
 
 from astrbot.api.web import request
 from companion_v2.configuration.management import (AcquaintanceManagement, BusyGateManagement,
@@ -27,6 +28,7 @@ from companion_v2.configuration.management import (AcquaintanceManagement, BusyG
                                                    RoleProfileManagement,
                                                    RelationshipProfileManagement,
                                                    QzoneManagement,
+                                                   RelayManagement,
                                                    ScreenManagement, WardrobeManagement)
 from companion_v2.configuration.models import ConfigurationError
 from companion_v2.execution.models import TaskError
@@ -38,13 +40,15 @@ from .knowledge_sources import AstrBotKnowledgeSources
 from .management_identity import dashboard_operator
 
 
-PREFIX = "/astrbot_plugin_private_companion_v2/config"
+PREFIX = "/astrbot_plugin_private_companion/config"
+logger = logging.getLogger(__name__)
 SECTIONS = {"quota": ImageQuotaManagement, "image_review": ImageReviewManagement,
             "image.output": ImageOutputManagement,
             "busy_gate": BusyGateManagement,
             "content.authoring": ContentAuthoringManagement,
             "reaction": ReactionRetrievalManagement, "budget": ModelBudgetManagement,
             "recall": RecallManagement, "screen": ScreenManagement,
+            "relay": RelayManagement,
             # QQ 空间拓展的角色级开关与节流；安装与逐会话同意不在这里，归能力安装路由。
             "qzone": QzoneManagement,
             "person": AcquaintanceManagement,
@@ -194,31 +198,51 @@ class ConfigurationWebAPI:
         return wanted
 
     async def _status(self, app, context, operator, query, *, host_context=None, section_names=None):
-        sections = {}
-        for name in section_names if section_names is not None else self._requested(query):
-            sections[name] = {**self.sections[name](app, context).status(operator).unwrap(), "section": name}
-            if name == "knowledge":
-                section = sections[name]
-                try:
-                    selected = KnowledgeSettings.from_values(section["settings"]).knowledge_source_ids()
-                except Exception:
-                    selected = ()
-                try:
-                    sources = await AstrBotKnowledgeSources(host_context).list_sources()
-                    sources_available = bool(getattr(host_context, "kb_manager", None))
-                except Exception:
-                    sources = []
-                    sources_available = False
-                available = {item["id"] for item in sources}
-                available.update(doc["id"] for item in sources for doc in item.get("documents", ()))
-                for identifier in selected:
-                    if identifier not in available:
-                        sources.append({"id": identifier, "type": "missing", "kb_id": "",
-                                        "name": "不可用来源 · " + identifier,
-                                        "documents": []})
-                section["knowledge_sources"] = sources
-                section["knowledge_sources_available"] = sources_available
-        return {"sections": sections}
+        sections, section_errors = {}, {}
+        requested = tuple(section_names) if section_names is not None else self._requested(query)
+        for name in requested:
+            try:
+                result = self.sections[name](app, context).status(operator)
+                if result.failure is not None:
+                    if len(requested) == 1:
+                        raise TaskError(result.failure.code, result.failure.reason)
+                    section_errors[name] = {"code": result.failure.code}
+                    continue
+                sections[name] = {**result.unwrap(), "section": name}
+                if name == "knowledge":
+                    section = sections[name]
+                    try:
+                        selected = KnowledgeSettings.from_values(section["settings"]).knowledge_source_ids()
+                    except Exception:
+                        selected = ()
+                    try:
+                        sources = await AstrBotKnowledgeSources(host_context).list_sources()
+                        sources_available = bool(getattr(host_context, "kb_manager", None))
+                    except Exception:
+                        sources = []
+                        sources_available = False
+                    available = {item["id"] for item in sources}
+                    available.update(doc["id"] for item in sources for doc in item.get("documents", ()))
+                    for identifier in selected:
+                        if identifier not in available:
+                            sources.append({"id": identifier, "type": "missing", "kb_id": "",
+                                            "name": "不可用来源 · " + identifier,
+                                            "documents": []})
+                    section["knowledge_sources"] = sources
+                    section["knowledge_sources_available"] = sources_available
+            except (TaskError, ConfigurationError) as error:
+                sections.pop(name, None)
+                if len(requested) == 1:
+                    raise
+                section_errors[name] = {"code": error.code}
+            except Exception:
+                sections.pop(name, None)
+                logger.exception("[CompanionV2] 配置分区读取失败 section=%s", name)
+                if len(requested) == 1:
+                    raise TaskError("configuration_section_read_failed",
+                                    "the configuration section could not be read") from None
+                section_errors[name] = {"code": "configuration_section_read_failed"}
+        return {"sections": sections, "section_errors": section_errors}
 
     async def status(self):
         return await self._run("status")

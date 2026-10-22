@@ -36,7 +36,7 @@ class PreparedReply:
 
     def speech(self, policy):
         candidates = None
-        if policy.generation_mode == "model_tag" or policy.trigger_mode == "adaptive":
+        if policy.uses_model_tags:
             originals = speech_candidates(self.visible, self.source_parts, self.spans, policy)
             candidates = tuple(originals[index] for index in self.kept_indices)
         return speech_decisions(self.visible, self.parts, self.spans, policy, candidates=candidates)

@@ -14,7 +14,7 @@ from .waiting import deadline_timestamp, wait_for_output
 
 
 SCHEMA = "companion.native-provider.v1"
-PLUGIN_ID = "astrbot_plugin_private_companion_v2.image"
+PLUGIN_ID = "astrbot_plugin_private_companion.image"
 PROVIDER_ID = "image.native"
 REFERENCE_ROLES = frozenset((*EDIT_REFERENCE_ROLES, "edit_mask"))
 IMAGE_OPERATIONS = ("generate", "edit", "mask_edit")

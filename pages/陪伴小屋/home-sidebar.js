@@ -270,9 +270,18 @@ window.CompanionHomeSidebar = (() => {
       && input.unavailableCode?.("life") === "staging_not_initialized";
     const runtimeMissing = stateRuntimeMissing || lifeRuntimeMissing;
     const planning = state?.planning, nextCheck = stamp(planning?.next_check);
+    const dailyResult = planning?.daily_result;
+    const planningIncomplete = planning?.enabled && planning.calendar_enabled
+      && (planning.running || ["failed","expired","dead_letter","cancelled","uncertain","blocked","deferred"].includes(dailyResult?.state));
+    const planningFailure = planningIncomplete && !planning.running;
+    const planningFailureLabel = ({provider_wait_timed_out:"模型等待超时",timeout:"执行超时",
+      model_usage_unknown:"模型调用未完成确认",response_contract_rejected:"模型返回格式不符合日程要求",
+      planning_output_invalid:"模型返回的日程无效",worker_error:"生成失败"})[dailyResult?.code] || "生成未完成";
+    const nextReview = stamp(planning?.next_review_at);
     const planningNote = planning?.enabled
       ? !planning.calendar_enabled ? "日历写入尚未开启，自动规划暂停"
         : planning.running ? "自动规划正在检查日程"
+          : planningFailure ? `当日规划未完成：${planningFailureLabel}${nextReview != null ? ` · ${moment(nextReview, now, zone)} 重新评估剩余时段` : ""}`
           : nextCheck != null ? `自动规划已开启 · 调度巡检 ${moment(nextCheck, now, zone)}`
             : "自动规划已开启 · 暂无近期计划"
       : "";
@@ -296,7 +305,7 @@ window.CompanionHomeSidebar = (() => {
       }
     }
     const emptyTitle = loading ? "正在读取日程…" : calendarRead && lifeRead
-      ? state?.occurrences?.partial ? "日程未完整读取" : "今日暂无安排"
+      ? state?.occurrences?.partial ? "日程未完整读取" : planningIncomplete ? planning.running ? "今日规划正在生成" : "今日规划尚未生成" : "今日暂无安排"
       : "日程暂不可读取";
     const row = (item, current=false) => `<li class="home-agenda-item" data-tone="${item.tone}"${current ? ` data-current="true" aria-current="time"` : ""}><span class="home-agenda-dot" aria-hidden="true"></span><div class="home-agenda-body">
       <time${item.start == null ? "" : ` datetime="${new Date(item.start).toISOString()}"`}>${e(windowText(item, now, zone))}</time><strong>${e(item.title)}</strong><small>${e(item.label)}</small>
@@ -310,7 +319,7 @@ window.CompanionHomeSidebar = (() => {
       .sort((a,b)=>(a.start ?? Infinity)-(b.start ?? Infinity) || a.order-b.order || a.key.localeCompare(b.key));
     const coverageComplete = calendarRead && lifeRead && !state?.occurrences?.partial
       && !state?.occurrences?.skipped && !state?.occurrences?.scan_truncated
-      && !state?.occurrences?.occurrences_truncated;
+      && !state?.occurrences?.occurrences_truncated && !planningIncomplete;
     const rows = timelineRows(live, now, zone, coverageComplete);
     const currentGap = rows.find(item => item.type === "gap" && item.current);
     const clockLabel = loading ? "正在读取当前活动…" : lifeRead

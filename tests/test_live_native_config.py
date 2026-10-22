@@ -45,11 +45,11 @@ class LiveNativeConfigTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_or_failed_native_saver_never_creates_home_config(self):
         with patch("os.path.expanduser", return_value=str(self.legacy_home)):
-            plain = PageConfigManager(NS(config={}), "astrbot_plugin_private_companion_v2.live", Mock())
+            plain = PageConfigManager(NS(config={}), "astrbot_plugin_private_companion.live", Mock())
             self.assertEqual(plain.read_schema()["bilibili_room_id"]["type"], "int")
             self.assertFalse(await plain.persist())
 
-            native = PageConfigManager(NS(config=self.settings), "astrbot_plugin_private_companion_v2.live", Mock())
+            native = PageConfigManager(NS(config=self.settings), "astrbot_plugin_private_companion.live", Mock())
             with patch.object(self.settings, "save_config", side_effect=OSError("synthetic write failure")):
                 self.assertFalse(await native.persist())
             self.assertEqual(list(self.legacy_home.rglob("*.json")), [])

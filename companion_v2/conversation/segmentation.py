@@ -17,6 +17,64 @@ DEFAULT_RULE_REGEX = r"(?<=[。！？!?…~～])\s*|\n+"
 PART_GAP_MODES = frozenset(("fixed", "random", "log"))
 
 
+def _visible_length(text):
+    return sum(not char.isspace() for char in text)
+
+
+def _balanced_groups(parts, limit):
+    """Merge adjacent natural units evenly while preserving their exact text."""
+    if len(parts) <= limit:
+        return tuple(parts)
+    sizes = tuple(_visible_length(part) for part in parts)
+    remaining_chars = sum(sizes)
+    start, remaining_groups, grouped = 0, limit, []
+    while remaining_groups > 1:
+        target = remaining_chars / remaining_groups
+        latest_end = len(parts) - remaining_groups + 1
+        accumulated, best_end, best_distance = 0, start + 1, None
+        for end in range(start + 1, latest_end + 1):
+            accumulated += sizes[end - 1]
+            distance = abs(accumulated - target)
+            if best_distance is None or distance < best_distance:
+                best_end, best_distance = end, distance
+        grouped.append("".join(parts[start:best_end]))
+        remaining_chars -= sum(sizes[start:best_end])
+        start = best_end
+        remaining_groups -= 1
+    grouped.append("".join(parts[start:]))
+    return tuple(grouped)
+
+
+def _pacing_factor(settings):
+    """Gently stretch inter-part spacing when the role is low on energy or sleepy."""
+    factor = settings.get("state_pacing_factor")
+    if type(factor) in (int, float) and not math.isnan(factor) and not math.isinf(factor):
+        return min(1.5, max(0.75, float(factor)))
+    energy = settings.get("role_energy")
+    factor = 1.0
+    if type(energy) is int:
+        if energy <= 25:
+            factor *= 1.25
+        elif energy <= 45:
+            factor *= 1.12
+        elif energy >= 85:
+            factor *= 0.92
+    if settings.get("role_sleepy") is True:
+        factor = max(factor, 1.25)
+    return min(1.5, max(0.75, factor))
+
+
+def _visible_characters(text):
+    """Count visible characters for pacing, not words or alphanumerics.
+
+    Punctuation-only and emoji-only bubbles are common human messages; counting
+    only alphanumerics made them look like zero-length text and produced a
+    0.1-second "machine burst".  Non-whitespace keeps Chinese, English, emoji and
+    punctuation on the same scale, with one as the floor.
+    """
+    return max(1, sum(1 for char in str(text or "") if not char.isspace()))
+
+
 def part_gap_seconds(settings, text, seed):
     """Resolve one stable inter-part delay from the sealed reply settings."""
     mode = settings.get("part_gap_mode", "fixed")
@@ -26,14 +84,18 @@ def part_gap_seconds(settings, text, seed):
     upper = settings.get("part_gap_max_ms", 3500) / 1000
     entropy = hashlib.sha256(str(seed).encode("utf-8")).digest()
     fraction = int.from_bytes(entropy[:8], "big") / ((1 << 64) - 1)
+    factor = _pacing_factor(settings)
     if mode == "random":
-        return lower + (upper - lower) * fraction
+        return min(60.0, (lower + (upper - lower) * fraction) * factor)
     if mode == "log":
+        # The operator-visible lower/upper bounds used to be dead in log mode.
+        # Clamp the length-derived base first, then apply the role pacing factor
+        # and a small stable jitter.  This keeps short reactions from arriving
+        # almost instantly and long replies from turning into a metronome.
         base = settings.get("part_gap_log_base", 2.1)
-        characters = (len(text.split()) if all(ord(char) < 128 for char in text)
-                      else sum(char.isalnum() for char in text))
-        nominal = math.log(characters + 1, base)
-        return min(60.0, max(0.1, nominal + fraction * 0.5))
+        nominal = math.log(_visible_characters(text) + 1, base)
+        bounded = min(max(upper, lower), max(lower, nominal))
+        return min(60.0, max(0.1, (bounded + fraction * 0.5) * factor))
     raise ValueError("part spacing mode is invalid")
 
 
@@ -42,13 +104,16 @@ def minimum_part_gap_seconds(settings, text):
     mode = settings.get("part_gap_mode", "fixed")
     if mode == "fixed":
         return settings.get("part_gap_ms", 0) / 1000
+    lower = settings.get("part_gap_min_ms", 1500) / 1000
+    upper = settings.get("part_gap_max_ms", 3500) / 1000
+    factor = _pacing_factor(settings)
     if mode == "random":
-        return settings.get("part_gap_min_ms", 1500) / 1000
+        return min(60.0, lower * factor)
     if mode == "log":
         base = settings.get("part_gap_log_base", 2.1)
-        characters = (len(text.split()) if all(ord(char) < 128 for char in text)
-                      else sum(char.isalnum() for char in text))
-        return min(60.0, max(0.1, math.log(characters + 1, base)))
+        nominal = math.log(_visible_characters(text) + 1, base)
+        bounded = min(max(upper, lower), max(lower, nominal))
+        return min(60.0, max(0.1, bounded * factor))
     raise ValueError("part spacing mode is invalid")
 _WIDTH_VARIANTS = (
     (",", "，"), (".", "．", "。"), ("?", "？"), ("!", "！"), (";", "；"),
@@ -150,7 +215,7 @@ def _word_boundaries(text, words, protected):
 DEFAULT_PROMPT = (
     "按内容自然决定是否拆成多条消息。日常聊天通常先把一次完整回应放在一个气泡里；若几句是在补充同一反应、心情、解释或因果，优先合在一起，不按每个句号逐条发送。"
     "只有出现自然停顿、确实另起一个独立问题或转到另一件事时再分段，让每条气泡都独立读得通。不要拆开一句话、称呼与回应或紧密相连的步骤。长文、教程、代码、引用、列表、表格、链接和格式化内容保持完整，主题确实转折时再分段。"
-    "不为凑条数而拆，也不为达到规则字数而牺牲意思完整；完整回应后的自然追问可另发一条。连续标点（如 ...？、？！）留在同一条，避免气泡以孤立标点开头。每条正文首尾不填空行。"
+    "提前看完整条回复再安排边界；避免前几条很短、把大量剩余内容堆到最后一条。不为凑条数而拆，也不为达到规则字数而牺牲意思完整；完整回应后的自然追问可另发一条。连续标点（如 ...？、？！）留在同一条，避免气泡以孤立标点开头。每条正文首尾不填空行。"
     "每个模型指定的边界使用完整标记 {{split_marker}}，在 text 字符串内单独占一行。它只表示消息边界，不属于正文；不要借此删改、概括或重排原文，也不要放进引文、代码、列表或链接。"
     "普通换行和空行不代表模型指定边界；确有需要时才用标记。JSON 字符串中的换行正确转义。claims 使用各段正文原句，不含标记。"
 )
@@ -225,11 +290,11 @@ class SegmentationPolicy:
             return ("".join(parts),)
         if not self.llm_controlled:
             parts = ("".join(parts),)
-        # Excess boundaries are merged, never dropped or rejected. Explicit
-        # boundaries get the budget before optional rules split the longest part.
+        # Excess boundaries are merged, never dropped or rejected. Balanced
+        # groups avoid a short opening followed by one oversized tail.
         parts = list(parts)
         if len(parts) > self.max_segments:
-            parts[self.max_segments - 1:] = ["".join(parts[self.max_segments - 1:])]
+            parts = list(_balanced_groups(parts, self.max_segments))
         within_rule_limit = sum(map(len, parts)) <= self.threshold
         # Rule completion is part of the segmentation pipeline whenever the
         # overall segmentation switch is on.  ``rules_enabled`` remains a
@@ -237,8 +302,8 @@ class SegmentationPolicy:
         # choice and must never disable the deterministic fallback.
         apply_rules = within_rule_limit
         if apply_rules:
-            # Repeatedly consider remaining unsplit candidates in source order,
-            # preferring the longest, without splitting a rule result twice.
+            # Split natural units first, then merge adjacent units into balanced
+            # groups within the remaining budget.
             while True:
                 count = sum(len(p) if isinstance(p, tuple) else 1 for p in parts)
                 candidates = [i for i, p in enumerate(parts) if isinstance(p, str)]
@@ -310,13 +375,17 @@ class SegmentationPolicy:
         for end in self.rule_boundaries(text):
             if end <= start:
                 continue
-            visible_length = sum(not char.isspace() for char in text[start:end])
-            if (visible_length < self.min_segment_chars
-                    or len(text[end:].strip()) < self.min_segment_chars):
+            if (_visible_length(text[start:end]) < self.min_segment_chars
+                    or _visible_length(text[end:]) < self.min_segment_chars):
                 continue
             parts.append(text[start:end])
             start = end
-            if len(parts) == limit - 1:
-                break
-        parts.append(text[start:])
-        return tuple(parts)
+        tail = text[start:]
+        if tail:
+            if parts and _visible_length(tail) < self.min_segment_chars:
+                parts[-1] += tail
+            else:
+                parts.append(tail)
+        if not parts:
+            return (text,)
+        return _balanced_groups(parts, limit)

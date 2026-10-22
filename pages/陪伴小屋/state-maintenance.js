@@ -515,7 +515,7 @@ window.CompanionStateMaintenance = (() => {
     if(draft.kind==="settings")return configGroup(1,"展示开关","关闭后不再请求对应展示；授权未通过时不会发送。",
       ["typing_enabled","presence_enabled","typing_refresh_seconds"].map(name=>configField(name,values,e,{tile:name==="typing_refresh_seconds",help:name==="typing_refresh_seconds"?"取值为 1–10 秒；只在当前会话有进行中的回复时刷新。":""})).join(""));
     if(draft.kind==="home") {
-      return configGroup(1,"后台状态维护","定期更新角色的身体与心理状态，设置随当前人格共享。",
+      return configGroup(1,"后台状态维护","定期更新角色的身体与心理状态，设置随当前人格共享；与「每日状态巡视」不同，巡视只定时看一眼并留记录，不改数值。",
         configField("enabled",values,e,{title:"启用状态维护",help:"关闭后暂停后台更新，已有状态记录保留。"})
         +configField("maintenance_minutes",values,e,{title:"更新间隔（分钟）",help:"1–1440 分钟；保存后用于后续维护安排。"}))
         +configGroup(2,"状态模拟与首页展示","状态模拟开关控制后台是否更新这一项；首页展示只控制小屋首页是否显示，状态详情仍可查看。睡眠状态模拟与按角色作息自动入睡是两个独立开关。",
@@ -589,7 +589,7 @@ window.CompanionStateMaintenance = (() => {
     }
     if(draft.kind==="mood")return configGroup(1,"心情动力学","概率决定这一轮情绪是否变化，幅度决定一次最多变化多少，半衰期决定多久回归基线。",
       configField("mood_enabled",values,e)+configField("mood_update_probability",values,e,{help:"取值 0–1；例如 0.35 表示 35%。"})+configField("mood_update_max_delta",values,e,{help:"取值 1–4；控制单轮的最大变化。"})+configField("mood_decay_half_life_minutes",values,e,{help:"取值 5–1440 分钟；半衰期越短，越快回归基线。"}));
-    if(draft.kind==="patrol")return configGroup(1,"每日状态巡视","使用角色本地时区；超过保留天数的报告会清除。",
+    if(draft.kind==="patrol")return configGroup(1,"每日状态巡视","只查看并记录，不推进数值（推进见「后台状态维护」）；使用角色本地时区，超过保留天数的报告会清除。",
       configField("daily_state_patrol_enabled",values,e)+configField("daily_state_patrol_time",values,e,{title:"巡视时刻",help:"按角色本地时区执行；建议在对话最少的时段运行。"})+configField("daily_state_patrol_retention_days",values,e,{title:"报告保留天数",stepper:true,help:"超过天数自动清除，取值范围 3–180 天。"}));
     const base=draft.base,current=base.timeline,dayEnabled=values.applicability==="applicable";
     const observed=current?.cycle_day?`第 ${current.cycle_day} / ${current.cycle_days} 天`:
@@ -712,5 +712,26 @@ window.CompanionStateMaintenance = (() => {
     if(checked)selected.add(value);else selected.delete(value);
     return Object.keys(spec.choices).filter(item=>selected.has(item)).join(",");
   }
-  return {fields,label,validField,normalized,weatherLocationParts,weatherLocationValue,toggleChecklist,applyAnnualInput,annualAction,snapshot,canAlign,alignment,form,summary,planningSummary,titles,homeFeatures,pendingText,phases,actionSummary,syncDurationPreview,selectPhase,selectCycleView,resetPhase};
+  /* 全局搜索用。role.state 这一组 85 个字段此前整组不在搜索索引里，
+     搜「生理期」「心情」都只能靠记住它在状态页的哪一格。
+     QQ 展示设置不在 definitions 里（它由 state-editor 自己渲染表单），单独补三条。 */
+  const presentationFields=[
+    ["typing_enabled","启用正在输入提示","仅对所选私聊窗口生效；从收到消息并通过身份校验开始，持续到最后一条分段发送结束。"],
+    ["typing_refresh_seconds","输入提示刷新间隔（秒）","每隔几秒续一次「正在输入」，取值 1–10。"],
+    ["presence_enabled","启用 QQ 自定义短状态","把角色的公开短文案显示成 QQ 自定义状态。"],
+    ["online_status_enabled","启用 QQ 在线状态","按角色的模拟状态上报在线／离开／忙碌。"],
+  ];
+  function searchEntries() {
+    const kinds=Object.keys(titles).filter(kind=>groups[kind]);
+    const entries=kinds.flatMap(kind=>(groups[kind]||[]).filter(name=>definitions[name]).map(field=>({
+      group:"role.state",groupTitle:"角色状态",field,
+      label:definitions[field].label||field,help:definitions[field].help||"",
+      section:kind,sectionTitle:titles[kind],sectionCount:kinds.length,
+    })));
+    return entries.concat(presentationFields.map(([field,label,help])=>({
+      group:"role.state",groupTitle:"角色状态",field,label,help,
+      section:"settings",sectionTitle:titles.settings,sectionCount:kinds.length,
+    })));
+  }
+  return {fields,label,validField,normalized,weatherLocationParts,weatherLocationValue,toggleChecklist,applyAnnualInput,annualAction,snapshot,canAlign,alignment,form,summary,planningSummary,titles,homeFeatures,pendingText,phases,actionSummary,syncDurationPreview,selectPhase,selectCycleView,resetPhase,searchEntries};
 })();

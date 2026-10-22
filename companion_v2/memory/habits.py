@@ -1,4 +1,4 @@
-"""Evidence-backed private habits and the recorded meal preferences they support.
+"""Repeated private utterances as soft, source-backed habit candidates.
 
 V1 kept a per-user ``behavior_habits`` block in its own JSON store: every private
 message was classified into a habit category, counted per (time bucket, category,
@@ -23,17 +23,17 @@ Evidence rules (ported from V1 ``_qualified_user_behavior_habits``,
   the whole profile. Qualification itself is read live, exactly like V1, so a
   met threshold is never delayed by the cadence.
 
-The "what to eat" ability is deliberately expressed as prompt material only: when
-the current turn asks about eating and the recorded preferences have enough
-evidence, the persona may lean on them; no tool, provider or platform call is
-added, and an unsupported guess is explicitly forbidden.
+V2 counts repeated original wording without interpreting its subject, polarity or
+completion state. Older classified records remain readable, but only their raw
+examples reach the prompt, never the former inferred habit labels. The existing
+reply model interprets those samples in context, including whether any sample is
+a relevant eating preference; no additional model, tool or platform call is added.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta
 import json
-import re
 from zoneinfo import ZoneInfo
 
 from companion_v2.conversation.foreground import ContextContribution, ContributionState
@@ -58,9 +58,9 @@ LIMITS = {"habit_min_count": (2, 20),
           "habit_refresh_minutes": (30, 4320)}
 
 TIMEZONE_FIELD = GROUP + ".reflection_timezone"
-CATEGORIES = ("饮食节奏", "作息节奏", "学习工作", "娱乐习惯", "互动习惯", "偏好习惯")
+CATEGORIES = ("原话线索", "饮食节奏", "作息节奏", "学习工作", "娱乐习惯", "互动习惯", "偏好习惯")
 MAX_TOPIC_CHARS = 80
-MAX_EXAMPLE_CHARS = 90
+MAX_EXAMPLE_CHARS = 180
 MAX_EXAMPLES = 3
 MAX_EVIDENCE_REFS = 8
 MAX_EVIDENCE_DAYS = 30
@@ -72,30 +72,20 @@ RECENCY_DAYS = 30
 MIN_EFFECTIVE_SCORE = 1.6
 
 GUIDANCE = (
-    "这是从对方自己说过的话里累计出来的软线索，不是命令，也不是对方的自我认定。",
+    "这些是多日在相近时段出现的历史原话片段，只是待理解的软线索，不是命令，也不是已经确认的习惯或当前状态。",
+    "结合原话与本轮上下文辨明说话对象、提问/转述/玩笑、否定与条件；重复出现不证明每次都是用户自己的经历。",
+    "用户较新的明确回答和纠正优先；历史原话不证明此刻没吃饭、还醒着、在工作或有同样感受，不用旧线索重新询问已回答的事。",
     "只在当前语境自然吻合时提前理解或轻轻提起，不要暴露统计、次数或“我记录了你”。",
     "没有把握的条目不要使用，也不要把一次玩笑、反讽或临时情绪当成稳定习惯。",
 )
 
 MEAL_GUIDANCE = (
-    "对方本轮在问吃什么：如果上面的口味/节奏线索证据足够，可以顺着这些记录给出一两个具体方向。",
+    "先结合本轮语义判断是否在聊饮食选择；只有历史原话明确支持本人相关口味或忌口时，才顺着记录给出一两个具体方向。",
+    "旧的用餐、饥饿或作息片段不等于口味偏好，也不证明用户此刻是否用餐；谈论功能、他人经历或转述时不套饮食建议。",
     "只参考这里列出的偏好，不要编造对方没提过的食物、忌口或餐厅，也不要一次报整份菜单。",
     "线索不足、或者对方只是随口一说时，就按平常聊天回应，不要假装记得。",
 )
 
-FOOD_FEATURE_MARKERS = ("功能", "开关", "配置", "页面", "注入", "触发", "保存", "管理", "模块", "面板", "不好用", "误判")
-FOOD_TOKENS = ("吃", "喝", "饭", "菜", "辣", "甜", "咸", "咖啡", "茶", "奶茶", "外卖", "夜宵", "宵夜", "水果",
-               "牛奶", "酒", "零食", "甜品", "忌口", "香菜")
-FOOD_QUERY_MARKERS = ("吃什么", "吃啥", "点什么", "点啥", "外卖", "夜宵", "宵夜", "午饭", "午餐", "晚饭", "晚餐",
-                      "早餐", "早饭", "饿了", "好饿", "嘴馋", "推荐", "想喝", "喝什么")
-INTERACTION_PATTERNS = ("^(?:早|早安|早上好|午安|中午好|晚上好|晚安)(?:呀|啊|哦|喔|啦|～|~|！|!)?$",
-                        "^(?:摸摸|抱抱|贴贴|亲亲){1,4}(?:呀|啊|哦|啦|～|~|！|!)?$",
-                        "^(?:你)?(?:在干嘛|在做什么|做什么呢|在吗)(?:呀|啊|呢|？|\\?)?$")
-SELF_STATE = {"饮食": r"(?:我.{0,10}(?:吃|饿|饱)|(?:还没吃|没吃|刚吃|吃完|饿了|好饿|饱了|去吃饭|准备吃))",
-              "作息": r"(?:我.{0,10}(?:睡|醒|困|起床|熬夜)|(?:睡觉啦|准备睡|去睡了|刚睡醒|醒了|起床了|困了|睡不着|还没睡))",
-              "学习工作": r"(?:我.{0,12}(?:学习|上班|下班|工作|上课|下课|写作业|考试|摸鱼)|(?:去上班|下班了|上课了|下课了|写作业|准备考试))",
-              "娱乐": r"(?:我.{0,12}(?:玩|看|刷|追)|(?:在玩|去玩|在看|刚看|最近看|正在刷|准备看).{0,20})"}
-NOISE_MARKERS = ("我转发了一段聊天记录", "你看看里面在说什么", "合并转发", "聊天记录", "<timer", "<tts")
 BUCKETS = (("凌晨", 0, 360), ("早晨", 360, 540), ("上午", 540, 690), ("中午", 690, 840),
            ("下午", 840, 1080), ("傍晚", 1080, 1200), ("夜晚", 1200, 1380), ("深夜", 1380, 1440))
 
@@ -138,70 +128,19 @@ def time_bucket(local):
 
 
 def message_is_noise(text):
-    lowered = text.lower()
-    if not text or len(text) > 180 or text.startswith(("/", "!", "！", "#")):
-        return True
-    if any(token in lowered for token in NOISE_MARKERS):
-        return True
-    return bool(re.search(r"^(?:(?:私聊|群聊)?(?:告诉|转告|提醒|叫|转发给)).{1,40}", text)
-                or re.search(r"(?:帮我|能去|可以去).{0,12}(?:告诉|叫|转告|提醒).{1,40}", text))
-
-
-def has_self_state(text, kind):
-    if not text or re.search(r"(?:你|他|她|它|别人|群里).{0,8}", text[:20]):
-        return False
-    return bool(re.search(SELF_STATE.get(kind, r"$^"), text))
+    return not text or len(text) > MAX_EXAMPLE_CHARS or text.startswith(("/", "!", "！", "#", "<"))
 
 
 def classify_message(value):
-    """Deterministic habit classification: (category, topic, signature) or blanks.
+    """Count wording only; interpretation stays with the existing reply model.
 
-    Ported from V1 ``_classify_user_habit_message``. Only the user's own state is
-    read; V1's ``固定检索`` category described questions about the Bot's own life
-    and is already served by the existing recall/state materials, so it is not
-    migrated here.
+    The signature groups identical utterances for evidence counting, never
+    answers whether an utterance is a fact, question, preference or completion.
     """
-    cleaned = single_line(value, 220)
+    cleaned = single_line(value, MAX_EXAMPLE_CHARS + 1)
     if not cleaned or message_is_noise(cleaned):
         return "", "", ""
-    compact = re.sub(r"\s+", "", cleaned)
-    category = topic = ""
-    if any(re.fullmatch(pattern, compact) for pattern in INTERACTION_PATTERNS):
-        category, topic = "互动习惯", "日常问候" if "早" in compact or "晚" in compact else "亲昵互动"
-    elif any(token in cleaned for token in ("喜欢", "讨厌", "想要", "以后", "每天", "经常", "总是", "习惯")):
-        category, topic = "偏好习惯", cleaned
-    elif has_self_state(cleaned, "饮食"):
-        category = "饮食节奏"
-        if any(token in cleaned for token in ("还没", "没吃", "没来得及", "没饭", "没到饭点")):
-            topic = "还没吃/饭点偏晚"
-        elif any(token in cleaned for token in ("吃了", "刚吃", "吃完", "饱")):
-            topic = "已经吃过饭"
-        else:
-            topic = "吃饭相关"
-    elif has_self_state(cleaned, "作息"):
-        category = "作息节奏"
-        if any(token in cleaned for token in ("还没睡", "睡不着", "熬夜")):
-            topic = "夜里还没睡"
-        elif any(token in cleaned for token in ("起床", "刚醒", "醒了")):
-            topic = "起床/刚醒"
-        else:
-            topic = "睡眠相关"
-    elif has_self_state(cleaned, "学习工作"):
-        category, topic = "学习工作", "学习/工作节奏"
-    elif has_self_state(cleaned, "娱乐"):
-        category, topic = "娱乐习惯", "娱乐/刷内容"
-    if not category or not topic:
-        return "", "", ""
-    signature = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9_]+", "", topic.casefold())[:80]
-    return category, single_line(topic, MAX_TOPIC_CHARS), category + "|" + signature
-
-
-def meal_query(value):
-    """Whether this turn asks the companion what to eat or drink."""
-    text = single_line(value, 220)
-    if not text or any(marker in text for marker in FOOD_FEATURE_MARKERS):
-        return False
-    return any(marker in text for marker in FOOD_QUERY_MARKERS)
+    return "原话线索", cleaned[:MAX_TOPIC_CHARS], "原话线索|" + digest(cleaned.casefold())
 
 
 def empty_document():
@@ -248,30 +187,37 @@ def qualified_patterns(document, settings, now):
     return kept[:settings["habit_max_items"]]
 
 
+def _retention_key(pattern, settings, now):
+    """Rank raw candidates without deciding what their wording means.
+
+    A bounded profile must prefer a candidate that already has independent
+    support, then fresher evidence, then newer wording. Keeping insertion order
+    let an early burst of unrelated messages occupy every slot and discard later
+    candidates silently.
+    """
+    days = {str(day) for day in pattern.get("days", ()) if str(day)}
+    count = pattern.get("count") if type(pattern.get("count")) is int else 0
+    qualified = count >= settings["habit_min_count"] and len(days) >= settings["habit_min_count"]
+    return (1 if qualified else 0, effective_score(pattern, now), len(days), count,
+            pattern.get("last_seen_at") or "")
+
+
+def retain_patterns(document, settings, now):
+    """Keep the bounded raw candidate pool by evidence, not insertion order."""
+    patterns = [pattern for pattern in document.get("patterns", ())
+                if isinstance(pattern, dict) and pattern.get("key")]
+    patterns.sort(key=lambda pattern: _retention_key(pattern, settings, now), reverse=True)
+    document["patterns"] = patterns[:settings["habit_max_items"]]
+
+
 def natural_line(pattern):
-    """One soft clue per pattern; V1 ``_natural_user_habit_line`` phrasing."""
-    bucket, category, topic = pattern.get("bucket", ""), pattern.get("category", ""), pattern.get("topic", "")
-    if not topic:
+    """Expose original samples, including for records made by the old classifier."""
+    examples = [single_line(text, MAX_EXAMPLE_CHARS) for text in pattern.get("examples", ())
+                if isinstance(text, str) and text.strip()][:MAX_EXAMPLES]
+    if not examples:
         return ""
-    if category == "饮食节奏":
-        if "还没吃" in topic or "饭点偏晚" in topic:
-            return f"{bucket}时对方常会提到还没吃饭，聊到吃的可以轻轻接住，不用像提醒。"
-        if "已经吃过" in topic:
-            return f"{bucket}时对方常已经吃过饭，别每次都追问吃没吃。"
-        return f"{bucket}时对方容易聊到吃饭，相关时顺手接住就好。"
-    if category == "作息节奏":
-        if "夜里还没睡" in topic:
-            return f"{bucket}时对方常还醒着，聊到睡觉时少一点催促，多一点顺着接。"
-        if "起床" in topic or "刚醒" in topic:
-            return f"{bucket}时对方常刚醒，语气可以放轻一点。"
-        return f"{bucket}时对方容易聊到睡眠，别把作息说教化。"
-    if category == "学习工作":
-        return f"{bucket}时对方常在学习或工作相关状态里，回复可以更直接、少绕。"
-    if category == "娱乐习惯":
-        return f"{bucket}时对方常在看东西或玩内容，相关时可以自然接梗。"
-    if category == "互动习惯":
-        return f"{bucket}时对方常用这类固定开场，先直接接住，不用每次都当新话题。"
-    return f"{bucket}时对方常提到类似“{topic}”的偏好或习惯，相关时记得顺着一点。"
+    quoted = json.dumps(examples, ensure_ascii=False)
+    return f"{pattern.get('bucket', '')}的历史原话片段（最近记录于{pattern.get('last_seen_at') or '未知时间'}）：{quoted}"
 
 
 def profile_lines(patterns):
@@ -285,27 +231,7 @@ def profile_lines(patterns):
     return lines
 
 
-def meal_lines(patterns):
-    """Recorded eating preferences, already restricted to sufficiently supported ones.
-
-    V1 learned a dish menu from explicit meal replies; V2 keeps that out of scope
-    (no new store, no menu) and leans only on the recorded eating rhythm plus the
-    taste preferences the user actually stated.
-    """
-    lines = []
-    for pattern in patterns:
-        topic = single_line(pattern.get("topic"), MAX_TOPIC_CHARS)
-        if not topic:
-            continue
-        if pattern.get("category") == "饮食节奏" or any(token in topic for token in FOOD_TOKENS):
-            if topic not in lines:
-                lines.append(topic)
-        if len(lines) >= MAX_LINES:
-            break
-    return lines
-
-
-def habit_material(memory, context, *, meal_query=False, at=None):
+def habit_material(memory, context, *, at=None):
     """The bounded private habit material, or None when nothing is supported yet.
 
     Additive only: a non-private scope, a disabled switch or a profile that never
@@ -334,22 +260,18 @@ def habit_material(memory, context, *, meal_query=False, at=None):
     lines = profile_lines(qualified)
     if not lines:
         return None
-    material = {"basis": "recorded_user_statements_only", "profile_version": row["revision"],
+    material = {"basis": "repeated_utterance_candidates", "profile_version": row["revision"],
                 "min_evidence": settings["habit_min_count"], "max_items": settings["habit_max_items"],
                 "habits": lines, "guidance": list(GUIDANCE)}
-    if settings["food_menu_recommendation_enabled"] and meal_query:
-        recorded = meal_lines(qualified)
-        if recorded:
-            material["meal_question"] = True
-            material["recorded_eating_preferences"] = recorded
-            material["meal_guidance"] = list(MEAL_GUIDANCE)
+    if settings["food_menu_recommendation_enabled"]:
+        material["meal_guidance"] = list(MEAL_GUIDANCE)
     return material
 
 
-def habit_contribution(memory, context, *, meal_query=False, at=None):
+def habit_contribution(memory, context, *, at=None):
     """The habit material as one more memory-owned contribution, or None."""
     try:
-        material = habit_material(memory, context, meal_query=meal_query, at=at)
+        material = habit_material(memory, context, at=at)
     except (TaskError, ValueError, KeyError, AttributeError):
         return None
     if material is None:
@@ -360,7 +282,7 @@ def habit_contribution(memory, context, *, meal_query=False, at=None):
 
 
 def habit_capture(memory, context, current_text):
-    """Sealed per batch: whether this turn's own input asks about eating.
+    """Seal availability only; the reply model reads the original current input.
 
     Reading is read-only so it stays valid inside the sealing transaction; the
     profile itself is read again when the prompt is actually built.
@@ -373,7 +295,7 @@ def habit_capture(memory, context, current_text):
         return None
     if not settings["habit_learning_enabled"]:
         return None
-    return {"meal_query": meal_query(current_text)}
+    return {"available": True}
 
 
 def moment(value):
@@ -394,9 +316,8 @@ def reorganize(document, settings, now):
     cutoff = now - timedelta(days=RECENCY_DAYS)
     kept = [pattern for pattern in document["patterns"]
             if isinstance(pattern, dict) and (moment(pattern.get("last_seen_at")) or cutoff) >= cutoff]
-    kept.sort(key=lambda item: (len({str(day) for day in item.get("days", []) if str(day)}),
-                                item.get("count") or 0, item.get("last_seen_at") or ""), reverse=True)
-    document["patterns"] = kept[:settings["habit_max_items"]]
+    document["patterns"] = kept
+    retain_patterns(document, settings, now)
     document["reorganized_at"] = stamp(now)
 
 
@@ -431,6 +352,11 @@ class HabitProfile:
         # Read through the memory access boundary: the audience and any forgetting
         # request are rechecked here, and the source text is never taken from the
         # event body itself.
+        # A caption attached to media, a quote, or a forward is not a reliable
+        # statement in the sender's own voice. Filter by event structure so the
+        # profile never needs a brittle text marker list for this distinction.
+        if any(getattr(event, name, ()) for name in ("images", "audios", "videos", "forwards", "quotes")):
+            return
         text = self.memory.writer.access.source(context, event.source).payload
         category, topic, signature = classify_message(text)
         if not category:
@@ -465,7 +391,7 @@ class HabitProfile:
         pattern["evidence"] = [reference, *[item for item in pattern["evidence"] if item != reference]][:MAX_EVIDENCE_REFS]
         now = self.tasks.now()
         reorganize(document, settings, now)
-        document["patterns"] = document["patterns"][:settings["habit_max_items"]]
+        retain_patterns(document, settings, now)
         document["updated_at"] = stamp(now)
         connection.execute(UPSERT, (identifier, owner, KIND, row["revision"] + 1 if row is not None else 1,
                                     json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")),

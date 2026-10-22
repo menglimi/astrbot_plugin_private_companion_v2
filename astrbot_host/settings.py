@@ -11,7 +11,8 @@ from companion_v2.adapters.astrbot.native import account_number
 from companion_v2.adapters.astrbot.provider import UsageTariff
 from companion_v2.adapters.astrbot.provider_catalog import TextProviderSettings
 from companion_v2.conversation.flow import ConversationPolicy
-from companion_v2.conversation.forwards.models import (MAX_DEPTH, MAX_FORWARDS, MAX_NODES, ForwardIntakePolicy)
+from companion_v2.conversation.forwards.models import (DEFAULT_MAX_NODES, MAX_DEPTH, MAX_FORWARDS, MAX_NODES,
+                                                        ForwardIntakePolicy)
 from companion_v2.conversation.segmentation import SegmentationPolicy
 from companion_v2.conversation.voice_reply import VoiceReplyPolicy
 from companion_v2.execution.models import SupervisorLimits
@@ -116,7 +117,10 @@ class HostSettings:
             voice_policy = VoiceReplyPolicy(**{name: value for name, value in voice_section.items() if name != "enabled"})
         except (TypeError, ValueError) as error:
             raise HostControlError("staging_settings_invalid", "voice reply settings are invalid") from error
-        profile_id = _text(staging.get("profile_id", "preview-1"), required=True)
+        # 与 _conf_schema.json 的默认 profile_id 对齐（同为 "main"）。
+        # 原先这里是 "preview-1"：缺键时安装标识会变成
+        # 「astrbot-private-companion-v2:preview-1」，与界面显示、文档和她自己的数据根对不上。
+        profile_id = _text(staging.get("profile_id", "main"), required=True)
         if PROFILE_PATTERN.fullmatch(profile_id) is None:
             raise HostControlError("staging_profile_invalid", "profile_id must use lowercase letters, digits, underscores or hyphens")
         legacy_delivery_mode = _text(staging.get("delivery_mode", "onebot_private"), required=True)
@@ -136,7 +140,10 @@ class HostSettings:
                            _text(runtime.get("daily_token_soft_deferred_kinds", "")).replace(",", "\n").split("\n")
                            if kind.strip())
         soft = BudgetSoftPolicy(enabled=_boolean(runtime.get("enable_daily_token_soft_limit", False)),
-            tokens=_integer(runtime.get("daily_token_soft_limit", 0), minimum=0, maximum=10**12),
+            # 缺键时的默认值必须与 _conf_schema.json 的 800000 一致。
+            # 原先写 0，而 0 在软限额里的含义是「不设限额」：一份没有这个键的
+            # 旧数据根，一旦把开关打开，看上去开了限额、实际什么都没限。
+            tokens=_integer(runtime.get("daily_token_soft_limit", 800_000), minimum=0, maximum=10**12),
             kinds=soft_kinds)
         return cls(
             enabled=_boolean(staging.get("enabled", False)),
@@ -179,8 +186,9 @@ class HostSettings:
             ),
             forward_intake=ForwardIntakePolicy(
                 _integer(runtime.get("forward_max_forwards", MAX_FORWARDS), minimum=1, maximum=MAX_FORWARDS),
-                _integer(runtime.get("forward_max_nodes", MAX_NODES), minimum=1, maximum=MAX_NODES),
+                _integer(runtime.get("forward_max_nodes", DEFAULT_MAX_NODES), minimum=1, maximum=MAX_NODES),
                 _integer(runtime.get("forward_max_depth", MAX_DEPTH), minimum=1, maximum=MAX_DEPTH),
+                _boolean(runtime.get("forward_parse_nested", True)),
             ),
             limits=SupervisorLimits(
                 _integer(runtime.get("foreground_slots", 2), minimum=1, maximum=32),

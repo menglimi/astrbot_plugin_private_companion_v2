@@ -24,7 +24,12 @@
  *
  * 作用范围药丸 .wb-scope 保留：它是有信息的（这次保存写到哪一层），
  * 而且只有它一件用这种形状，不与别的框重复。 */
-.wb-card{overflow:hidden}
+/* 卡片的 overflow 用 clip 而不是 hidden。
+ * sticky 的参照物是「最近的滚动容器」；overflow:hidden 会把卡片自己变成
+ * 一个不可滚动的滚动容器，于是卡片里的吸底动作条永远吸不住（它的参照盒就是
+ * 卡片本身，而卡片并不滚）。clip 只裁剪、不建立滚动容器，视觉一样、
+ * 吸底生效。同一条理由见 shell.css 的 .shell-panel。 */
+.wb-card{overflow:clip}
 .wb-card-head{
   display:flex;align-items:baseline;justify-content:space-between;
   gap:var(--sp-3);flex-wrap:wrap;margin:0 0 var(--sp-3);
@@ -350,12 +355,42 @@
 }
 .wb-field.is-dirty::before{opacity:.85;transform:scaleY(1)}
 
-/* === 动作条 === */
+/* === 动作条 ===
+ *
+ * 吸底。一张分区卡常有二十多个字段（表达页最长的一段近三十个），
+ * 保存按钮原本只出现在表单最末尾：改中间某一项时要先滚到底才能按保存，
+ * 按完再滚回原处。现在动作条贴在视口下缘，滚到哪都在。
+ *
+ * 背景必须是不透明的：吸底时下面还有字段在滚动，透明会让两行字叠在一起。 */
 .wb-actions{
+  position:sticky;bottom:0;z-index:3;
   display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap;
-  padding-top:var(--sp-3);margin-top:var(--sp-3);border-top:1px solid var(--t-line);
+  padding:var(--sp-3) 0;margin-top:var(--sp-3);border-top:1px solid var(--t-line);
+  background:var(--t-surface);
+  /* 上缘投影只画在动作条上方，用于说明「下面还有内容」。 */
+  box-shadow:0 -10px 16px -14px var(--t-line-firm);
+}
+/* 面板右下角还有那间小屋子（见 shell.css 的画中画）：动作条把文字让开，
+   按钮始终在左边，不会被它压住。 */
+@media (min-width:761px){
+  #homeShell[data-away="true"] .wb-actions{padding-right:calc(var(--shell-pip-w, 0px) + var(--sp-4))}
 }
 .wb-actions-note{margin-left:auto;color:var(--t-text-faint);font-size:var(--fs-tiny);line-height:1.7}
+
+/* === 字段级错误 ===
+ * 此前校验失败只改一个 aria-invalid 并整卡重绘：屏幕阅读器听到「无效」却
+ * 不知道哪里无效，看得见的人则什么也看不到（提示条画在卡片顶部，
+ * 而用户正停在表单底部）。现在错误写在字段自己下面，并跳过去。 */
+.wb-field.is-invalid::before{background:var(--t-risk);opacity:1;transform:scaleY(1)}
+.wb-field.is-invalid .wb-control :is(input,textarea,select){
+  border-color:var(--t-risk);
+  box-shadow:0 0 0 3px var(--t-risk-quiet);
+}
+.wb-field-error{
+  display:none;margin:var(--sp-1) 0 0;color:var(--t-risk-ink);
+  font-size:var(--fs-micro);line-height:1.6;
+}
+.wb-field.is-invalid .wb-field-error{display:block}
 
 /* --- 保存按钮：形变为进度环，回执为幂等重放时勾画两遍 --- */
 .wb-save{
@@ -528,6 +563,8 @@
   .wb-actions>.wb-save{flex:1}
   .wb-actions-note{margin-left:0;flex-basis:100%}
   .wb-card-body{padding:var(--sp-4)}
+  /* 窄屏卡片有 16px 内边距，吸底动作条要重新贴到卡片两边。 */
+  .wb-actions{margin-inline:calc(var(--sp-4) * -1);padding-inline:var(--sp-4)}
 }
 
 /* === 轻结构文本控件（自我页）：生日 / 词条快选 / 词条小片 / 台词气泡 ===

@@ -67,7 +67,7 @@ function harness() {
   const window = {
     CompanionProduct: {
       hosted: () => true,
-      role: () => ({model_api: '/astrbot_plugin_private_companion_v2/model'}),
+      role: () => ({model_api: '/astrbot_plugin_private_companion/model'}),
       identity: () => ({installation_id: 'inst', operator_id: 'operator'}),
       /* 页面取桥先问 bridgeNow()，没有再 await bridgeFor()。
          这里两者都给，保持同步路径不被打断。 */
@@ -610,6 +610,16 @@ test('image page separates generation and editing model queues and saves paramet
   node.click('[data-model-tab]', {modelTab: 'image'});
   const get = requests.find(r => r.method === 'GET' && r.route === 'model/image');
   assert.ok(get, 'image tab should trigger a GET to model/image');
+  const schemaRequest = requests.find(r => r.method === 'GET' && r.route.endsWith('/image-schema'));
+  assert.ok(schemaRequest, 'the image tab loads its backend field schema from the selected model route');
+  assert.match(schemaRequest.route, /^model\/image-schema$/);
+  schemaRequest.resolve({image_provider_group: {sd_webui: {label: 'SD WebUI', fields: {
+    endpoint: {kind: 'text', group: 'connection', label: '服务地址'},
+    model: {kind: 'text', group: 'connection', label: '模型名'},
+    steps: {kind: 'integer', group: 'sampling', storage: 'parameters', label: '采样步数', default: 28, min: 1, max: 150},
+    cfg_scale: {kind: 'number', group: 'sampling', storage: 'parameters', label: 'CFG', default: 7, min: 1, max: 30, step: 0.1},
+    sampler_name: {kind: 'text', group: 'sampling', storage: 'parameters', label: '采样器'},
+  }}}});
   const image = {actions: [
     {action: 'image.generate', enabled: true, owner: 'image-plugin', provider_id: 'native-image', loaded: true, current: true, registered: true, state: 'ready'},
     {action: 'image.edit', enabled: true, owner: 'image-plugin', provider_id: 'native-image', loaded: true, current: true, registered: true, state: 'ready'},
@@ -635,14 +645,22 @@ test('image page separates generation and editing model queues and saves paramet
       {id: 'primary', name: '主用模型', enabled: true, platform: 'openai', model: 'image-v1', width: 1024, height: 1024,
         base_url: 'https://api.example.test/v1', timeout_seconds: 180, api_key_set: true},
       {id: 'secondary', name: '备用模型', enabled: true, platform: 'openai', model: 'image-v2', width: 1024, height: 1024,
-        base_url: 'https://backup.example.test/v1', timeout_seconds: 180, api_key_set: false},
+        base_url: 'https://backup.example.test/v1', timeout_seconds: 180, api_key_set: false, max_reference_images: 0},
     ],
     sd_webui: {base_url: 'http://127.0.0.1:7860', timeout_seconds: 300, parameters: {}},
-    comfyui: {base_url: '', timeout_seconds: 300, workflows: {}},
-    operation_routes: {generate: ['online:primary', 'sd_webui'], edit: ['online:secondary', 'online:primary']},
+    comfyui: {base_url: 'http://127.0.0.1:8188', timeout_seconds: 300, workflows: {
+      generate: {workflow: {'1': {class_type: 'SaveImage', inputs: {}}}, mapping: {fields: {}, output_node: '1'}},
+    }},
+    legacy_options: {image_companion_selected_workflows: {generate: 'old-text.json'},
+      image_companion_extra_workflows: ['old-insert.json']},
+    operation_routes: {generate: ['online:primary', 'comfyui', 'sd_webui'], edit: ['online:secondary', 'online:primary']},
   }};
   configRequest.resolve(config);
   await flush();
+  assert.match(node.innerHTML, /<details class="model-img-route-details" open><summary data-img-route-expand="online:primary"/);
+  node.click('[data-img-route-expand]', {imgRouteExpand: 'online:primary'});
+  assert.match(node.innerHTML, /<details class="model-img-route-details"><summary data-img-route-expand="online:primary"/);
+  node.click('[data-img-route-expand]', {imgRouteExpand: 'online:primary'});
   assert.match(node.innerHTML, /文生图与改图/);
   assert.match(node.innerHTML, /data-img-endpoint-test="primary"/,
     'saved enabled online models expose a real generation test');
@@ -651,6 +669,17 @@ test('image page separates generation and editing model queues and saves paramet
   assert.match(node.innerHTML, /data-img-view="generate"/);
   assert.match(node.innerHTML, /data-img-view="edit"/);
   assert.match(node.innerHTML, /data-img-config-field="endpoints\.0\.model"/);
+  assert.match(node.innerHTML, /data-img-config-field="endpoints\.0\.quality"/);
+  assert.match(node.innerHTML, /data-img-config-field="endpoints\.0\.max_reference_images"/);
+  assert.match(node.innerHTML, /data-img-config-field="sd_webui\.parameters\.generate\.steps"/,
+    'SD sampling controls are rendered from the loaded schema');
+  assert.doesNotMatch(node.innerHTML, /data-img-config-field="sd_webui\.parameters\.generate\.(endpoint|model)"/,
+    'connection metadata must not be written into the SD sampling object');
+  assert.match(node.innerHTML, /<legend>连接<\/legend>/);
+  assert.match(node.innerHTML, /<legend>工作流<\/legend>/);
+  assert.match(node.innerHTML, /已绑定 · 1 个节点/);
+  assert.match(node.innerHTML, /旧版工作流与网络选项/);
+  assert.match(node.innerHTML, /old-text\.json/);
   assert.match(node.innerHTML, /data-img-config-json="sd\.generate"/);
   assert.doesNotMatch(node.innerHTML, /data-img-view="mask_edit"/,
     'masked editing belongs to the edit workflow, not a third navigation item');
@@ -667,21 +696,31 @@ test('image page separates generation and editing model queues and saves paramet
 
   node.click('[data-img-view]', {imgView: 'edit'});
   assert.match(node.innerHTML, /普通改图与蒙版局部改图共用模型队列/);
+  assert.match(node.innerHTML, /未启用参考图改图/);
   assert.match(node.innerHTML, /image\.edit/);
   assert.match(node.innerHTML, /image\.mask_edit/);
   assert.match(node.innerHTML, /改图模型与优先级/);
   node.click('[data-img-route-move]', {imgRouteMove: 'up', imgRouteIndex: '1'});
   node.change('[data-img-config-field]', {imgConfigField: 'endpoints.0.model', value: 'image-v3'});
+  node.change('[data-img-config-field]', {imgConfigField: 'endpoints.0.quality', value: 'hd'});
+  node.change('[data-img-config-field]', {imgConfigField: 'endpoints.0.max_reference_images', value: 4});
   node.click('[data-img-view]', {imgView: 'generate'});
-  node.input('[data-img-config-json]', {imgConfigJson: 'sd.generate', value: '{"steps":24,"cfg_scale":6.5}'});
+  node.change('[data-img-config-field]', {imgConfigField: 'sd_webui.base_url', value: 'http://127.0.0.1:7861'});
+  node.change('[data-img-config-field]', {imgConfigField: 'sd_webui.parameters.generate.steps', value: 32});
+  node.change('[data-img-config-field]', {imgConfigField: 'sd_webui.parameters.generate.cfg_scale', value: 6.5});
+  node.input('[data-img-config-json]', {imgConfigJson: 'sd.generate', value: '{"steps":24,"cfg_scale":6.5,"sampler_name":"Euler"}'});
   node.click('[data-img-config-save]');
   const configSave = requests.find(r => r.method === 'POST' && r.route.endsWith('/image/output/save'));
   assert.ok(configSave, 'saving model configuration uses the native image configuration API');
   assert.deepEqual(JSON.parse(JSON.stringify(configSave.values.changes.operation_routes.edit)),
     ['online:primary', 'online:secondary'], 'editing priority is independent and reorderable');
   assert.equal(configSave.values.changes.endpoints[0].model, 'image-v3');
+  assert.equal(configSave.values.changes.endpoints[0].quality, 'hd');
+  assert.equal(configSave.values.changes.endpoints[0].max_reference_images, 4);
+  assert.equal(configSave.values.changes.sd_webui.base_url, 'http://127.0.0.1:7861');
   assert.deepEqual(JSON.parse(JSON.stringify(configSave.values.changes.sd_webui.parameters.generate)),
-    {steps: 24, cfg_scale: 6.5}, 'function-specific image parameters are saved with the model configuration');
+    {steps: 32, cfg_scale: 6.5, sampler_name: 'Euler'},
+    'function-specific sampling fields and advanced values are saved together');
   configSave.resolve({...config, revision: 'image-r2', settings: configSave.values.changes});
   await flush();
   assert.match(node.innerHTML, /生图模型与优先级已保存/);

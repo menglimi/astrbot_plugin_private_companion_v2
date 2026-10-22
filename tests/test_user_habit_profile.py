@@ -19,8 +19,8 @@ from companion_v2.foundation.refs import ScopeKind
 from companion_v2.identity_policy.group_audience import group_audience
 from companion_v2.memory.configuration import configuration_fields as memory_fields
 from companion_v2.memory.habits import (DEFAULTS, GUIDANCE, KIND, LIMITS, MEAL_GUIDANCE, habit_material,
-                                        habit_settings, classify_message, meal_query, natural_line,
-                                        qualified_patterns, empty_document)
+                                        habit_settings, classify_message, natural_line,
+                                        qualified_patterns, empty_document, retain_patterns)
 from tests.test_host_application import HostFixture
 from tests.test_management_access import NOW
 
@@ -82,26 +82,19 @@ class HabitConfigurationTests(unittest.TestCase):
 
 
 class HabitClassificationTests(unittest.TestCase):
-    def test_only_the_users_own_state_is_classified(self):
-        self.assertEqual(classify_message("我还没吃饭，晚点再聊")[:2], ("饮食节奏", "还没吃/饭点偏晚"))
-        self.assertEqual(classify_message("刚吃完，好饱")[:2], ("饮食节奏", "已经吃过饭"))
-        self.assertEqual(classify_message("我准备睡了，晚安")[0], "作息节奏")
-        self.assertEqual(classify_message("我去上班了")[0], "学习工作")
-        self.assertEqual(classify_message("我在看番")[0], "娱乐习惯")
-        self.assertEqual(classify_message("我每天都想喝咖啡")[0], "偏好习惯")
-        self.assertEqual(classify_message("晚安")[0], "互动习惯")
-        # Somebody else's state and tool chatter are never the user's habit.
-        self.assertEqual(classify_message("你吃饭了吗"), ("", "", ""))
-        self.assertEqual(classify_message("他还没吃饭"), ("", "", ""))
-        self.assertEqual(classify_message("我转发了一段聊天记录，你看看里面在说什么"), ("", "", ""))
+    def test_utterances_are_not_rewritten_into_user_state_or_habit_facts(self):
+        for text in ("我还没吃饭，晚点再聊", "刚吃完，好饱", "我没吃饱", "我准备睡了，晚安",
+                     "睡得很好，一点也不困", "我在看番", "晚安", "你吃饭了吗", "他还没吃饭",
+                     "我转发了一段聊天记录，你看看里面在说什么", "碗都洗好啦"):
+            with self.subTest(text=text):
+                category, topic, _signature = classify_message(text)
+                self.assertEqual(category, "原话线索")
+                self.assertEqual(topic, text)
         self.assertEqual(classify_message(""), ("", "", ""))
 
-    def test_a_meal_question_is_read_but_feature_talk_is_not(self):
-        self.assertTrue(meal_query("今天晚饭吃什么好呢"))
-        self.assertTrue(meal_query("有点饿了，点啥外卖"))
-        self.assertFalse(meal_query("这个吃什么功能的开关在哪"))
-        self.assertFalse(meal_query("我在写代码"))
-        self.assertEqual(classify_message("我还没吃饭")[2].startswith("饮食节奏|"), True)
+    def test_opposite_statements_do_not_share_a_derived_completion_label(self):
+        self.assertNotEqual(classify_message("我吃饱了")[2], classify_message("我没吃饱")[2])
+        self.assertEqual(classify_message("/配置吃饭提醒"), ("", "", ""))
 
 
 class HabitProfileTests(HostFixture, unittest.IsolatedAsyncioTestCase):
@@ -170,13 +163,14 @@ class HabitProfileTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         await self.say(app, host, "今天晚饭吃什么好呢")
         material = next(item for item in self.materials() if item.purpose == "current_user_habits")
         payload = json.loads(material.payload)
-        self.assertEqual(payload["basis"], "recorded_user_statements_only")
-        self.assertTrue(payload["meal_question"])
-        self.assertIn("还没吃/饭点偏晚", payload["recorded_eating_preferences"])
+        self.assertEqual(payload["basis"], "repeated_utterance_candidates")
+        self.assertTrue(any("我还没吃饭，晚点再说" in line for line in payload["habits"]))
+        self.assertNotIn("meal_question", payload)
+        self.assertNotIn("recorded_eating_preferences", payload)
         self.assertTrue(payload["habits"])
         self.assertIn("不要编造对方没提过的食物", "".join(payload["meal_guidance"]))
 
-    async def test_a_meal_question_without_recorded_preferences_adds_nothing(self):
+    async def test_repeated_sleep_statements_stay_raw_when_current_question_is_about_food(self):
         host = await self.start()
         app = host.application
         for index in range(3):
@@ -188,6 +182,8 @@ class HabitProfileTests(HostFixture, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(payload["habits"])
         self.assertNotIn("meal_question", payload)
         self.assertNotIn("recorded_eating_preferences", payload)
+        self.assertTrue(any("我准备睡了，晚安" in line for line in payload["habits"]))
+        self.assertIn("先结合本轮语义判断", "".join(payload["meal_guidance"]))
 
     async def test_another_owner_and_another_scope_never_see_the_profile(self):
         host = await self.start()
@@ -252,9 +248,10 @@ class HabitProfileTests(HostFixture, unittest.IsolatedAsyncioTestCase):
             await self.say(app, host, "我还没吃饭，晚点再说", days=0 if index == 0 else 1)
         self._set(app, "memory.food_menu_recommendation_enabled", False)
         batch = self.admitted(host, "今天晚饭吃什么好呢")
-        material = habit_material(app.memory, self.context(app, batch), meal_query=True)
+        material = habit_material(app.memory, self.context(app, batch))
         self.assertTrue(material["habits"])
         self.assertNotIn("meal_question", material)
+        self.assertNotIn("meal_guidance", material)
 
     def _group_scope(self, scope):
         return type(scope)(scope.installation_id, scope.platform, ScopeKind.GROUP, "group-habits",
@@ -305,9 +302,29 @@ class HabitQualificationTests(unittest.TestCase):
         self.assertEqual(qualified_patterns(document, settings, NOW), [])
 
     def test_natural_lines_are_soft_clues(self):
-        line = natural_line({"bucket": "夜晚", "category": "饮食节奏", "topic": "还没吃/饭点偏晚"})
-        self.assertIn("轻轻接住", line)
+        legacy = {"bucket": "夜晚", "category": "饮食节奏", "topic": "还没吃/饭点偏晚",
+                  "examples": ["我今天没吃饱，刚又叫了一份"], "last_seen_at": NOW.isoformat()}
+        line = natural_line(legacy)
+        self.assertIn("我今天没吃饱，刚又叫了一份", line)
+        self.assertIn(NOW.isoformat(), line)
+        self.assertNotIn("还没吃/饭点偏晚", line)
+        self.assertNotIn("对方常", line)
         self.assertNotIn("次数", line)
+        self.assertEqual(natural_line({key: value for key, value in legacy.items() if key != "examples"}), "")
+
+    def test_candidate_capacity_keeps_supported_and_recent_evidence(self):
+        settings = {"habit_min_count": 3, "habit_max_items": 2, "habit_refresh_minutes": 360,
+                    "habit_learning_enabled": True, "food_menu_recommendation_enabled": True, "timezone": "UTC"}
+        document = empty_document()
+        document["patterns"] = [
+            {"key": "old", "count": 1, "days": ["2026-10-19"], "last_seen_at": NOW.isoformat()},
+            {"key": "supported", "count": 3, "days": ["2026-10-17", "2026-10-18", "2026-10-19"],
+             "last_seen_at": NOW.isoformat()},
+            {"key": "new", "count": 1, "days": ["2026-10-19"],
+             "last_seen_at": NOW.isoformat()},
+        ]
+        retain_patterns(document, settings, NOW)
+        self.assertEqual([item["key"] for item in document["patterns"]], ["supported", "old"])
 
 
 if __name__ == "__main__":

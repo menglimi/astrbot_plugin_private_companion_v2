@@ -7,7 +7,7 @@ const {pathToFileURL} = require("node:url");
 const {chromium} = require("playwright");
 
 function syntheticBridge(options={}) {
-  const HOST="astrbot_plugin_private_companion_v2", base="/"+HOST+"/host/targets/";
+  const HOST="astrbot_plugin_private_companion", base="/"+HOST+"/host/targets/";
   const iso = offset => new Date(Date.now()+offset*60000).toISOString();
   const qa=window.__sidebarQA={empty:false,denyState:false,deferSecond:false,hiddenKinds:[],
     calendarCoverage:null,stateEnabled:true,posts:0};

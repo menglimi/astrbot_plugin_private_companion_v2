@@ -4,8 +4,11 @@ import base64
 from dataclasses import replace
 import json
 import io
+from pathlib import Path
+import re
 from types import SimpleNamespace as NS
 import unittest
+from unittest.mock import AsyncMock
 
 from tests import test_astrbot_staging_host as _host_import
 from astrbot.core.agent.message import Message, ToolCall
@@ -60,12 +63,15 @@ class CoreReplyImagesTests(NativeImageFixture, HostFixture, unittest.IsolatedAsy
         self.context = TaskContext(self.important, require(self.identity.resolve_role(SCOPE, observed_at=NOW)),
                                    AudienceRef(SCOPE, (self.important.subject,)))
 
-    def prepare(self, event_id="native-image", images=()):
-        event = FakeEvent()
+    def prepare(self, event_id="native-image", images=(), *, event=None):
+        event = event if event is not None else FakeEvent()
         parts = []
         for data in images:
             parts.append(Image.fromBase64(base64.b64encode(data).decode("ascii")))
-        event.message_obj = NS(message=parts)
+        if getattr(event, "message_obj", None) is None:
+            event.message_obj = NS(message=parts)
+        else:
+            event.message_obj.message = parts
         original = NativeConversationInput(event_id, self.context.actor.principal,
             ConversationRoute(SCOPE, user=self.context.actor.subject), self.context.audience,
             "请帮我画图", self.clock.now(), self.context.role_binding.role, "原人格")
@@ -123,13 +129,109 @@ class CoreReplyImagesTests(NativeImageFixture, HostFixture, unittest.IsolatedAsy
         self.assertEqual(gate._used(self.context, scope, self.clock.now()), 0)
         self.assert_no_reply_work(event)
 
+    async def test_real_sdk_loop_generates_caches_and_sends_the_actual_image_once(self):
+        from astrbot.core.agent.hooks import BaseAgentRunHooks
+        from astrbot.core.agent.run_context import ContextWrapper
+        from astrbot.core.agent.runners.tool_loop_agent_runner import ToolLoopAgentRunner
+        from astrbot.core.agent.tool import ToolSet
+        from astrbot.core.astr_agent_context import AstrAgentContext
+        from astrbot.core.astr_agent_tool_exec import FunctionToolExecutor
+        from astrbot.core.pipeline.process_stage.follow_up import _ACTIVE_AGENT_RUNNERS
+        from astrbot.core.provider.entities import LLMResponse, ProviderRequest
+        from astrbot.core.star.context import Context
+        from astrbot.core.tools.message_tools import SendMessageToUserTool
+        from astrbot_host.core_reply_native_send import inject_core_reply_send_tool
+        from astrbot_host.core_reply_tool_dispatch import observe_core_tool_dispatch_begin, restore_core_tool_dispatch
+        from tests.test_core_reply_pipeline import PipelineEvent
+
+        event, original = self.prepare("native-image-loop", event=PipelineEvent())
+        request = ProviderRequest(prompt="来张自拍看看", system_prompt=original.system_prompt,
+            func_tool=ToolSet(tools=[*original.func_tool.tools, SendMessageToUserTool()]))
+        inject_core_reply_send_tool(event, request)
+        host = Context.__new__(Context)
+        platform = NS(meta=lambda: NS(id="qq-main"), send_by_session=AsyncMock())
+        host.platform_manager = NS(platform_insts=[platform])
+        host.astrbot_config_mgr = NS(get_conf=lambda _: {})
+        wrapper = ContextWrapper(context=AstrAgentContext(context=host, event=event))
+        cached, requests = [], []
+
+        async def text_chat(**arguments):
+            requests.append(arguments)
+            if len(requests) == 1:
+                return LLMResponse(role="assistant", completion_text="", tools_call_ids=["selfie-generate"],
+                    tools_call_name=[native_tool_name("image.generate")],
+                    tools_call_args=[{"prompt": "selfie，在书桌边穿着家居服"}])
+            if len(requests) == 2:
+                results = "\n".join(message.content for message in wrapper.messages
+                                    if message.role == "tool" and isinstance(message.content, str))
+                path = re.search(r"cached at path='([^']+)'", results).group(1)
+                cached.append(Path(path))
+                self.assertEqual(cached[0].read_bytes(), image_bytes("red"))
+                return LLMResponse(role="assistant", completion_text="", tools_call_ids=["selfie-send"],
+                    tools_call_name=["send_message_to_user"], tools_call_args=[{"messages": [
+                        {"type": "plain", "text": "头发还有一点乱呢。"}, {"type": "image", "path": path}]}])
+            return LLMResponse(role="assistant", completion_text="给你看看。")
+
+        class Hooks(BaseAgentRunHooks):
+            async def on_agent_begin(self, run_context):
+                observe_core_tool_dispatch_begin(event, run_context)
+
+            async def on_agent_done(self, run_context, response):
+                restore_core_tool_dispatch(event, run_context)
+
+        provider = NS(provider_config={"id": "synthetic-image-model", "modalities": ["text", "image"]},
+                      get_model=lambda: "synthetic", text_chat=text_chat)
+        runner = ToolLoopAgentRunner()
+        await runner.reset(provider, request, wrapper, FunctionToolExecutor(), Hooks())
+        _ACTIVE_AGENT_RUNNERS[event.unified_msg_origin] = runner
+        self.addCleanup(_ACTIVE_AGENT_RUNNERS.pop, event.unified_msg_origin, None)
+        self.addCleanup(restore_core_tool_dispatch, event)
+        for _ in range(3):
+            _responses = [response async for response in runner.step()]
+        self.assertTrue(runner.done())
+        self.assertEqual(len(self.image_backend.calls), 1)
+        self.assertEqual(len(cached), 1)
+        platform.send_by_session.assert_awaited_once()
+        target, message = platform.send_by_session.call_args.args
+        self.assertEqual(str(target), event.unified_msg_origin)
+        self.assertEqual(message.get_plain_text(), "头发还有一点乱呢。")
+        self.assertEqual(len([part for part in message.chain if isinstance(part, Image)]), 1)
+        self.assert_no_reply_work(event)
+
     async def test_native_image_request_switch_is_consumed_before_provider_dispatch(self):
+        event, request = self.prepare("native-images-off")
+        original_request = NS(func_tool=request.func_tool)
         self.configure_images(ImageOutputConfigurationOwner(self.runtime), output_fields(),
                               {OUTPUT_GROUP + ".allow_user_requests": False})
-        event, request = self.prepare("native-images-off")
-        denied = await self.call(event, request, "image.generate", {"prompt": "红色"}, "disabled")
+        actions = inject_core_reply_tools(event, request, application=self.app)
+        self.assertNotIn("image.generate", actions)
+        self.assertNotIn("image.edit", actions)
+        self.assertIsNone(request.func_tool.get_tool(native_tool_name("image.generate")))
+        denied = await self.call(event, original_request, "image.generate", {"prompt": "红色"}, "disabled")
         self.assertEqual(json.loads(denied)["code"], "image_requests_disabled")
         self.assertEqual(self.image_backend.calls, [])
+        self.assert_no_reply_work(event)
+
+    async def test_natural_selfie_prompt_and_role_preferences_reach_native_provider(self):
+        self.configure_images(ImageOutputConfigurationOwner(self.runtime), output_fields(),
+            {OUTPUT_GROUP + ".prompt_format": "natural", OUTPUT_GROUP + ".style": "anime",
+             OUTPUT_GROUP + ".selfie_fixed_prompt": "角色一致性", OUTPUT_GROUP + ".selfie_negative_prompt": "错误人物"})
+        event, request = self.prepare("native-selfie")
+        self.assertIn("来张自拍看看", request.system_prompt)
+        self.assertIn("连贯的自然语言", request.system_prompt)
+        self.assertIn(native_tool_name("image.generate"), request.system_prompt)
+        self.assertIn("send_message_to_user", request.system_prompt)
+        tool = request.func_tool.get_tool(native_tool_name("image.generate"))
+        self.assertIn("生成成功本身不代表已发送", tool.description)
+        self.assertIn("selfie", tool.parameters["properties"]["prompt"]["description"])
+        original = next(spec for spec in self.app.tools.external.catalog_for(self.context) if spec.action == "image.generate")
+        self.assertNotIn("生成成功本身不代表已发送", original.description)
+        self.assertEqual(json.loads(original.parameters_json)["properties"]["prompt"], {"type": "string"})
+        result = await self.call(event, request, "image.generate", {"prompt": "selfie，在书桌边穿着家居服"}, "selfie")
+        self.result(result, "red")
+        invocation = self.image_backend.calls[0][0]
+        self.assertEqual(invocation.envelope["image_prompt"], {
+            "positive": "角色一致性\nanime illustration\nselfie，在书桌边穿着家居服", "negative": "错误人物"})
         self.assert_no_reply_work(event)
 
     async def test_generate_then_edit_saved_artifact_returns_native_mcp_original_without_independent_send(self):

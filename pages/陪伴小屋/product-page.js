@@ -1,7 +1,7 @@
 /* Navigation and status for capabilities owned by the V2 plugin. */
 "use strict";
 window.CompanionProduct = (() => {
-  const HOST = "astrbot_plugin_private_companion_v2", PREFIX = "/" + HOST + "/";
+  const HOST = "astrbot_plugin_private_companion", PREFIX = "/" + HOST + "/";
   const bundledExtensions = {content:"content", reality:"reality", together:"together", game:"game", live:"live", image:"image", screen:"companion.screen.native"};
   const e = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
   const labels = {connected:"已连接", installed:"已安装 · 未上报状态", missing:"未安装", disabled:"已停用",
@@ -11,6 +11,10 @@ window.CompanionProduct = (() => {
     written:"已保存", proposed:"待确认", achieved:"已达成", retired:"已归档", running:"运行中", new:"尚未启动", stopped:"已停止"};
   const errors = {staging_not_initialized:"角色数据尚未就绪，请在「账号与会话」保存角色映射；首次设置已保留，已保存可重新读取状态。", staging_host_terminated:"角色已停止，重新打开插件页面即可恢复。",
     dashboard_identity_required:"请从已登录的 AstrBot 管理界面打开陪伴小屋。", core_access_required:"当前账号没有管理权限。",
+    perception_request_invalid:"感知设置内容无效，请核对当前设置后再保存。",
+    perception_provider_unavailable:"感知服务尚未就绪，请核对模块运行状态。",
+    perception_save_failed:"感知设置未能完成保存，请刷新核对。",
+    integration_request_invalid:"家具清单读取请求无效，请重新读取状态。",
     bridge_timeout:"连接超时，请刷新核对。", invalid_response:"数据不完整，请刷新核对。", scope_changed:"对象已切换，请重新打开工作区。",
     /* labels 是「这一项现在能不能用」，不是开发进度。
      写「已接入」的那种说法回答的是「这一块做到哪一步了」，用户不关心；
@@ -61,10 +65,10 @@ window.CompanionProduct = (() => {
     staging_settings_incomplete:"运行设置尚未填写完整，请补齐账号、私聊对象、人格与模型。",
     /* V1 迁移：每个码说清「卡在哪、下一步做什么」。迁移块自己会先把缺的生效范围
        列出来，所以这几句多半出现在「数据变过了」或「V1 目录不在了」这类真实意外上。 */
-    legacy_root_missing:"没有找到 V1 的数据目录。它通常与 V2 的数据目录平级；也可以在插件配置的「兼容｜从 V1 迁移数据」里直接填绝对路径。",
-    legacy_root_invalid:"这个路径不是目录，请改填 V1 的数据目录。",
-    legacy_plan_stale:"V1 的数据在这次试算之后变过，请重新试算再执行——这样写入的才是你看到的那一份。",
-    legacy_nothing_to_migrate:"这份 V1 数据里没有可以自动迁移的来源。",
+    legacy_root_missing:"没有找到旧版数据目录。它通常与当前版本的数据目录平级；也可以在插件配置的「兼容｜旧版资料迁入」里直接填绝对路径。",
+    legacy_root_invalid:"这个路径不是目录，请改填旧版数据目录。",
+    legacy_plan_stale:"旧版数据在这次试算之后变过，请重新试算再执行，这样写入的才是你看到的那一份。",
+    legacy_nothing_to_migrate:"这份旧版数据里没有可以自动迁移的来源。",
     legacy_scope_unavailable:"这份角色设置里没有要写入的配置分组，这一组会跳过，其余照常。",
     legacy_apply_failed:"迁移没有写入任何设置，请重新试算后再试一次。",
     legacy_request_invalid:"这次操作缺少必要的信息，请重新走一遍迁移的三步。"};
@@ -378,13 +382,14 @@ window.CompanionProduct = (() => {
     && ["ok", "error"].includes(value.status) && hasOwn(value, "data")
     && Object.keys(value).every(name => ENVELOPE_KEYS.has(name));
   function unwrap(response) {
-    const wrapped = isEnvelope(response) ? response : isEnvelope(response?.data) ? response.data : null;
+    const dataOnly = response && typeof response === "object" && !Array.isArray(response)
+      && Object.keys(response).length === 1 && hasOwn(response, "data");
+    const wrapped = isEnvelope(response) ? response : dataOnly && isEnvelope(response.data) ? response.data : null;
     if (wrapped?.status === "error") throw fail(codeOf(wrapped) || "invalid_response", true);
     let value = wrapped ? wrapped.data : response;
     /* A bridge shim may preserve one anonymous data layer without the
        envelope fields.  Only unwrap the exact {data: ...} shape. */
-    if (!wrapped && response && typeof response === "object" && !Array.isArray(response)
-        && !hasOwn(response, "status") && hasOwn(response, "data")
+    if (!wrapped && dataOnly
         && response.data && typeof response.data === "object" && !Array.isArray(response.data)) value = response.data;
     if (!value || typeof value !== "object" || Array.isArray(value)) throw fail("invalid_response");
     return value;
@@ -423,10 +428,10 @@ window.CompanionProduct = (() => {
   }
   /* 桥的 endpoint 是**插件相对**路径：不带前导斜杠，也**不带插件目录名**。
    *
-   * 目录给的是绝对地址 `/astrbot_plugin_private_companion_v2/host/status`，
+   * 目录给的是绝对地址 `/astrbot_plugin_private_companion/host/status`，
    * 交给桥之前要切掉 `PREFIX`，送出的才是 `host/status`。宿主拿插件名与
    * endpoint 拼成真实路由，所以带上目录名等于拼两次，直接 404：
-   *   /astrbot_plugin_private_companion_v2/astrbot_plugin_private_companion_v2/host/status
+   *   /astrbot_plugin_private_companion/astrbot_plugin_private_companion/host/status
    *
    * 这里曾经写成「只去掉前导斜杠、保留目录名」，注释还断言「两种宿主都成立」——
    * 那是没验证过的猜测。反证有三处：
@@ -1157,7 +1162,7 @@ window.CompanionProduct = (() => {
   const unavailableReason = name => unavailable(name);
   return {hosted,unwrap,connect,refreshSummary,refreshIntegrations,manageExtension,choose,chooseRole,selection:()=>({...selected}),scopeKey,role,target,roleTarget,roleChoices,identity,connection,renderScope,scopeVisible,
     /* 首次使用引导走同一套桥接与错误翻译，别让它自己再实现一遍超时与判据。 */
-    request:api,acquaintanceDirectory,
+    request:api,acquaintanceDirectory,refreshDirectory:refreshDirectoryAfterMapping,
     errorLabel:code=>errors[code]||"当前设置未能确认，请刷新并核对账号、人格与模型。",
     theme:currentTheme,setTheme,appearance:()=>({...appearance}),setAppearance,resetAppearance,dimensions,
     themeLight,lightOf:id=>themeLight[id]||"day",followLight:()=>followLight,setFollowLight,syncLight,

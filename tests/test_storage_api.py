@@ -28,7 +28,7 @@ class StorageApiTests(unittest.IsolatedAsyncioTestCase):
         temporary = TemporaryDirectory(prefix="companion-v2-storage-api-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        self.default_root = self.root / "plugin-data" / "astrbot_plugin_private_companion_v2"
+        self.default_root = self.root / "plugin-data" / "astrbot_plugin_private_companion"
         self.default_root.mkdir(parents=True)
         self.installation_id = "installation-main"
         self.profile_root = self.default_root / "installations" / "main"
@@ -66,6 +66,31 @@ class StorageApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.config["storage"]["path"], str(selected))
         self.assertEqual(self.config["storage"]["backup_path"], str(backup))
         self.assertEqual(self.config["storage"]["retention_count"], 5)
+
+    async def test_save_preserves_host_configuration_runtime_locks(self):
+        from astrbot.core.config.astrbot_config import AstrBotConfig
+
+        config_path = self.root / "host-config.json"
+        self.config = AstrBotConfig(str(config_path), default_config=self.config)
+        self.controller.config = self.config
+
+        def save(candidate):
+            self.config.clear()
+            self.config.update(candidate)
+            self.config.save_config()
+
+        self.controller.save_plugin_config = save
+        selected = self.root / "external-runtime"
+        self.request.payload = json.dumps({"action": "save", "path": str(selected),
+            "backup_path": "", "retention_count": 10, "retention_days": 90}).encode()
+        with patch("astrbot_host.storage_api.request", self.request):
+            response = await self.api.update()
+
+        self.assertEqual(response["status"], "ok", response)
+        self.assertTrue(response["data"]["restart_required"])
+        saved = json.loads(config_path.read_text(encoding="utf-8-sig"))
+        self.assertEqual(saved["storage"]["path"], str(selected))
+        self.assertIs(self.controller.config, self.config)
 
     async def test_invalid_path_does_not_change_configuration(self):
         self.request.payload = json.dumps({"action": "save", "path": "relative",

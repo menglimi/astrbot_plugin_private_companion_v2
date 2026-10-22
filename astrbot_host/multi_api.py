@@ -17,6 +17,7 @@ from .growth_api import GrowthWebAPI, PREFIX as GROWTH_PREFIX
 from .web_api import StagingWebAPI, outcome_response
 from .group_settings import GroupTarget
 from .group_memory_api import GroupMemoryWebAPI
+from .group_model_api import GroupModelWebAPI
 from .group_reply_api import GroupReplyWebAPI
 from .page_api import PageWebAPI
 from .acquaintance_api import AcquaintanceWebAPI
@@ -42,7 +43,7 @@ from .display_names import display_names
 from .identity_derivation import role_display_name
 
 
-PREFIX = "/astrbot_plugin_private_companion_v2/host"
+PREFIX = "/astrbot_plugin_private_companion/host"
 INSTALLATION_CONFIGURATION_SECTIONS = ("proactive.contact", "reaction", "budget")
 TARGET_CONFIGURATION_SECTIONS = tuple(name for name in SECTIONS
     if name not in INSTALLATION_CONFIGURATION_SECTIONS)
@@ -136,8 +137,7 @@ class MultiHostWebAPI:
              "config_api": (None if isinstance(target, GroupTarget) else
                             PREFIX + "/targets/" + target.target_id + "/roles/" + digest(role) + "/config"),
              "role_config_api": None,
-             "model_api": (None if isinstance(target, GroupTarget) else
-                           PREFIX + "/targets/" + target.target_id + "/roles/" + digest(role) + "/model"),
+             "model_api": PREFIX + "/targets/" + target.target_id + "/roles/" + digest(role) + "/model",
              "perception_native_api": (None if isinstance(target, GroupTarget) else
                            PREFIX + "/targets/" + target.target_id + "/roles/" + digest(role) + "/perception-native"),
              "reality_access_api": (None if isinstance(target, GroupTarget) else
@@ -171,8 +171,9 @@ class MultiHostWebAPI:
 
     @staticmethod
     def _admin():
+        from .management_identity import _authenticated_api_key
         username = request.username
-        if type(username) is not str or not username.strip() or username.startswith("api_key:"):
+        if type(username) is not str or not username.strip() or (username.startswith("api_key:") and not _authenticated_api_key(username)):
             raise TaskError("dashboard_identity_required", "sign in to the AstrBot Dashboard as an administrator")
 
     async def api_status(self):
@@ -260,6 +261,8 @@ class MultiHostWebAPI:
                         role["group_memory_api"]))
                     routes.extend(GroupReplyWebAPI(self.controller, target["target_id"], role["role_id"]).routes(
                         role["reply_api"]))
+                    routes.extend(GroupModelWebAPI(self.controller, target["target_id"], role["role_id"]).routes(
+                        role["model_api"]))
                     routes.extend(LegacyGroupDataWebAPI(self.controller, target["target_id"], role["role_id"]).routes(
                         role["legacy_group_data_api"]))
                 if role["memory_api"] is None:

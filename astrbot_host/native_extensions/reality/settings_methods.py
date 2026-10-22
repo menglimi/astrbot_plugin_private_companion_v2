@@ -1,5 +1,6 @@
 """V2 reality settings services."""
 from __future__ import annotations
+from companion_v2.execution.models import TaskError
 from .common import *
 
 class RealitySettingsMethods:
@@ -176,7 +177,7 @@ class RealitySettingsMethods:
                 mihome_api = self._mihome_api()
                 handler = getattr(mihome_api, 'page_action', None) if mihome_api is not None else None
                 if not callable(handler):
-                    raise ValueError(self.mihome_unavailable_reason())
+                    raise TaskError('native_mihome_unavailable', self.mihome_unavailable_reason())
                 mihome_payload = dict(payload)
                 mihome_payload['action'] = action.removeprefix('mihome_')
                 result = await handler(mihome_payload)
@@ -249,13 +250,15 @@ class RealitySettingsMethods:
             elif action in {'update_camera_policy', 'save_camera_policy'}:
                 user = self._user(payload.get('user_id'), create=False)
                 if not user:
-                    raise ValueError('没有找到该用户')
+                    raise TaskError('camera_user_not_configured', '请先确认该用户的摄像头授权')
                 result = self._reality_touch_update_camera_policy(user, payload, user_id=_single_line(payload.get('user_id'), 120))
                 self._save_data_sync()
             elif action == 'consent_camera':
                 user_id = _single_line(payload.get('user_id'), 120)
-                if type(payload.get('confirmed')) is not bool or not self._reality_touch_camera_user_eligible(user_id):
-                    raise ValueError('摄像头确认需要已授权的 V2 管理者身份')
+                if type(payload.get('confirmed')) is not bool:
+                    raise ValueError('摄像头确认需要明确的确认或撤销指令')
+                if not self._reality_touch_camera_user_eligible(user_id):
+                    raise TaskError('camera_user_ineligible', '摄像头确认需要已授权的 V2 管理者身份')
                 user = self._user(user_id, create=True)
                 if payload['confirmed']:
                     user['reality_touch_camera_consent'] = {
@@ -297,7 +300,8 @@ class RealitySettingsMethods:
             else:
                 return {'ok': False, 'message': '不支持的操作'}
         except Exception as exc:
-            return {'ok': False, 'message': _single_line(exc, 240)}
+            return {'ok': False, 'message': _single_line(exc, 240),
+                    'code': exc.code if isinstance(exc, TaskError) else 'native_reality_action_failed'}
         snapshot = self._reality_touch_page_snapshot()
         if mihome_page_snapshot is not None:
             snapshot['mihome'] = mihome_page_snapshot
@@ -373,6 +377,7 @@ class RealitySettingsMethods:
                                         state_fields=None) -> dict[str, Any]:
         """Save only the portable V1 Reality settings approved by the converter."""
         from companion_v2.legacy.reality_migration import (
+            REALITY_INTEGER_BOUNDS,
             REALITY_SETTING_DEFAULTS,
             reality_settings_state_token,
         )
@@ -387,61 +392,40 @@ class RealitySettingsMethods:
         if reality_settings_state_token(self.config, fields) != expected_state_token:
             return {'saved': False, 'reason': 'reality_config_changed'}
 
-        numeric_bounds = {
-            'camera.min_interval_seconds': (10, 3600),
-            'camera.capture_timeout_seconds': (2, 20),
-            'camera.analysis_timeout_seconds': (5, 90),
-            'audio.default_playback_volume': (0, 100),
-        }
         for field, value in changes.items():
             if field == 'camera.enabled' and type(value) is not bool:
                 return {'saved': False, 'reason': 'reality_camera_setting_invalid'}
-            if field in numeric_bounds:
-                minimum, maximum = numeric_bounds[field]
+            if field in REALITY_INTEGER_BOUNDS:
+                minimum, maximum = REALITY_INTEGER_BOUNDS[field]
                 if type(value) is not int or not minimum <= value <= maximum:
                     return {'saved': False, 'reason': 'reality_numeric_setting_invalid'}
             if field == 'timezone' and (not isinstance(value, str) or not value.strip() or len(value) > 80):
                 return {'saved': False, 'reason': 'reality_timezone_invalid'}
+            if field == 'vision_provider_id' and (type(value) is not str or not value.strip() or len(value) > 160):
+                return {'saved': False, 'reason': 'reality_vision_provider_invalid'}
 
-        previous_values: dict[str, Any] = {}
-        for field in changes:
-            current: Any = self.config
-            for part in field.split('.'):
-                current = current.get(part) if isinstance(current, dict) else None
-            previous_values[field] = current
+        from copy import deepcopy
+        previous = deepcopy(dict(self.config))
 
         try:
             for field, value in changes.items():
-                parts = field.split('.')
-                group = self.config
-                for part in parts[:-1]:
-                    nested = group.get(part)
-                    if not isinstance(nested, dict):
-                        nested = {}
-                        group[part] = nested
-                    group = nested
-                group[parts[-1]] = value
+                group, separator, key = field.partition('.')
+                if separator:
+                    self._set_group_config_field(group, key, value)
+                else:
+                    self.config[field] = value
             saver = getattr(self.config, 'save_config', None)
             if not callable(saver):
                 raise RuntimeError('reality_config_save_unavailable')
             if saver() is False:
                 raise RuntimeError('reality_config_save_failed')
         except Exception:
-            for field, value in previous_values.items():
-                parts = field.split('.')
-                group = self.config
-                for part in parts[:-1]:
-                    nested = group.get(part)
-                    if not isinstance(nested, dict):
-                        break
-                    group = nested
-                else:
-                    if value is None:
-                        group.pop(parts[-1], None)
-                    else:
-                        group[parts[-1]] = value
+            self.config.clear()
+            self.config.update(previous)
             raise
 
         self._sync_runtime_config()
         self.environment_perception_timezone = self._cfg_str('timezone', 'Asia/Shanghai') or 'Asia/Shanghai'
+        if 'vision_provider_id' in changes:
+            self.plugin_vision_provider_id = self._cfg_str('vision_provider_id', '')
         return {'saved': True, 'fields': sorted(changes)}

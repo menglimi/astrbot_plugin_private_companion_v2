@@ -426,6 +426,8 @@ class ContactSchedulingTests(ContactScheduleFixture, unittest.IsolatedAsyncioTes
         self.assertEqual(rhythm["delivered_today"], 1)
         self.assertEqual(rhythm["delivered_last_4_hours"], 1)
         self.assertEqual(rhythm["minutes_since_last_delivery"], 40)
+        self.assertEqual(rhythm["last_delivered_purpose"], "chat")
+        self.assertEqual(rhythm["recent_purposes_today"], ["chat"])
 
     async def test_skips_do_not_consume_daily_contact_allowance(self):
         app = await self.enabled()

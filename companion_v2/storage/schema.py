@@ -2067,6 +2067,20 @@ MIGRATION_V63_TO_V64_FINGERPRINT = hashlib.sha256(
     "\n".join(V64_MIGRATION_STATEMENTS).encode("utf-8")
 ).hexdigest()
 
+V65_MIGRATION_STATEMENTS = (
+    "ALTER TABLE outbox ADD COLUMN receipt_ref TEXT CHECK(receipt_ref IS NULL OR length(receipt_ref) BETWEEN 1 AND 512)",
+)
+V65_REQUIRED_TABLES = V64_REQUIRED_TABLES
+V65_SCHEMA_STATEMENTS = V64_SCHEMA_STATEMENTS + V65_MIGRATION_STATEMENTS
+REQUIRED_TABLES = V65_REQUIRED_TABLES
+SCHEMA_STATEMENTS = V65_SCHEMA_STATEMENTS
+SCHEMA_VERSION_V65 = "companion-v2.storage.v65"
+SCHEMA_VERSION = SCHEMA_VERSION_V65
+MIGRATION_V64_TO_V65_ID = "companion-v2.storage.v64-to-v65"
+MIGRATION_V64_TO_V65_FINGERPRINT = hashlib.sha256(
+    "\n".join(V65_MIGRATION_STATEMENTS).encode("utf-8")
+).hexdigest()
+
 
 def migration_count() -> int:
     """How many ordered migrations a fully upgraded data root records.

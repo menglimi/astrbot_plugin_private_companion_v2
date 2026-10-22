@@ -8,6 +8,8 @@ from dataclasses import replace
 from datetime import datetime, timezone
 import inspect
 import json
+import logging
+import traceback
 from types import MappingProxyType
 from typing import Callable, Mapping
 
@@ -39,6 +41,20 @@ def together_execution_binding(settings):
             "tts_provider_id": voice.provider_for_language(),
             "tts_language": voice.language,
             "tts_timeout_seconds": voice.timeout_seconds}
+
+
+def together_room_execution(binding, service):
+    """Pin explicit room model choices while retaining the verified host defaults."""
+    execution = dict(binding)
+    for target, setting in (("model_provider_id", "chat_provider_id"),
+                            ("tts_provider_id", "tts_provider_id")):
+        selected = str(getattr(service, setting, "") or "").strip()
+        if selected:
+            execution[target] = selected
+    timeout = getattr(service, "tts_timeout_seconds", None)
+    if type(timeout) is int and 15 <= timeout <= 180:
+        execution["tts_timeout_seconds"] = timeout
+    return execution
 
 
 class NativeExtensionRegistry(AstrBotToolPort):
@@ -282,7 +298,7 @@ class NativeExtensionRegistry(AstrBotToolPort):
                         continue
                     if self.current_declaration(declaration.host_tool_id) != declaration:
                         raise TaskError("native_provider_changed", "native declaration is no longer current")
-                    if package.extension_id not in packages and package.package_id.startswith("astrbot_plugin_private_companion_v2."):
+                    if package.extension_id not in packages and package.package_id.startswith("astrbot_plugin_private_companion."):
                         from companion_v2.capabilities.native_catalog import register_native_replacement
                         predecessors = {"content": "astrbot_plugin_content_companion", "image": "astrbot_plugin_image_companion",
                             "reality": "astrbot_plugin_reality_companion", "together": "astrbot_plugin_together_companion",
@@ -322,7 +338,9 @@ class NativeExtensionRegistry(AstrBotToolPort):
             return Outcome.success(tuple(packages.values()))
         except TaskError as error:
             return Outcome.failed(error.code, str(error))
-        except Exception:
+        except Exception as error:
+            logging.getLogger(__name__).error("[Companion] 原生能力目录注册异常 error_type=%s\n%s",
+                type(error).__name__, "".join(traceback.format_tb(error.__traceback__)))
             return Outcome.failed("native_catalog_registration_failed", "native catalog registration failed")
 
     def _guard(self, host_tool_id, invocation):
@@ -402,7 +420,8 @@ class NativeExtensionRegistry(AstrBotToolPort):
                 raise TaskError("native_persona_guard_missing", "room creation requires a verified host persona")
             request["host_persona"] = await self.persona_guard(
                 invocation.context.scope, invocation.context.role_binding)
-            request["host_execution"] = dict(self.together_execution)
+            request["host_execution"] = together_room_execution(
+                self.together_execution, entry[1].instance)
             guard()
         if self.content is not None and invocation.descriptor.tool.action in CONTENT_ACTIONS:
             self.content.sources.synchronize()

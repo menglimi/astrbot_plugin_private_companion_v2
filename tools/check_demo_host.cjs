@@ -41,7 +41,7 @@ async function run(origin, output) {
     const endpoint = mode === "single" ? "staging" : "host";
     const params = new URLSearchParams({batch_id: batch.batch_id});
     if (mode === "multi") params.set("target_id", batch.target_id);
-    const response = await context.request.get(`${origin}/api/plug/astrbot_plugin_private_companion_v2/${endpoint}/preview?${params}`);
+    const response = await context.request.get(`${origin}/api/plug/astrbot_plugin_private_companion/${endpoint}/preview?${params}`);
     const result = await response.json();
     assert.equal(result.status, "ok", JSON.stringify(result));
     assert.equal(result.data.sent, false);
@@ -111,7 +111,7 @@ async function run(origin, output) {
       if (mode === "multi") {
         assert.equal(new Set(result.batches.map((b) => b.bot_id)).size, 2);
         const params = new URLSearchParams({target_id: "second", batch_id: result.batches[0].batch_id});
-        const mismatch = await (await context.request.get(`${origin}/api/plug/astrbot_plugin_private_companion_v2/host/preview?${params}`)).json();
+        const mismatch = await (await context.request.get(`${origin}/api/plug/astrbot_plugin_private_companion/host/preview?${params}`)).json();
         assert.equal(mismatch.data.code, "host_target_mismatch");
       }
       checks.push("sdk_messages_generate_preview_with_bot_isolation");

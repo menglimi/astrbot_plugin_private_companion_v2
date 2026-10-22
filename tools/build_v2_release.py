@@ -13,8 +13,8 @@ from tempfile import TemporaryDirectory
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-CORE_ID = "astrbot_plugin_private_companion_v2"
-VERSION = "2.2.0"
+CORE_ID = "astrbot_plugin_private_companion"
+VERSION = "7.0.0"
 RELEASE_SCHEMA = "companion.v2.release.v2"
 NATIVE_EXTENSION_FILES = {
     "content": ("companion_v2/content/assembly.py", "companion_v2/content/provider.py",
@@ -101,13 +101,30 @@ ROOT_FILES = {
 EXCLUDED_DIRS = {
     "data", ".git", "__pycache__", ".pytest_cache", "node_modules", "logs",
     "dist", "build", "_archive", "protected_model", "desktop_pet", ".codex-plugin", "%SystemDrive%",
+    # Design exports and expression-page design boards are development references,
+    # not runtime resources. RC22 shipped 13 of them (about 5.4 MB) by mistake.
+    "page-designs", "design-previews", "design-exports", "expression-redesign-20261007",
 }
 EXCLUDED_FILES = {
+    # 生成物与开发快照：不是运行时资源。pages/ 下的这些文件此前有 14.06 MB
+    # （压缩后 10.19 MB，占整包四分之一）被原样打进 ZIP——单个 theme-preview.html
+    # 就占 25.2%。它们由 tools/build_*.py 按需生成，落点在 build/。
+    # 保留条目而不是直接依赖文件不存在：重新生成一次也不会把包撑大。
     "pages/陪伴小屋/shell-preview.html",
     "pages/陪伴小屋/shell-preview-mock.html",
-    "pages/陪伴小屋/_exp-no-home.html",
-    "pages/陪伴小屋/workspace-bundle.js",
+    "pages/陪伴小屋/theme-preview.html",
+    "pages/陪伴小屋/v2-surface-preview.html",
+    "pages/陪伴小屋/_probe-timeline.html",
+    # 文档侧的设计稿快照同样是生成物（contact-rhythm 例外：它是生成器读的模板）。
+    "docs/V2_SURFACE_PREVIEW_20260928.html",
+    "docs/RELEASE_V2_0.md",
+    "docs/INTEGRATION_ACCEPTANCE_V2_0.md",
+    # The migration acceptance note contains counts from a real private data set.
+    "docs/V670_TO_V700_MIGRATION_20261019.md",
     "fixtures/reply_efficiency_preview.json",
+    # This standalone mini-game is not part of the companion plugin release.
+    "tests/bubble_bonbon_smoke.mjs",
+    "tests/_trace_apply.py",
 }
 EXCLUDED_SUFFIXES = {".pyc", ".pyo", ".log", ".out", ".db", ".sqlite", ".sqlite3", ".bak", ".backup"}
 TEXT_SUFFIXES = {
@@ -342,8 +359,8 @@ def verify_runtime_sources(files):
 
 def build_plugin(root, directories, output):
     info = metadata(root)
-    if info["plugin_id"] != CORE_ID or root.name != CORE_ID:
-        raise ValueError("plugin directory and metadata identity mismatch: " + root.name)
+    if info["plugin_id"] != CORE_ID:
+        raise ValueError("metadata identity mismatch: " + info["plugin_id"])
     if info["version"] != VERSION:
         raise ValueError("V2 version mismatch")
     relative_files = {}
@@ -370,11 +387,11 @@ def build_plugin(root, directories, output):
         source = "pages/陪伴小屋/" + name
         if source not in relative_files or digest(relative_files[source]) != expected:
             raise ValueError("stale cottage asset: " + name + "; run sync_framework_page.py first")
-    files = {root.name + "/" + name: payload for name, payload in relative_files.items()}
+    files = {CORE_ID + "/" + name: payload for name, payload in relative_files.items()}
     file_manifest = {name: digest(payload) for name, payload in relative_files.items()}
-    files[root.name + "/RELEASE_FILES.json"] = (json.dumps({"product_version": VERSION,
+    files[CORE_ID + "/RELEASE_FILES.json"] = (json.dumps({"product_version": VERSION,
         "plugin": info, **runtime_contract, "files": file_manifest}, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-    filename = root.name + "-" + info["version"] + ".zip"
+    filename = CORE_ID + "-" + info["version"] + ".zip"
     target = output / filename
     zip_entries(target, files)
     return {**info, "filename": filename, "sha256": digest(target.read_bytes()),
@@ -392,16 +409,14 @@ def build(output, core_only=False):
     with TemporaryDirectory(prefix="companion-v2-package-") as temporary:
         stage = Path(temporary)
         packages = [build_plugin(ROOT, CORE_DIRS, stage)]
-        manifest = {"schema": RELEASE_SCHEMA, "product": "我会永远陪着你 V2.0", "version": VERSION,
+        manifest = {"schema": RELEASE_SCHEMA, "product": "我会永远陪着你", "version": VERSION,
                     "astrbot_version": packages[0]["astrbot_version"],
-                    "data_policy": "V2 独立数据，不打包或迁移 V1 用户数据",
-                    "provider_integration": "Seven native internal extensions are bundled and owned by the single V2 plugin",
+                    "data_policy": "隔离运行数据；仅在用户确认后读取旧版来源并写入新数据根",
+                    "provider_integration": "Seven native internal extensions are bundled and owned by one plugin",
                     "native_extensions": sorted(NATIVE_EXTENSION_FILES),
                     "external_plugin_dependencies": [],
                     "packages": packages}
         (stage / "release-manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
-        for filename in ("RELEASE_V2_0.md", "INTEGRATION_ACCEPTANCE_V2_0.md"):
-            (stage / filename).write_bytes(checked_payload(ROOT / "docs" / filename, ROOT))
         hashes = [(p.name, digest(p.read_bytes())) for p in sorted(stage.iterdir()) if p.is_file()]
         (stage / "SHA256SUMS.txt").write_text("".join(sha + "  " + name + "\n" for name, sha in hashes), encoding="utf-8", newline="\n")
         for path in stage.iterdir():

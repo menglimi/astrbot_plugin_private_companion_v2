@@ -5,6 +5,7 @@ import unittest
 
 from companion_v2.adapters.astrbot.model_wire import tool_alias
 from companion_v2.conversation.flow import ConversationPolicy
+from companion_v2.conversation.generation import MODEL_FAILURE_NOTICE
 from companion_v2.conversation.reply_management import ReplyManagement
 from companion_v2.conversation.segmentation import SegmentationPolicy, LLM_SEGMENT_MARKER as MARKER
 from companion_v2.conversation.voice_reply import VoiceReplyDelivery, VoiceReplyPolicy
@@ -153,8 +154,9 @@ class SegmentedStreamDeliveryTests(StreamingFixture, unittest.IsolatedAsyncioTes
         batch = host.receive(snapshot).unwrap()
         app = host.application
         await self.done(app, batch)
-        self.assertEqual(self.parts(app, batch), ())
-        self.assertEqual(self.texts(), [])
+        self.assertEqual("".join(part["text"] for part in self.parts(app, batch)), MODEL_FAILURE_NOTICE)
+        self.assertEqual("".join(self.texts()), MODEL_FAILURE_NOTICE)
+        self.assertTrue(all(part["state"] == "delivered" for part in self.parts(app, batch)))
         self.assertEqual(len(self.client_state.calls), 1)
         call = app.runtime.read_one("SELECT state, actual_tokens FROM model_calls", ())
         self.assertEqual((call["state"], call["actual_tokens"]), ("unknown", 40))
@@ -169,8 +171,9 @@ class SegmentedStreamDeliveryTests(StreamingFixture, unittest.IsolatedAsyncioTes
         batch = host.receive(snapshot).unwrap()
         app = host.application
         await self.done(app, batch)
-        self.assertEqual(self.parts(app, batch), ())
-        self.assertEqual(self.texts(), [])
+        self.assertEqual("".join(part["text"] for part in self.parts(app, batch)), MODEL_FAILURE_NOTICE)
+        self.assertEqual("".join(self.texts()), MODEL_FAILURE_NOTICE)
+        self.assertTrue(all(part["state"] == "delivered" for part in self.parts(app, batch)))
         self.assertEqual(len(self.client_state.calls), 1)
         call = app.runtime.read_one("SELECT state, actual_tokens FROM model_calls", ())
         self.assertEqual((call["state"], call["actual_tokens"]), ("unknown", None))
@@ -258,7 +261,7 @@ class SegmentedStreamDeliveryTests(StreamingFixture, unittest.IsolatedAsyncioTes
 
         sends = self.native.platform.client._api._wsr_api.calls
         self.assertEqual([[part["type"] for part in params["message"]] for _, params in sends],
-                         [["text", "record"], ["text", "image", "record"]])
+                         [["text"], ["record"], ["text", "image"], ["record"]])
         self.assertEqual([part["text"] for part in self.parts(app, batch)],
                          ["第一段。第一段正文。", "第二段。第二段正文。"])
         self.assertEqual(spoken, [("第一段。", "", 30), ("第二段。", "", 30)])
@@ -351,12 +354,12 @@ class SegmentedStreamDeliveryTests(StreamingFixture, unittest.IsolatedAsyncioTes
         self.advance(app, 2)
         self.assertEqual((await self.done(app, batch))["state"], "complete")
         self.assertEqual([[p["type"] for p in params["message"]] for _, params in sends],
-                         [["record"], ["text"], ["image", "image", "record", "text"]])
+                         [["record"], ["text"], ["record"], ["image", "image", "text"]])
         self.assertEqual(self.diagnostics(app, batch), [
             ("delivered", "planned", "ready", ["voice"], 1),
             ("delivered", "planned", "empty", ["text"], 0),
             ("delivered", "planned", "ready", ["image", "image", "voice", "text"], 0)])
-        self.assertEqual([p["data"]["file"] for p in sends[2][1]["message"][:2]],
+        self.assertEqual([p["data"]["file"] for p in sends[3][1]["message"][:2]],
                          ["base64://" + base64.b64encode(b).decode("ascii") for b in reversed(originals)])
         self.assertEqual(spoken, [(speech, "sealed-tts", 12) for speech in ("第一段。", "第二段。", "第三段。")])
         self.assertEqual(len(self.client_state.calls), 2)

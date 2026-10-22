@@ -3,7 +3,7 @@
 import asyncio
 from collections import defaultdict
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import json
 import logging
@@ -20,13 +20,19 @@ from companion_v2.adapters.astrbot.onebot_group import OneBotGroupSender
 from companion_v2.adapters.astrbot.presence import OneBotPresencePort
 from companion_v2.adapters.astrbot.provider import AstrBotTextProvider
 from companion_v2.adapters.astrbot.provider_catalog import TextProviderSettings, assemble_providers, loaded_routing
+from companion_v2.adapters.astrbot.tools import CompositeAstrBotToolPort
 from companion_v2.configuration.registry import FieldRegistry
 from companion_v2.conversation.content.authoring_tasks import authoring_profiles
 from companion_v2.conversation.delivery import DeliveryReceipt, LocalSender
 from companion_v2.conversation.messages import REPLY_KIND
 from companion_v2.conversation.pokes import poke_reply_profile
 from companion_v2.conversation.participation import group_participation_settings
-from companion_v2.conversation.reply_settings import expression_prompt_sections
+from companion_v2.conversation.reply_settings import (
+    GROUP, expression_prompt_sections, private_debounce_settings,
+)
+from companion_v2.conversation.private_debounce import (
+    DEFAULTS as PRIVATE_DEBOUNCE_DEFAULTS, Policy as PrivateDebouncePolicy,
+)
 from companion_v2.conversation.media.review_service import image_review_profile
 from companion_v2.conversation.media.context_caption import context_caption_profile
 from companion_v2.conversation.media.image_narration import image_narration_profile
@@ -53,11 +59,13 @@ from companion_v2.role_work.growth.progress import growth_progress_profile
 from companion_v2.role_work.journal.self_review_service import self_review_profile
 from companion_v2.expression.style_service import expression_learning_profile
 from companion_v2.expression.review import expression_review_profile
+from companion_v2.conversation.relay_settings import configuration_fields as relay_configuration_fields
 from .multi_authority import HOST_ID
 from .model_settings import conversation_provider_resolver
 from .group_settings import GroupTarget
 from .group_admission import group_trigger_facts, mentioned_account_ids
 from .voice import NativeVoiceReply
+from .relay_tools import RelayToolPort
 
 
 logger = logging.getLogger(__name__)
@@ -317,6 +325,15 @@ class ReviewFallbackRoutes:
             return None
 
 
+@dataclass(frozen=True)
+class CoreReplyPlan:
+    """Resolved identity plus the reply settings needed before model preparation."""
+
+    captured: NativeConversationInput
+    context: TaskContext
+    debounce: PrivateDebouncePolicy | None = None
+
+
 class MultiHostSession:
     def __init__(self, runtime, native_context, *, settings, personas, authority, native_types,
                  provider_fingerprint, runtime_instance_id, now, native_tool_port=None, news_port=None,
@@ -392,14 +409,20 @@ class MultiHostSession:
         modes = ["onebot_private", "onebot_group"]
         self.sender_binding = ProviderBinding("message.delivery", "astrbot-multi." + ".".join(modes),
             native_types.version, digest([runtime.installation_id, *modes]))
+        relay_port = RelayToolPort(self.bridge, native_types=native_types)
+        tool_port = CompositeAstrBotToolPort(native_tool_port, relay_port)
+        registry_fields = configuration_fields(profiles)
+        registry_ids = {item.field_id for item in registry_fields}
+        registry_fields += tuple(field for field in relay_configuration_fields()
+                                 if field.field_id not in registry_ids)
         self.host = AstrBotCompanionHost(runtime, event_port=self.bridge.ports, identity_port=self.bridge.ports,
             role_port=self.bridge.ports, runtime_identity=RuntimeIdentity("companion", runtime_instance_id, "astrbot", HOST_ID),
-            registry=FieldRegistry(version="astrbot-multi.v1", fields=configuration_fields(profiles)),
+            registry=FieldRegistry(version="astrbot-multi.v1", fields=registry_fields),
             profiles=profiles, providers=tuple(model.local_provider() for model in self.models), budget=common.budget,
             budget_soft=common.budget_soft,
             default_provider_resolver=conversation_provider_resolver(native_context),
             sender=LocalSender(self.sender_binding, self.send, supports_images=True, supports_poke=True), policy=common.policy, limits=common.limits, now=now,
-            tool_port=native_tool_port, segmentation=common.segmentation,
+            tool_port=tool_port, segmentation=common.segmentation,
             # 记忆归属读的是别家插件自己公开的声明；跨插件读取只在这一个适配函数里，
             # 核心不反向导入宿主包。写入端口复用同一条发现路径：日记、梦境与主动
             # 消息完成后推给当前对外表达记忆的一方，失败不影响已完成的领域动作。
@@ -412,6 +435,7 @@ class MultiHostSession:
             solar_term_port=solar_term_port,
             qzone_transport=qzone_transport,
             voice_policy=common.voice_reply_policy if common.voice_reply_enabled else None,
+            wake_port=self._wake_snapshot,
             presence_port=MultiPresence(self))
         self.application = self.host.application
         self.application.image_fallback.attach_port(ReviewFallbackRoutes(self))
@@ -434,6 +458,29 @@ class MultiHostSession:
     def scope(self, target, conversation_id):
         return ScopeRef(self.runtime.installation_id, target.platform_id, ScopeKind.PRIVATE, target.participant_id,
                         target.bot_id, target.account_id, conversation_id, target.participant_id)
+
+    def _wake_snapshot(self, context):
+        """Read the Reality wake signals for this exact private target.
+
+        The port is deliberately narrow: it returns the gateway's typed mobile
+        projection and the wake session state, never message bodies, feedback
+        text or device identifiers.
+        """
+        registry = self.native_tool_port
+        getter = getattr(registry, "api", None)
+        api = getter("reality") if callable(getter) else None
+        if api is None:
+            return {}
+        principal = getattr(getattr(context, "actor", None), "principal", None)
+        user_id = getattr(principal, "native_account_id", "")
+        if not isinstance(user_id, str) or not user_id.strip():
+            return {}
+        mobile_getter = getattr(api, "mobile_context", None)
+        wakeup_getter = getattr(api, "wakeup_snapshot", None)
+        mobile = mobile_getter(user_id.strip()) if callable(mobile_getter) else {}
+        wakeup = wakeup_getter(user_id.strip()) if callable(wakeup_getter) else {}
+        return {"mobile": mobile if isinstance(mobile, dict) else {},
+                "wakeup": wakeup if isinstance(wakeup, dict) else {}}
 
     async def synchronize(self, target):
         account = self.bridge.accounts[(target.platform_id, target.account_id)]
@@ -662,12 +709,20 @@ class MultiHostSession:
                     projection = next((persona for persona in self.bridge.groups.personas.values()
                                        if persona.bot_id == context.scope.bot_id and persona.role == captured.role), None)
                     facts = group_trigger_facts(event, context.scope.account_id)
+                    try:
+                        continuation = participation.admission.continuation_status(context, captured.instruction,
+                            captured.at, settings=settings, event_id=captured.event_id)
+                    except Exception as error:
+                        raise TaskError("group_continuation_unavailable",
+                                        "automatic group follow-up policy could not be verified") from error
                     reason = participation.admission.candidate(context, text=captured.text,
                         instruction=captured.instruction, at=captured.at, settings=settings, participation=values,
-                        persona_name=projection.persona_id if projection is not None else "", event_id=captured.event_id, **facts)
+                        persona_name=projection.persona_id if projection is not None else "", event_id=captured.event_id,
+                        continuation=continuation, **facts)
                     from companion_v2.conversation.reply_settings import group_wakeup_settings
                     wakeup = group_wakeup_settings(settings)
                     return Outcome.success({"admitted": bool(reason), "reason": reason,
+                        "continuation": continuation,
                         "mentioned": facts["mentioned"], "context_key": context.key, "event_id": captured.event_id,
                         "participation_policy": {
                             "question_enabled": wakeup["group_wakeup_enabled"] and wakeup["group_wakeup_question_enabled"],
@@ -687,39 +742,100 @@ class MultiHostSession:
                              target.target_id, type(error).__name__)
                 return Outcome.failed("host_group_preflight_failed", "group route preflight failed")
 
-    async def prepare_core_reply(self, event, target, *, group_admission=None):
+    def _require_core_reply_target(self, target, captured):
+        if self.bridge.target_for_scope(captured.route.scope) != target:
+            raise TaskError("host_target_mismatch", "input changed its configured native route")
+
+    def _select_core_reply_context(self, target, captured):
+        with self.runtime.transaction():
+            context = (self.authority.groups.select(target, captured)
+                       if captured.route.scope.kind is ScopeKind.GROUP
+                       else self.authority.select(target, captured.route.scope, captured.role))
+            if context.scope.kind is ScopeKind.PRIVATE:
+                if self.application.private_access_gate.denied(context, at=self.now()):
+                    self.last_refusal = context
+                    raise TaskError("private_access_dialogue_denied",
+                                    "this private user has no dialogue permission")
+            else:
+                require(self.application.tasks.check_context_access(
+                    context, action="conversation.reply", observed_at=self.now()))
+        return context
+
+    @staticmethod
+    def _validate_core_group_admission(group_admission, context, captured):
+        if group_admission is None:
+            return
+        if (not isinstance(group_admission, Mapping)
+                or group_admission.get("admitted") is not True
+                or group_admission.get("context_key") != context.key
+                or group_admission.get("event_id") != captured.event_id):
+            raise TaskError("group_admission_changed", "group reply candidate changed during capture")
+
+    async def prepare_core_reply_context(self, event, target, *, group_admission=None):
+        """Resolve identity and reply settings without starting preparation.
+
+        The private debounce needs the window configuration before it can start
+        the quiet timer.  This bounded first phase captures the native input,
+        authorizes the context and reads the reply snapshot; the full preparation
+        can then reuse the returned plan while the quiet timer runs.
+        """
+        try:
+            self.application.require_running()
+            captured = require(await (
+                self.bridge.capture_text_only(event)
+                if isinstance(target, GroupTarget)
+                else self.bridge.capture_core_reply(event)
+            ))
+            captured = await self._materialize_core_conversation(event, target, captured)
+            self._require_core_reply_target(target, captured)
+            context = self._select_core_reply_context(target, captured)
+            self._validate_core_group_admission(group_admission, context, captured)
+            debounce = None
+            try:
+                snapshot = self.application.reply_settings.snapshot(
+                    context.actor, context, self.now())
+                values = {name: snapshot.values[GROUP + "." + name]
+                          for name in PRIVATE_DEBOUNCE_DEFAULTS}
+                debounce = private_debounce_settings(values)
+            except Exception as error:
+                logger.warning("[CompanionV2] 私聊防抖设置暂不可读，保留普通回复 error_type=%s",
+                               type(error).__name__)
+            return Outcome.success(CoreReplyPlan(captured, context, debounce))
+        except TaskError as error:
+            return Outcome.failed(error.code, str(error))
+        except Exception as error:
+            logger.error("[CompanionV2] 核心回复上下文解析失败 target=%s error_type=%s",
+                         target.target_id, type(error).__name__)
+            return Outcome.failed("host_core_reply_prepare_failed",
+                                  "core reply admission could not be prepared")
+
+    async def prepare_core_reply(self, event, target, *, group_admission=None, plan=None):
         """Prepare only V2 identity and prompt data for AstrBot's normal reply pipeline."""
         async with self._intake[target.target_id]:
+            presence, typing_context, typing_turn, prepared_ok = None, None, None, False
             try:
                 self.application.require_running()
-                captured = require(await (
-                    self.bridge.capture_text_only(event)
-                    if isinstance(target, GroupTarget)
-                    else self.bridge.capture_core_reply(event)
-                ))
-                captured = await self._materialize_core_conversation(event, target, captured)
-                if self.bridge.target_for_scope(captured.route.scope) != target:
-                    raise TaskError("host_target_mismatch", "input changed its configured native route")
-
-                with self.runtime.transaction():
-                    context = (self.authority.groups.select(target, captured)
-                               if captured.route.scope.kind is ScopeKind.GROUP
-                               else self.authority.select(target, captured.route.scope, captured.role))
-                    if context.scope.kind is ScopeKind.PRIVATE:
-                        if self.application.private_access_gate.denied(context, at=self.now()):
-                            self.last_refusal = context
-                            raise TaskError("private_access_dialogue_denied",
-                                            "this private user has no dialogue permission")
-                    else:
-                        require(self.application.tasks.check_context_access(
-                            context, action="conversation.reply", observed_at=self.now()))
-
-                if group_admission is not None:
-                    if (not isinstance(group_admission, Mapping)
-                            or group_admission.get("admitted") is not True
-                            or group_admission.get("context_key") != context.key
-                            or group_admission.get("event_id") != captured.event_id):
-                        raise TaskError("group_admission_changed", "group reply candidate changed during capture")
+                if plan is None:
+                    captured = require(await (
+                        self.bridge.capture_text_only(event)
+                        if isinstance(target, GroupTarget)
+                        else self.bridge.capture_core_reply(event)
+                    ))
+                    captured = await self._materialize_core_conversation(event, target, captured)
+                    self._require_core_reply_target(target, captured)
+                    context = self._select_core_reply_context(target, captured)
+                else:
+                    captured, context = plan.captured, plan.context
+                    # A short debounce window can cross a persona/window change:
+                    # re-resolve under the intake lock instead of trusting the plan.
+                    self._require_core_reply_target(target, captured)
+                    context = self._select_core_reply_context(target, captured)
+                self._validate_core_group_admission(group_admission, context, captured)
+                turn_id = "core-reply:" + digest([context.key, captured.event_id])
+                presence = self.application.presence
+                if presence is not None:
+                    typing_context, typing_turn = context, turn_id
+                    presence.begin_native_reply(context, turn_id)
                 # The core request hook re-captures identity before provider dispatch.
                 if context.scope.kind is ScopeKind.GROUP:
                     # Native media fallbacks carry placeholders; only original
@@ -747,6 +863,17 @@ class MultiHostSession:
                             "streaming", "part_gap_mode", "part_gap_ms", "part_gap_min_ms",
                             "part_gap_max_ms", "part_gap_log_base"}
                         segmentation_settings = {name: snapshot.values[GROUP + "." + name] for name in names}
+                        if context.scope.kind is ScopeKind.PRIVATE:
+                            try:
+                                from companion_v2.role_work.state import humanized
+                                simulation = self.application.role_state.read(context, at=self.now(), injection=True)
+                                values = simulation.get("values") if isinstance(simulation.get("values"), dict) else {}
+                                if isinstance(values.get("energy"), int):
+                                    segmentation_settings.setdefault("role_energy", values["energy"])
+                                if humanized.is_sleepy(simulation):
+                                    segmentation_settings.setdefault("role_sleepy", True)
+                            except Exception:
+                                pass
                         voice_names = ("voice_enabled", *("voice_" + name for name in VOICE_FIELDS))
                         voice_values = {name: snapshot.values[GROUP + "." + name] for name in voice_names}
                         captured_voice_policy = parse_voice_policy(voice_values)
@@ -789,7 +916,6 @@ class MultiHostSession:
                     logger.warning("[CompanionV2] 核心回复背景准备降级 target=%s error_type=%s",
                                    target.target_id, type(error).__name__)
                 channel = "group" if context.scope.kind is ScopeKind.GROUP else "private"
-                turn_id = "core-reply:" + digest([context.key, captured.event_id])
                 reaction_reply_enabled = False
                 if not group_admission or group_admission.get("reason") != "repeat":
                     try:
@@ -798,7 +924,7 @@ class MultiHostSession:
                             getattr(self.application.tools, "semantic", None), context, captured, turn_id)
                     except Exception as error:
                         logger.warning("[CompanionV2] 表情回复准备降级 error_type=%s", type(error).__name__)
-                voice_policy = None
+                voice_policy, configured_voice_policy = None, None
                 is_group_repeat = group_admission and group_admission.get("reason") == "repeat"
                 if not is_group_repeat:
                     from companion_v2.conversation.voice_reply import eligible, voice_policy_for_turn
@@ -820,6 +946,7 @@ class MultiHostSession:
                                     candidate.extra_prompt.strip(), mention_prompt,
                                     candidate.primary_mention_prompt.strip()) if part)
                                 candidate = replace(candidate, trigger_mode="adaptive", cooldown_seconds=0,
+                                    private_cooldown_seconds=-1, group_cooldown_seconds=-1,
                                                     extra_prompt=extra_prompt)
                             voice_policy = candidate
                 from .fish_audio import provider_direction
@@ -835,6 +962,7 @@ class MultiHostSession:
                     self.core_reply_maintenance.schedule(context, captured.instruction, source_future=source_future)
                 except Exception as error:
                     logger.warning("[CompanionV2] 私聊后台绑定调度降级 error_type=%s", type(error).__name__)
+                prepared_ok = True
                 return Outcome.success({
                     "context": context,
                     "instruction": captured.instruction,
@@ -859,6 +987,7 @@ class MultiHostSession:
                     "presentation_settings": presentation_settings,
                     "outbound_settings": captured_outbound_settings,
                     "voice_reply_policy": voice_policy,
+                    "configured_voice_reply_policy": configured_voice_policy,
                     "voice_provider_instruction": voice_direction,
                     "reaction_reply_enabled": reaction_reply_enabled,
                 })
@@ -868,6 +997,9 @@ class MultiHostSession:
                 logger.error("[CompanionV2] 核心回复准入准备失败 target=%s error_type=%s",
                              target.target_id, type(error).__name__)
                 return Outcome.failed("host_core_reply_prepare_failed", "core reply admission could not be prepared")
+            finally:
+                if not prepared_ok and presence is not None and typing_context is not None:
+                    presence.finish_native_reply(typing_context, typing_turn)
 
     def _core_user_mention_matches(self, event, context, policy, text, at):
         words = policy.primary_mention_words()

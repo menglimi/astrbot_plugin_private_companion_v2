@@ -18,7 +18,7 @@ from companion_v2.references.management import ReferenceMaterialManagement
 from .management_identity import dashboard_operator
 
 
-PREFIX = "/astrbot_plugin_private_companion_v2/image-materials"
+PREFIX = "/astrbot_plugin_private_companion/image-materials"
 MAX_BODY = 8192
 MAX_UPLOAD_BYTES = 12 * 1024 * 1024
 MAX_UPLOAD_BODY = ((MAX_UPLOAD_BYTES + 2) // 3) * 4 + 16 * 1024

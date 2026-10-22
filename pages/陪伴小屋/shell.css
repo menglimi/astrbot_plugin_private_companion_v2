@@ -1,5 +1,20 @@
 /* 陪伴小屋外壳布局。
  *
+ * 断点尺度（页面级，只有这几档；新增页面级规则请挂到其中一档）：
+ *   360   超窄手机（导航收到最小、面板单列）
+ *   520   窄手机（两列网格收成一列）
+ *   650   手机横屏 / 小平板
+ *   760   平板竖屏：左栏变成横向图标条
+ *   900   平板横屏：三栏收两栏
+ *   1120  桌面窄：左栏收成图标栏
+ *   1440  宽桌面：首页右栏加宽
+ *   1740  超宽：外壳居中并让出左侧留白
+ * 各页面 CSS 里还散着 400/500/720/800/820/860/920/950/960/980/1050/1190/1280
+ * 这类宽度，它们不是页面断点，而是**单个组件**在自己容器变窄时的换行阈值
+ * （例如感知页的三列卡片在 800/860 逐级降到两列）。要收敛它们只能改成
+ * @container 查询（维护页的 @container maint-diagnostics 已是这个写法），
+ * 那是一次需要逐页回归的重构，不要顺手把它们并进上面这套页面尺度。
+ *
  * 网格结构（宽屏，首页）：
  *
  *   ┌────────┬──────────────────────┬──────────────┐
@@ -48,7 +63,11 @@
   grid-area: rail;
   /* styles.css 把 .rail 定成 92px 的 fixed 竖条。新结构里它是栅格的一列，
      所以这里退回静态定位并撑到整列宽——#homeShell .rail 的特异性（1,1,0）
-     高于 .rail（0,1,0），且 shell.css 在 styles.css 之后加载，两条都成立。 */
+     高于 .rail（0,1,0），且 shell.css 在 styles.css 之后加载，两条都成立。
+     width:auto 必须显式写：栅格项的 justify-self:stretch 只在宽度为 auto 时
+     才把盒子撑到整列；留着 styles.css 的 92px，左栏就只涂 92px，
+     右边空出 128px（navigation.css 原本也写着一个 158px，同样的问题）。 */
+  width: auto;
   position: sticky;
   top: 0;
   align-self: start;
@@ -152,10 +171,20 @@
   transition: background var(--dur-fast, .16s ease), color var(--dur-fast, .16s ease);
 }
 .shell-nav-link:hover { background: var(--t-surface-soft); color: var(--t-text); }
+/* 当前页用 aria-current 表达（它本来就是「当前页」语义，不是开关状态）。
+   aria-pressed 仍由 app.js 同步写入，供既有脚本读取，但不再决定样式。 */
+.shell-nav-link[aria-current="page"],
 .shell-nav-link[aria-pressed="true"] {
   background: var(--t-accent-quiet);
   color: var(--t-accent-ink);
   font-weight: 600;
+}
+/* 选中项再加一道 3px 竖标，扫视时不必读文字也能定位。 */
+.shell-nav-link[aria-current="page"] {
+  box-shadow: inset 3px 0 0 var(--t-accent);
+}
+@media (max-width: 760px) {
+  .shell-nav-link[aria-current="page"] { box-shadow: inset 0 -3px 0 var(--t-accent); }
 }
 .shell-nav-link i { flex: none; width: 15px; height: 15px; opacity: .85; }
 
@@ -210,14 +239,21 @@
   #homeShell .rail-foot .shell-nav-link { justify-content: center; }
 }
 @media (max-width: 760px) {
-  #homeShell { grid-template-columns: minmax(0, 1fr); grid-template-rows:auto auto;grid-template-areas: "rail" "body"; }
+  /* #homeShell 的两行要分开算：左栏是内容高度，主体吃掉剩下的视口。
+     两行都留 auto 时，栅格的 align-content:normal（等价 stretch）会把剩余空间
+     平摊给两行——左栏那一行被拉高，而左栏自己 align-self:start 仍是 56px，
+     于是内容面板上方空出一条 259px 的画布色横带（缩略态尤其明显：
+     小屋已经脱离文档流，没东西填那条带子）。 */
+  #homeShell { grid-template-columns: minmax(0, 1fr); grid-template-rows:auto minmax(0, 1fr);grid-template-areas: "rail" "body"; }
   #homeShell .rail {
     position: static;
     height: auto;
     flex-direction: row;
     align-items: center;
-    overflow-x: auto;
-    padding:var(--sp-2) var(--sp-3);
+    /* 导航本身是横向滚动条（见下面的 #shellNav），左栏不再整体滚动，
+       否则品牌与搜索会跟着一起滑走。 */
+    overflow: visible;
+    padding:var(--sp-1) var(--sp-2);
     border-right: 0;
     border-bottom: 1px solid var(--t-line);
     /* styles.css 在窄屏把 .rail 改成贴底的横条（top:auto;bottom:0;left:0;
@@ -225,14 +261,99 @@
        居中对齐的旧值要显式清掉，否则 sticky 之后仍会被它们拉偏。 */
     inset: auto;
     width: auto;
-    z-index: auto;
+    z-index: 2;
   }
-  .shell-nav-group { flex-direction: row; }
-  .shell-nav-group + .shell-nav-group { margin:0 0 0 var(--sp-2); padding:0 0 0 var(--sp-2); border-top: 0; border-left: 1px solid var(--t-line); }
+  /* 手机上导航曾经排成三行图标：三个分组是逐个堆叠的块级 flex，
+     每个 .shell-nav-link 又带 width:100%，17 个入口吃掉 126px 高度
+     （390×844 的 15%），品牌名被挤成三行竖排。
+     现在压成一条 48px 的横向滚动条：品牌只留图标，每组之间一条竖分隔线，
+     滑动查看全部入口，滚动条隐藏。 */
+  #homeShell .rail-brand { padding:0 var(--sp-1); }
+  #homeShell .rail-brand > span:not(.brand-symbol) { display: none; }
+  #shellNav {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    flex: 1 1 auto;
+    min-width: 0;
+    gap: 2px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+  }
+  #shellNav::-webkit-scrollbar { display: none; }
+  /* 右缘淡出，提示「还能往右滑」——17 个入口放不进 390px。 */
+  #shellNav {
+    -webkit-mask-image: linear-gradient(to right, black 0, black calc(100% - 18px), transparent 100%);
+    mask-image: linear-gradient(to right, black 0, black calc(100% - 18px), transparent 100%);
+  }
+  .shell-nav-group { flex-direction: row; gap: 2px; }
+  .shell-nav-group + .shell-nav-group { margin:0 0 0 var(--sp-1); padding:0 0 0 var(--sp-1); border-top: 0; border-left: 1px solid var(--t-line); }
   .shell-nav-title { display: none; }
-  .shell-nav-link span { display: none; }
-  .rail-foot { margin:0 0 0 auto; flex-direction: row; border-top: 0; padding-top:0; }
+  /* 手机上是图标 + 文字两行，不再只留图标：19 个入口里有「事实与经历」
+     「模型与连接」这类自选图标，只给图标等于让人猜。宽度按最长标签
+     （「外观与设置」5 个字）留，整条仍可横向滑动。 */
+  .shell-nav-link {
+    flex: 0 0 auto;
+    flex-direction: column;
+    width: auto;
+    min-width: 58px;
+    min-height: 52px;
+    justify-content: center;
+    gap: 2px;
+    padding: var(--sp-1) var(--sp-2);
+  }
+  .shell-nav-link span {
+    display: block;
+    font-size: var(--fs-micro);
+    line-height: 1.2;
+    white-space: nowrap;
+  }
+  .shell-nav-link i { width: 18px; height: 18px; }
+  .rail-foot { margin:0 0 0 var(--sp-1); flex-direction: row; border-top: 0; padding: 0 0 0 var(--sp-1); border-left: 1px solid var(--t-line); }
+  .rail-foot .shell-nav-link { width: auto; justify-content: center; }
   .rail-foot .rail-note { display: none; }
+
+  /* 首页信息顺序：小屋 → 此刻的状态与今日安排 → 家具目录。
+     速览条属于「逛家具」，排在状态之前会把最该看的内容推到两屏之后。
+     .stage-region 用 display:contents 拆开，让它的三块直接成为栅格项，
+     才能把右栏插到小屋与家具条之间。 */
+  body:not(.room-editing) #homeShell[data-away="false"] .stage-region { display: contents; }
+  body:not(.room-editing) #homeShell[data-away="false"] .shell-body {
+    grid-template-areas: "environment" "stage" "side" "furniture";
+  }
+  body:not(.room-editing) #homeShell[data-away="false"] .home-environment { grid-area: environment; }
+  body:not(.room-editing) #homeShell[data-away="false"] .room-stage { grid-area: stage; }
+  body:not(.room-editing) #homeShell[data-away="false"] .shell-side { grid-area: side; }
+  body:not(.room-editing) #homeShell[data-away="false"] .stage-furniture-strip { grid-area: furniture; }
+
+  /* 家具速览条在手机上换成单行横滑：七件家具原来换行成三行、占 150px，
+     而且把「此刻的状态」挤到一屏之外。 */
+  .stage-furniture-strip {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    padding-bottom: 2px;
+  }
+  .stage-furniture-strip::-webkit-scrollbar { display: none; }
+  .stage-furniture-strip button { flex: 0 0 auto; }
+
+  /* 缩略态在手机上不再占一条 150px 的横条：屏幕本来就窄，
+     返回入口由面板标题栏的「回到小屋」和左栏品牌承担。
+     场景留在 DOM 里、尺寸不变（visibility:hidden + 移出视口），
+     所以回到首页时相机机位与布景仍在那里，重新入场不必重建。 */
+  #homeShell[data-away="true"] .stage-region {
+    position: fixed;
+    left: -9999px;
+    top: 0;
+    width: 320px;
+    height: 140px;
+    visibility: hidden;
+    pointer-events: none;
+  }
+  #homeShell[data-away="true"] .shell-panel-body { padding-bottom: var(--sp-4); }
 }
 
 /* 小屋退到背景（B 方案）。
@@ -255,38 +376,105 @@
  * 浮层会盖住正在填的内容；窄条只占顶部一段，不遮挡任何字段。
  */
 #homeShell[data-away="true"] .shell-side { display: none; }
+/* 缩略态只有面板一行，面板拿满整列。
+ *
+ * 这里原来写的是 grid-template-areas:"stage" "panel" 配两行 auto。
+ * .shell-body 的高度被 #homeShell 的 100dvh 撑开（栅格的 align-content:normal
+ * 等价于 stretch，自动行会分摊剩余空间），而 .shell-body 的 align-items 是 start
+ * ——行被拉高了，行里的面板却仍按内容高度靠上放。实测 1440×900 下：
+ * 154px 的小屋占了 405px 的行高，面板被推到 y=436 才开始，自身只有 194px 高，
+ * 下方再空 250px。一屏里六成是空白，配置页看起来像半成品。
+ *
+ * 现在小屋脱离文档流（见下面的缩略卡），面板独占一行：
+ * minmax(min-content, 1fr) 让它「内容短时撑满视口，内容长时照常长高」——
+ * 用 minmax(0,1fr) 会把超长内容裁在行里，滚动条就没有了。 */
 #homeShell[data-away="true"] .shell-body {
   grid-template-columns: minmax(0, 1fr);
-  grid-template-areas: "stage" "panel";
-  gap:var(--sp-3);
+  grid-template-areas: "panel";
+  grid-template-rows: minmax(min-content, 1fr);
+  align-items: stretch;
 }
-/* 缩略态：高度压到 150px，宽度限在 420px 并居中，
-   避免一个横跨整屏的矮条看起来像渲染出错。 */
-#homeShell[data-away="true"] .stage-region {
-  justify-self: center;
-  width: min(100%, 420px);
-  gap:var(--sp-1);
+#homeShell[data-away="true"] .shell-panel {
+  display: flex;
+  flex-direction: column;
 }
-#homeShell[data-away="true"] .stage-region .room-stage {
-  height: 150px;
-  min-height: 150px;
-  border-color: var(--t-line);
-  /* 退到背景时压暗并稍微降饱和，视觉上明确它是「次要的、可返回的」。 */
-  filter: saturate(.72) brightness(.94);
-  transition: filter var(--dur);
+#homeShell[data-away="true"] .shell-panel-body { flex: 1 1 auto; }
+
+/* 缩略态的小屋：右下角一张画中画卡片。
+ *
+ * 为什么保留它而不是隐藏：3D 场景是同一个实例，相机机位（U）与布景
+ * 全程保持，回到首页时不需要重建、也不需要重播入场。它退到角落而不是
+ * 横在内容上方——配置面板里满是输入框，一张 150px 高的横条会把每页的
+ * 首屏内容压掉四分之一，而画中画完全不占布局。
+ *
+ * 为什么不做成可操作场景：缩略态下它是个「返回」按钮，不是一个能拖动的
+ * 房间。指针交互由下面的 pointer-events 关掉，否则点击会被当成拖拽旋转，
+ * 既转不动也不返回；键盘可达性来自 app.js 给场景加的 role=button。 */
+@media (min-width: 761px) {
+  /* 画中画的尺寸只在一处声明：面板底部要让出的高度也读它，
+     两处各写一个数字的话迟早对不上。 */
+  #homeShell[data-away="true"] { --shell-pip-w: 176px; --shell-pip-h: 104px; }
+  body:not(.room-editing) #homeShell[data-away="true"] .stage-region {
+    position: fixed;
+    right: var(--shell-pad);
+    bottom: var(--shell-pad);
+    z-index: 15;
+    width: var(--shell-pip-w);
+    gap: 0;
+    opacity: .96;
+    transition: opacity var(--dur-fast, .16s ease);
+  }
+  body:not(.room-editing) #homeShell[data-away="true"] .stage-region:hover,
+  body:not(.room-editing) #homeShell[data-away="true"] .stage-region:focus-within { opacity: 1; }
+  body:not(.room-editing) #homeShell[data-away="true"] .stage-region .room-stage {
+    height: var(--shell-pip-h);
+    min-height: var(--shell-pip-h);
+    border-radius: var(--r-md);
+    border-color: var(--t-line-firm, var(--t-line));
+    box-shadow: var(--t-shadow-lift);
+    /* 退到背景时压暗并稍微降饱和，视觉上明确它是「次要的、可返回的」；
+       悬停与键盘聚焦时恢复，作为「点它能回去」的反馈。 */
+    filter: saturate(.74) brightness(.94);
+    transition: filter var(--dur), box-shadow var(--dur);
+  }
+  body:not(.room-editing) #homeShell[data-away="true"] .stage-region .room-stage:hover,
+  body:not(.room-editing) #homeShell[data-away="true"] .stage-region .room-stage:focus-visible {
+    filter: none;
+    box-shadow: var(--t-shadow-lift);
+  }
+  /* 画中画里放不下角色切换器（104px 高只剩一条缝），而它是个真控件。
+     缩略态交给下面那颗常驻的「回到小屋」引导，角色切换仍留在首页。 */
+  body:not(.room-editing) #homeShell[data-away="true"] .stage-region .stage-role { display: none; }
+  /* 面板底部留出画中画的高度，最后一行控件不会被它压住。 */
+  #homeShell[data-away="true"] .shell-panel-body {
+    padding-bottom: calc(var(--sp-4) + var(--shell-pip-h) + var(--shell-pad));
+  }
 }
-#homeShell[data-away="true"] .stage-region .room-stage:hover { filter: none; }
-/* 缩略态下小屋是个「返回」按钮，不是一个可操作场景：
-   关掉 3D 的指针交互，否则点击会被当成拖拽旋转，既转不动也不返回。 */
+/* 缩略态下小屋是个「返回」按钮：关掉 3D 的指针交互与场景内工具栏。 */
 #homeShell[data-away="true"] .stage-region .voxel-room { pointer-events: none; }
 #homeShell[data-away="true"] .stage-region .room-stage { cursor: pointer; }
+#homeShell[data-away="true"] .stage-region .room-stage::after {
+  content: "回到小屋";
+  position: absolute;
+  right: var(--sp-2);
+  bottom: var(--sp-2);
+  padding: 2px var(--sp-2);
+  border-radius: var(--r-pill);
+  background: color-mix(in srgb, var(--t-surface) 88%, transparent);
+  color: var(--t-text-soft);
+  font-size: var(--fs-micro);
+  line-height: 1.6;
+  opacity: 0;
+  transition: opacity var(--dur-fast, .16s ease);
+  pointer-events: none;
+}
+#homeShell[data-away="true"] .stage-region .room-stage:hover::after,
+#homeShell[data-away="true"] .stage-region .room-stage:focus-visible::after { opacity: 1; }
 
-/* 两套控件按状态互斥：家具速览条/布置/全景/巡游只在首页有，
-   缩略态只剩「回到小屋」。用 display 而不是 hidden——
-   它们都是 flex 子项，hidden 会被后来的 display 规则覆盖。 */
-.away-only { display: none !important; }
+/* 两套控件按状态互斥：家具速览条/布置/全景/巡游只在首页有。
+   用 display 而不是 hidden——它们都是 flex 子项，hidden 会被后来的
+   display 规则覆盖。 */
 #homeShell[data-away="true"] .home-only { display: none !important; }
-#homeShell[data-away="true"] .away-only { display: inline-flex !important; }
 #homeShell[data-away="true"] .voxel-hint { display: none; }
 
 /* === 小屋区（首页） === */
@@ -428,14 +616,17 @@
 .side-selection strong { display: block; font-size:var(--fs-body); }
 .side-selection small { color: var(--t-text-faint); font-size:var(--fs-tiny); line-height: 1.55; }
 
-/* === 内容面板 === */
+/* === 内容面板 ===
+ * overflow 用 clip：面板里的配置卡有吸底动作条（workbench.css 的 .wb-actions），
+ * 而 overflow:hidden 会把面板变成不可滚动的滚动容器，吸底就永远吸不住。
+ * clip 只裁剪、不建立滚动容器，圆角裁切效果与 hidden 一致。 */
 .shell-panel {
   grid-area: panel;
   min-width: 0;
   border: 1px solid var(--t-line);
   border-radius: var(--r-lg, var(--r-md));
   background: var(--t-surface);
-  overflow: hidden;
+  overflow: clip;
 }
 .shell-panel-head {
   display: flex;
@@ -452,14 +643,33 @@
   display: flex;
   align-items: center;
   gap:var(--sp-2);
+  min-width: 0;
+}
+/* 标题与说明是一组，说明不该被右侧操作按钮挤成一行省略号。 */
+.shell-panel-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.shell-panel-head > i {
+  flex: none;
+  color: var(--t-accent);
 }
 .shell-panel-head p {
-  margin:2px 0 0;
+  margin:0;
   font-size: var(--fs-tiny);
   color: var(--t-text-faint);
   line-height: 1.6;
+  /* 说明文字在 760px 以下换行而不是被裁掉。 */
+  overflow-wrap: anywhere;
 }
 .shell-panel-head .panel-spacer { margin-left:auto; }
+/* 标题栏里的操作按钮不许折行：窄屏上「回到小屋」曾被压成竖排两行。 */
+.shell-panel-head .button { flex: none; white-space: nowrap; }
+@media (max-width: 760px) {
+  .shell-panel-head { padding: var(--sp-3); gap: var(--sp-2); }
+  .shell-panel-head p { font-size: var(--fs-micro); }
+}
 .shell-panel-body { padding:var(--sp-4); }
 .shell-panel-body > :first-child { margin-top:0; }
 

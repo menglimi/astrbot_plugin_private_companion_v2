@@ -68,7 +68,7 @@ class VoiceSenderTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         row = self.runtime.read_one("SELECT * FROM conversation_voice_diagnostics WHERE part_id = ?", (part_id,))
         return row["render_state"], json.loads(row["component_order_json"]), row["text_hidden"]
 
-    async def test_voice_position_orders_text_image_and_record_in_one_ack(self):
+    async def test_voice_and_text_images_use_independent_native_requests(self):
         original = await self.original()
         self.native_sender.voice_delivery = VoiceReplyDelivery(self.runtime, self.clock.now)
         spoken = []
@@ -81,12 +81,18 @@ class VoiceSenderTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         expected = {"before_text": ["record", "text", "image"],
                     "after_text": ["text", "record", "image"],
                     "after_media": ["text", "image", "record"]}
+        api = self.native.platform.client._api._wsr_api
         for position, types in expected.items():
             envelope = self.with_image(replace(original, part_id="part-" + position))
             self.seed(envelope, position=position)
+            start = len(api.calls)
             self.assertEqual((await self.native_sender.send(envelope)).status, "delivered")
-            message = self.native.platform.client._api._wsr_api.calls[-1][1]["message"]
-            self.assertEqual([segment["type"] for segment in message], types)
+            messages = [params["message"] for _, params in api.calls[start:]]
+            self.assertEqual([[segment["type"] for segment in message] for message in messages],
+                             [["record"], ["text", "image"]] if position == "before_text"
+                             else [["text", "image"], ["record"]])
+            self.assertEqual(next(segment["data"]["text"] for message in messages
+                                  for segment in message if segment["type"] == "text"), envelope.text)
             self.assertEqual(self.diagnostic(envelope.part_id),
                              ("ready", ["voice" if kind == "record" else kind for kind in types], 0))
         self.assertEqual([(speech, provider, timeout) for _, speech, provider, timeout in spoken],
@@ -105,9 +111,12 @@ class VoiceSenderTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
                                           ("part-failed", "失败", ["text"])):
             envelope = replace(original, part_id=part_id)
             self.seed(envelope, speech=speech, mode="voice_only", cooldown=90 if part_id == "part-failed" else 0)
+            api = self.native.platform.client._api._wsr_api
+            start = len(api.calls)
             self.assertEqual((await self.native_sender.send(envelope)).status, "delivered")
-            message = self.native.platform.client._api._wsr_api.calls[-1][1]["message"]
-            self.assertEqual([segment["type"] for segment in message], expected)
+            messages = [params["message"] for _, params in api.calls[start:]]
+            self.assertEqual([[part["type"] for part in message] for message in messages],
+                             [["text"], ["record"]] if part_id == "part-partial" else [expected])
             self.assertEqual(self.diagnostic(part_id),
                              (("empty" if part_id == "part-failed" else "ready"),
                               ["voice" if kind == "record" else kind for kind in expected],

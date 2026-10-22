@@ -156,7 +156,7 @@
 @keyframes console-spin{to{transform:rotate(360deg)}}
 :root[data-motion="off"] .console-loading::before{animation:none}
 
-@media(max-width:650px){
+@media(max-width:760px){
   /* 窄屏上说明与标题并排会挤成两行半，改成换行独占一行。 */
   .console-section-head{flex-direction:column;align-items:flex-start;gap:var(--sp-2)}
   .console-section-note{max-width:none;flex-basis:auto}

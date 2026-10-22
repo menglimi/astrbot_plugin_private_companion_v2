@@ -251,12 +251,31 @@ class ProactiveStyleTests(unittest.TestCase):
         materials = {item.purpose: json.loads(item.payload) for item in request.context.materials}
         self.assertEqual(materials["contact_intent"]["local_time"], "05:12")
         self.assertEqual(materials["contact_intent"]["local_date"], "2026-10-15")
+        self.assertEqual(materials["contact_intent"]["weekday"], "星期四")
+        self.assertFalse(materials["contact_intent"]["is_weekend"])
+        self.assertEqual(materials["contact_intent"]["period"], "早上")
         self.assertEqual(materials["communication_state"]["last_input_at"], job.interaction["last_input_at"])
         self.assertIn("深夜、凌晨没有近期真实互动时", request.instruction)
         self.assertIn("普通新闻、生活分享、随感和闲聊优先 skip", request.instruction)
         self.assertIn("不从时间或沉默推断已睡", request.instruction)
         self.assertIn("已接受约定的提醒和官方紧急预警按各自时机判断", request.instruction)
         self.assertIn("没有新关键词、用户尚未发言或无法确认对方此刻状态，都不单独构成跳过理由", request.instruction)
+
+    def test_contact_intent_publishes_weekday_instead_of_model_arithmetic(self):
+        """The 00:43 contact on Sunday 2026-10-18 must carry 星期日, not 周六."""
+        now = datetime(2026, 10, 17, 16, 43, tzinfo=timezone.utc)
+        preferences = ContactPreferences(None, dict(PREF_VALUES, quiet_timezone="Asia/Shanghai"), now)
+        job = self.contact_job()
+        job.intent.purpose = "care"
+        request = request_for(job, (), preferences)
+        intent = json.loads(next(item.payload for item in request.context.materials
+                                 if item.purpose == "contact_intent"))
+        self.assertEqual((intent["local_date"], intent["local_time"]), ("2026-10-18", "00:43"))
+        self.assertEqual(intent["weekday"], "星期日")
+        self.assertTrue(intent["is_weekend"])
+        self.assertEqual(intent["period"], "凌晨")
+        self.assertIn("星期几只取 contact_intent.weekday", request.instruction)
+        self.assertIn("字段缺失时不提星期", request.instruction)
 
     def test_dedup_prompt_distinguishes_same_topic_from_same_category(self):
         preferences = ContactPreferences(None, dict(PREF_VALUES, dedup_enabled=True), NOW)
@@ -273,6 +292,7 @@ class ProactiveStyleTests(unittest.TestCase):
         preferences = ContactPreferences(snapshot=None, values=PREF_VALUES, observed_at=NOW)
         request = request_for(job, (), preferences)
         self.assertIn("夜间低压力问候机会", request.instruction)
+        self.assertIn("不报日期和星期", request.instruction)
         self.assertIn("不要求对方回复", request.instruction)
 
     def test_source_backed_diagnostic_keeps_the_selected_producer_boundary(self):

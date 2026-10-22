@@ -14,7 +14,7 @@ from .group_settings import GroupTarget
 from .management_identity import dashboard_operator
 from .media import inspect_image
 
-PREFIX = "/astrbot_plugin_private_companion_v2/semantic"
+PREFIX = "/astrbot_plugin_private_companion/semantic"
 FIELDS = ("name", "description", "visible_text", "tags", "emotions", "intents")
 
 

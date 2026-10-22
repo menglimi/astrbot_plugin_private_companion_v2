@@ -213,9 +213,13 @@ class NativeGroupBridge(NativePrivateBridge):
                        for part in original_parts)):
             raise TaskError("host_group_media_unsupported", "original group components need their own source adapter")
         try:
-            raw_quotes = tuple((position, message_number(part["data"].get("id")))
-                               for position, part in enumerate(original_parts) if part.get("type") == "reply")
-            native_quotes = tuple((position, message_number(part.id)) for position, part in enumerate(parts)
+            # AstrBot may normalize or drop At components before plugin handlers,
+            # so component positions are not stable across preprocessing.  The
+            # quoted message identifiers and their order are the security-
+            # relevant invariant for the text-only group capture.
+            raw_quotes = tuple(message_number(part["data"].get("id"))
+                               for part in original_parts if part.get("type") == "reply")
+            native_quotes = tuple(message_number(part.id) for part in parts
                                   if getattr(getattr(part, "type", None), "value", getattr(part, "type", None)) == "Reply")
         except (TaskError, ValueError, TypeError, AttributeError):
             raise TaskError("host_quote_invalid", "group quote identifiers are not valid") from None

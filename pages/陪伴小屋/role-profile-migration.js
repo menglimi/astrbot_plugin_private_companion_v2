@@ -10,13 +10,13 @@ window.CompanionRoleProfileMigration = (() => {
   function markup() {
     return '<dialog class="role-profile-draft-dialog role-profile-migration-dialog" id="roleProfileMigrationDialog" aria-labelledby="roleProfileMigrationTitle" aria-describedby="roleProfileMigrationDescription">' +
       '<div class="role-profile-draft-shell" aria-busy="false"><header class="role-profile-draft-head">' +
-      '<div><span>V1 → ROLE PROFILE</span><h2 id="roleProfileMigrationTitle">迁入已有设定</h2><p id="roleProfileMigrationDescription">把可识别的旧设定写入当前角色档案；只填空白字段，不覆盖已有内容。</p></div>' +
+      '<div><span>旧版资料 → 角色档案</span><h2 id="roleProfileMigrationTitle">迁入已有设定</h2><p id="roleProfileMigrationDescription">把可识别的旧设定写入当前角色档案；只填空白字段，不覆盖已有内容。</p></div>' +
       '<button class="icon-button" type="button" data-role-profile-migration-close aria-label="关闭" title="关闭"><i data-lucide="x" aria-hidden="true"></i></button></header>' +
       '<section class="role-profile-migration-context" aria-label="迁移范围与策略">' +
-      '<div class="role-profile-migration-context-item"><span>来源</span><strong data-role-profile-migration-source>待读取</strong><small data-role-profile-migration-source-kind>V1 世界知识或当前 AstrBot 人格</small></div>' +
+      '<div class="role-profile-migration-context-item"><span>来源</span><strong data-role-profile-migration-source>待读取</strong><small data-role-profile-migration-source-kind>旧版 世界知识或当前 AstrBot 人格</small></div>' +
       '<div class="role-profile-migration-context-item"><span>目标</span><strong data-role-profile-migration-target>当前角色档案</strong><small>与当前私聊角色绑定</small></div>' +
       '<div class="role-profile-migration-context-item is-policy"><span>写入策略</span><strong>只填空白项</strong><small>已有内容保持不变</small></div></section>' +
-      '<p class="role-profile-migration-notice" data-role-profile-migration-notice role="status" aria-live="polite">读取 V1 世界知识中的角色设定；没有可用来源时读取当前 AstrBot 人格。</p>' +
+      '<p class="role-profile-migration-notice" data-role-profile-migration-notice role="status" aria-live="polite">读取旧版世界知识中的角色设定；没有可用来源时读取当前 AstrBot 人格。</p>' +
       '<section class="role-profile-migration-output" data-role-profile-migration-output hidden aria-live="polite">' +
       '<div class="role-profile-migration-output-head"><div><span>迁入预览</span><h3>写入前核对</h3></div><strong data-role-profile-migration-summary>—</strong></div>' +
       '<div class="role-profile-migration-source" data-role-profile-migration-source-panel><span class="role-profile-migration-source-mark" aria-hidden="true"><i data-lucide="file-input"></i></span><div><strong data-role-profile-migration-source-detail>来源待读取</strong><small data-role-profile-migration-source-meta>只展示安全可识别的角色字段</small></div></div>' +
@@ -71,12 +71,12 @@ window.CompanionRoleProfileMigration = (() => {
   }
 
   function sourceKindLabel(kind) {
-    return kind === "v1_world_knowledge" ? "V1 世界知识" : kind === "astrbot_persona" ? "AstrBot 人格" : "角色设定来源";
+    return kind === "v1_world_knowledge" ? "旧版世界知识" : kind === "astrbot_persona" ? "AstrBot 人格" : "角色设定来源";
   }
 
   function resetContext() {
     setText("[data-role-profile-migration-source]", "待读取");
-    setText("[data-role-profile-migration-source-kind]", "V1 世界知识或当前 AstrBot 人格");
+    setText("[data-role-profile-migration-source-kind]", "旧版世界知识或当前 AstrBot 人格");
     setText("[data-role-profile-migration-target]", "当前角色档案");
     setText("[data-role-profile-migration-source-detail]", "来源待读取");
     setText("[data-role-profile-migration-source-meta]", "只展示安全可识别的角色字段");

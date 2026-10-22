@@ -20,7 +20,8 @@ from companion_v2.model_gateway.budget import BudgetLedger
 from companion_v2.identity_policy.models import AuthorizationTier, GrantState
 from companion_v2.identity_policy.personas import ConversationRoute
 from companion_v2.role_work.growth import GrowthKind, GrowthState, RoleGrowthRecord
-from companion_v2.role_work.state.maintenance import state_profile
+from companion_v2.role_work.state.maintenance import (PROMPT as STATE_MAINTENANCE_PROMPT,
+    STATE_INTERVENTION_INSTRUCTION, state_profile)
 from companion_v2.role_work.state.management import StateManagement
 from companion_v2.role_work.state.service import FIELDS
 from companion_v2.sources.models import SourceRecord
@@ -37,6 +38,14 @@ def calendar_data(**changes):
     return dict(kind="role_plan", title="私人阅读安排", detail="读自己选的书",
         schedule=json.loads(encode(Schedule(NOW + timedelta(hours=1), "Asia/Shanghai"))),
         duration_minutes=30, presence="阅读中") | changes
+
+
+class StateInterventionPromptTests(unittest.TestCase):
+    def test_authorized_context_can_update_state_without_role_echo(self):
+        self.assertIn("不要求特定说法或角色复述", STATE_INTERVENTION_INSTRUCTION)
+        self.assertIn("把握较高的主观状态可以适度、短时变化", STATE_INTERVENTION_INSTRUCTION)
+        self.assertIn("睡眠、休息和现实活动仍须对应执行回执", STATE_INTERVENTION_INSTRUCTION)
+        self.assertNotIn("关心、建议、邀请", STATE_MAINTENANCE_PROMPT)
 
 
 class StateFixture(HostFixture):
@@ -385,6 +394,7 @@ class StateMaintenanceTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(envelope.original.event, BackgroundPromptTrigger)
         self.assertEqual(envelope.original.role_instruction, "原角色人格提示")
         self.assertEqual(envelope.original.output_format, "role_state")
+        self.assertEqual(envelope.original.response_format, "json_object")
         self.assertIn("不能根据时间经过", envelope.original.instruction)
         replay = await app.state_maintenance.run(context, "原角色人格提示", "manual")
         self.assertTrue(replay["replayed"])
@@ -440,6 +450,85 @@ class StateMaintenanceTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         job = app.state_maintenance.prepare(context, "原角色人格提示", "new-period")
         inputs = [item.payload for item in job["materials"] if item.purpose == "reported_conversation"]
         self.assertEqual(inputs, ["输入 after-state"])
+
+    async def test_maintenance_processes_care_dialogue_in_its_authorized_window_once(self):
+        from companion_v2.conversation.native_observations import NativeConversationObservations
+        _, app, context, _ = await self.ready()
+        other_scope = replace(context.scope, native_scope_id="care-window",
+                              conversation_id="conversation-care", session_id="session-care")
+        self.personas.register_route(ConversationRoute(other_scope, user=context.actor.subject), observed_at=NOW)
+        other = TaskContext(context.actor, self.identity.resolve_role(other_scope, observed_at=NOW).unwrap(),
+                            AudienceRef(other_scope, (context.actor.subject,)))
+        self.grant(other.actor, other.scope, "text")
+        self.grant(other.actor, other.scope, "role.state.read")
+        self.grant(other.actor, other.scope, "role.state.maintain")
+        app.state_maintenance.bind(other, "原角色人格提示")
+        observations = NativeConversationObservations(app.messages)
+        observations.capture_together(other, observation_id="care-input", event_id="care-input",
+            text="粥和药都给你了", at=NOW, kind="input")
+        app.role_state.write(context, data=state_data(energy=12, health="之前感冒不适"),
+                             expected_revision=0, operation_key="other-window-state")
+        self.clock.advance(timedelta(seconds=1))
+        observations.capture_together(other, observation_id="care-output", event_id="care-output",
+            text="现在舒服些了，药好像起效了", at=self.clock.now(), kind="assistant")
+
+        selected = app.state_maintenance._conversation_anchor((context, "原角色人格提示", None), self.clock.now())
+        self.assertEqual(selected[0], other)
+        job = app.state_maintenance.prepare(other, selected[1], "care-state")
+        self.assertEqual([item["speaker"] for item in job["recent_dialogue"]], ["user", "assistant"])
+        self.assertIn("药好像起效了", job["recent_dialogue"][-1]["text"])
+        self.assertFalse(job["sleep_profile"]["has_sleep_history"])
+        self.assertIsNone(job["sleep_execution"])
+        self.assertEqual(app.state_maintenance.prepare(context, selected[1], "no-private-leak")["recent_dialogue"], ())
+        self.model_behavior = lambda env: asyncio.sleep(0, result=answered(encode(state_data(energy=25, health="舒服些了"))))
+        result = await app.state_maintenance.run(other, selected[1], "care-state")
+        self.assertEqual(result["state"], "succeeded", result)
+        self.assertEqual(app.role_state.read(context)["values"]["health"], "舒服些了")
+        self.assertEqual(app.state_maintenance.prepare(other, selected[1], "next-round")["recent_dialogue"], ())
+
+    async def test_maintenance_does_not_replay_unsent_or_withdrawn_dialogue(self):
+        from companion_v2.conversation.native_observations import NativeConversationObservations
+        _, app, context, _ = await self.ready()
+        observations = NativeConversationObservations(app.messages)
+        reference = observations.capture_together(context, observation_id="care-source", event_id="care-source",
+            text="给你的药", at=NOW, kind="input")
+        observations.capture_output(context, turn_id="not-sent", event_id="not-sent",
+            text="还没发出的好转感受", at=NOW)
+        job = app.state_maintenance.prepare(context, "原角色人格提示", "before-withdrawal")
+        self.assertEqual(len(job["recent_dialogue"]), 1)
+        self.revoke_source(app, reference)
+        self.assertEqual(app.state_maintenance.prepare(context, "原角色人格提示", "after-withdrawal")["recent_dialogue"], ())
+
+    async def test_bounded_maintenance_dialogue_keeps_the_latest_care_feedback(self):
+        from companion_v2.conversation.native_observations import NativeConversationObservations
+        _, app, context, _ = await self.ready()
+        observations = NativeConversationObservations(app.messages)
+        for index in range(8):
+            observations.capture_together(context, observation_id=f"older-{index}", event_id=f"older-{index}",
+                text="较早的闲聊" * 320, at=self.clock.now(), kind="input")
+            self.clock.advance(timedelta(seconds=1))
+        observations.capture_together(context, observation_id="latest-care", event_id="latest-care",
+            text="把粥和药给你了", at=self.clock.now(), kind="input")
+        self.clock.advance(timedelta(seconds=1))
+        observations.capture_together(context, observation_id="latest-relief", event_id="latest-relief",
+            text="药好像起效了，舒服些了", at=self.clock.now(), kind="assistant")
+
+        job = app.state_maintenance.prepare(context, "原角色人格提示", "bounded-care")
+        items = job["recent_dialogue"]
+        self.assertLessEqual(sum(len(item["text"]) for item in items), 10000)
+        self.assertEqual([item["observation_id"] for item in items[-2:]], ["latest-care", "latest-relief"])
+        self.assertEqual([item["at"] for item in items], sorted(item["at"] for item in items))
+
+    async def test_history_marks_old_symptoms_as_simulation_without_resetting_state(self):
+        _, app, context, _ = await self.ready()
+        app.role_state.write(context, data=state_data(energy=12, health="感冒不适", sleep="未睡好"),
+                             expected_revision=0, operation_key="old-simulation")
+        self.clock.advance(timedelta(days=2))
+        job = app.state_maintenance.prepare(context, "原角色人格提示", "history-review")
+        self.assertEqual(len(job["simulation_history"]), 1)
+        self.assertEqual(job["simulation_history"][0]["updated_at"], NOW.isoformat(timespec="microseconds"))
+        self.assertEqual(job["simulation_history"][0]["basis"], "previous_simulation")
+        self.assertEqual(app.role_state.read(context)["values"]["energy"], 12)
 
     async def test_low_energy_enters_the_original_reply_without_refusal_gate(self):
         host, app, context, _ = await self.ready()

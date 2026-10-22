@@ -11,7 +11,7 @@ async function run({browser, outputDir, bridgePath}) {
   const preview = root;
   await fs.mkdir(outputDir, {recursive:true});
   const sdk = await fs.readFile(bridgePath,"utf8");
-  const HOST = "astrbot_plugin_private_companion_v2";
+  const HOST = "astrbot_plugin_private_companion";
   const A = "host/targets/first/roles/role-a/memory";
   const B = "host/targets/second/roles/role-b/memory";
   const C = "host/targets/first/roles/role-c/memory";

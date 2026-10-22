@@ -1,7 +1,7 @@
 /* Daily review queue for evidence-bound role guidance. */
 "use strict";
 window.CompanionSelfReviewPage = (() => {
-  const HOST = "astrbot_plugin_private_companion_v2";
+  const HOST = "astrbot_plugin_private_companion";
   const PREFIX = "/" + HOST + "/";
   const errors = {
     dashboard_identity_required:"当前登录状态不可用，请重新打开陪伴小屋。",

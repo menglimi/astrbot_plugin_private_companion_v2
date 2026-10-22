@@ -58,8 +58,11 @@ async def run():
     await db_helper.initialize()
     db_helper.inited = True
     source = Path(__file__).resolve().parents[1]
-    plugin_name = source.name
-    entry_name = "data.plugins." + plugin_name + ".main"
+    # AstrBot imports by the plugin directory but registers the public metadata
+    # name. These intentionally differ during the v7 migration workspace.
+    plugin_dir_name = source.name
+    plugin_name = "astrbot_plugin_private_companion"
+    entry_name = "data.plugins." + plugin_dir_name + ".main"
     for name, paths in (("data", []), ("data.plugins", [str(source.parent)])):
         package = ModuleType(name)
         package.__path__ = paths
@@ -74,7 +77,7 @@ async def run():
         "qq-main:FriendMessage:200": "conversation-a", "qq-second:FriendMessage:200": "conversation-b"}
     manager = FixtureManager(native, {})
     manager.plugin_store_path = str(source.parent)
-    manager._get_plugin_modules = lambda: [{"pname": plugin_name, "module": "main"}]
+    manager._get_plugin_modules = lambda: [{"pname": plugin_dir_name, "module": "main"}]
     foreign = ModuleType("companion_v2.foreign_reload_fixture")
     foreign.__file__ = str(source.parent / "another-plugin" / "foreign.py")
     sys.modules[foreign.__name__] = foreign
@@ -82,7 +85,7 @@ async def run():
         root = Path(temporary)
         manager.plugin_config_path = str(root / "config")
         Path(manager.plugin_config_path).mkdir()
-        config_file = Path(manager.plugin_config_path) / (plugin_name + "_config.json")
+        config_file = Path(manager.plugin_config_path) / (plugin_dir_name + "_config.json")
         config_file.write_text(json.dumps(multi_config(), ensure_ascii=False) + "\n",
                                encoding="utf-8", newline="\n")
         initial_owner = initial_manifest = initial_routes = initial_handlers = saved_config = None
@@ -144,10 +147,10 @@ async def run():
             assert entry_name not in sys.modules
             assert not any(name == "companion_v2" or (name.startswith("companion_v2.") and name != foreign.__name__)
                            for name in sys.modules)
-            assert not any(name.startswith("data.plugins." + plugin_name + ".") for name in sys.modules)
+            assert not any(name.startswith("data.plugins." + plugin_dir_name + ".") for name in sys.modules)
             assert str(source) not in sys.path
             assert sys.modules[foreign.__name__] is foreign
-            assert not hasattr(sys.modules["data.plugins"], plugin_name)
+            assert not hasattr(sys.modules["data.plugins"], plugin_dir_name)
 
         def check_failed_initialization_cleanup():
             assert entry_name not in sys.modules
@@ -156,7 +159,7 @@ async def run():
             assert not any(name == "astrbot_host" or name.startswith("astrbot_host.")
                            for name in sys.modules)
             assert str(source) not in sys.path
-            assert not hasattr(sys.modules["data.plugins"], plugin_name)
+            assert not hasattr(sys.modules["data.plugins"], plugin_dir_name)
             assert native.registered_web_apis == []
             assert sys.modules[foreign.__name__] is foreign
 

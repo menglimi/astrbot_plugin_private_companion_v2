@@ -9,7 +9,7 @@ from astrbot.api.web import request
 from companion_v2.execution.models import TaskError
 from .perception_api import PerceptionWebAPI
 
-PREFIX = "/astrbot_plugin_private_companion_v2/extensions"
+PREFIX = "/astrbot_plugin_private_companion/extensions"
 
 
 class NativeExtensionWebAPI(PerceptionWebAPI):
@@ -116,7 +116,12 @@ class NativeExtensionWebAPI(PerceptionWebAPI):
                 page_result = await asyncio.wait_for(service.extension_api.page_action(
                     {'action': data['action'], **data['payload']}), timeout=timeout)
                 if type(page_result) is not dict or not page_result.get('ok'):
-                    raise TaskError('native_reality_action_failed', '操作未完成，请检查现实设备配置与当前授权')
+                    codes = {'native_mihome_unavailable', 'camera_user_ineligible',
+                             'camera_consent_required', 'camera_user_not_configured'}
+                    code = page_result.get('code') if isinstance(page_result, dict) else None
+                    if code not in codes:
+                        code = 'native_reality_action_failed'
+                    raise TaskError(code, '操作未完成，请检查现实设备配置与当前授权')
                 result = page_result.get('result', {})
                 camera_preview = None
                 if data['action'] == 'test_camera':

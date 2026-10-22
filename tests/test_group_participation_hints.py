@@ -48,7 +48,9 @@ class GroupParticipationHintTests(unittest.TestCase):
                     "group_wakeup_owner_direct_words": '["专属称呼"]',
                     "group_wakeup_bot_name": "小星", "group_wakeup_bot_name_enabled": False}
         self.assertNotIn("专属称呼", self.hints(settings=settings))
+        self.assertNotIn("熟稔与默契", self.hints(settings=settings))
         self.assertIn("专属称呼", self.hints(settings=settings, sender="201"))
+        self.assertIn("熟稔与默契", self.hints(settings=settings, sender="201"))
         self.assertNotIn("小星", self.hints(settings=settings, sender="201"))
         self.assertNotIn("群唤醒参考", self.hints(settings={"group_wakeup_enabled": False}))
 
@@ -93,8 +95,10 @@ class GroupParticipationHintTests(unittest.TestCase):
 
     def test_only_possible_plain_group_fragments_wait(self):
         event = NS(scope=NS(kind=ScopeKind.GROUP))
-        self.assertEqual(short_input_wait(event, "[提及机器人] 瓦", {}), 15)
-        for text in ("", "好", "晚安", "你好", "抱抱", "谢谢", "瓦？", "我要问你"):
+        for text in ("[提及机器人] 瓦", "好", "晚安", "你好", "抱抱", "谢谢"):
+            with self.subTest(text=text):
+                self.assertEqual(short_input_wait(event, text, {}), 15)
+        for text in ("", "瓦？", "好！", "晚安。", "我要问你"):
             with self.subTest(text=text):
                 self.assertEqual(short_input_wait(event, text, {}), 0)
         self.assertEqual(short_input_wait(event, "瓦", {"group_wakeup_enabled": False}), 0)
@@ -102,6 +106,39 @@ class GroupParticipationHintTests(unittest.TestCase):
         for field in ("images", "quotes", "forwards", "audios", "videos"):
             self.assertEqual(short_input_wait(NS(scope=event.scope, **{field: (object(),)}), "瓦", {}), 0)
         self.assertEqual(short_input_wait(NS(scope=NS(kind=ScopeKind.PRIVATE)), "瓦", {}), 0)
+
+    def test_native_consecutive_messages_and_high_pressure_bursts_inject_rhythm_guidance(self):
+        streak_recent = [
+            dict(type="group_member_message", speaker_id="200",
+                 received_at=(NOW - timedelta(seconds=6)).isoformat(), text="小星"),
+            dict(type="group_member_message", speaker_id="200",
+                 received_at=(NOW - timedelta(seconds=2)).isoformat(), text="我有个问题想问你"),
+        ]
+        streak_hint = self.hints(streak_recent, native=True, sender="200")
+        self.assertIn("连发防抖参考：当前成员在近 20 秒内已连续发出 3 条尚未被新回复隔开的消息", streak_hint)
+        self.assertIn("相对降低 65%", streak_hint)
+        self.assertIn("将这几条连续发言合并为一个整体一次性回应", streak_hint)
+
+        replied_recent = [
+            *streak_recent,
+            dict(type="native_group_reply", turn_id="turn-1",
+                 returned_at=(NOW - timedelta(seconds=1)).isoformat()),
+        ]
+        self.assertNotIn("连发防抖参考", self.hints(replied_recent, native=True, sender="200"))
+
+        burst_recent = [
+            dict(type="group_member_message", speaker_id="201",
+                 received_at=(NOW - timedelta(seconds=8)).isoformat(), text="小星看看这个"),
+            dict(type="group_member_message", speaker_id="202",
+                 received_at=(NOW - timedelta(seconds=5)).isoformat(), text="我也想问"),
+            dict(type="group_member_message", speaker_id="200",
+                 received_at=(NOW - timedelta(seconds=2)).isoformat(), text="还有我这个"),
+        ]
+        burst_hint = self.hints(burst_recent, native=True, sender="200")
+        self.assertIn("群聊高压分流参考", burst_hint)
+        self.assertIn("（1）哪些要回", burst_hint)
+        self.assertIn("（2）哪些不回", burst_hint)
+        self.assertIn("（3）哪些一起回", burst_hint)
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@
    不会报错，只会掉进末尾的兜底分组并显示成原始 id。 */
 "use strict";
 window.CompanionMemorySettingsSection = (() => {
-  const PREFIX = "/astrbot_plugin_private_companion_v2/";
+  const PREFIX = "/astrbot_plugin_private_companion/";
 
   const labels = {
     enabled: "启用记忆", automatic_context: "自动注入相关记忆",
@@ -137,6 +137,17 @@ window.CompanionMemorySettingsSection = (() => {
     if (instance) instance.attach();
   }
 
-  return {mount, unmount, attach, labels, helps, sections,
+  /* 全局搜索用：把这一页的字段摊成条目，与 reply-page.searchEntries() 同形。
+     记忆页共有 30 个可编辑字段，此前整组不在搜索索引里，只能靠在「事实与经历」
+     里逐段找。 */
+  function searchEntries() {
+    return sections.flatMap(section => (section.fields || []).filter(name => labels[name]).map(field => ({
+      group: "memory", groupTitle: "记忆策略", field,
+      label: labels[field] || field, help: helps[field] || "",
+      section: section.id, sectionTitle: section.title, sectionCount: sections.length,
+    })));
+  }
+
+  return {mount, unmount, attach, labels, helps, sections, searchEntries,
     get state() { return {instance, path: boundPath}; }};
 })();

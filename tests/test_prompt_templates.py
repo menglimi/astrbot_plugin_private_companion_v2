@@ -1,11 +1,14 @@
 """The prompt editor changes the templates consumed by the original contact path."""
 
+from datetime import datetime, timezone
+import json
 from types import SimpleNamespace
 import unittest
 
 from companion_v2.configuration.models import ConfigLayer, ConfigTarget
 from companion_v2.model_gateway.management import ModelManagement
 from companion_v2.proactive.configuration import GROUP
+from companion_v2.proactive.preferences import ContactPreferences
 from companion_v2.proactive.prompts import INSTRUCTION, request_for
 from companion_v2.proactive.prompt_templates import PROMPT_DEFAULTS
 from tests.proactive_support import ContactFixture
@@ -31,11 +34,13 @@ class PromptTemplateTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
                 "changes": {} if reset else {"prompt": prompt}, "reset": ["prompt"] if reset else []}
         return self.manager.configure(operator or self.core, data)
 
-    def composed(self, purpose="chat", *, dialogue=(), automatic_origin=None):
+    def composed(self, purpose="chat", *, dialogue=(), history=(), last_reply=None,
+                 automatic_origin=None, preferences=None):
         opportunity = self.opportunity()
         job = SimpleNamespace(intent=self.intent(opportunity, purpose=purpose), context=self.context,
             automatic_origin=automatic_origin, interaction=None, role_instruction="角色自己的设定")
-        return request_for(job, (), self.preferences(self.app), (), dialogue=dialogue)
+        return request_for(job, (), preferences or self.preferences(self.app), history,
+                           dialogue=dialogue, last_reply=last_reply)
 
     async def test_edit_replaces_business_template_and_reaches_the_provider(self):
         original = self.section("expression")["prompt"]
@@ -73,6 +78,65 @@ class PromptTemplateTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
                   if material.purpose == "recent_private_dialogue"]
         self.assertEqual(len(recent), 1)
         self.assertIn("吃了啦", recent[0].payload)
+
+    async def test_full_exchange_is_shared_across_contact_purposes_without_inferred_labels(self):
+        base = self.preferences(self.app)
+        observed_at = datetime(2026, 9, 21, 5, 27, tzinfo=timezone.utc)
+        preferences = ContactPreferences(base.snapshot, base.values, observed_at)
+        dialogue = ({"role": "assistant", "text": "午饭吃得怎么样？", "delivered_at":
+                     "2026-09-21T04:30:20+00:00", "_history_round": "lunch"},
+                    {"role": "user", "text": "碗都洗好啦", "received_at":
+                     "2026-09-21T04:30:54+00:00", "_history_round": "lunch"},
+                    {"role": "assistant", "text": "那就好，下午慢慢来", "delivered_at":
+                     "2026-09-21T04:31:29+00:00", "_history_round": "lunch"})
+
+        for purpose in ("meal", "greeting", "care", "chat"):
+            with self.subTest(purpose=purpose):
+                request = self.composed(purpose, dialogue=dialogue, preferences=preferences)
+                intent = next(item for item in request.context.materials if item.purpose == "contact_intent")
+                self.assertNotIn("continuity_signal", json.loads(intent.payload))
+                recent = [json.loads(item.payload) for item in request.context.materials
+                          if item.purpose == "recent_private_dialogue"]
+                self.assertEqual([item["text"] for item in recent[0]["messages"]],
+                                 [item["text"] for item in dialogue])
+                self.assertIn("这一连续性判断适用于所有主动目的", request.instruction)
+                self.assertIn("独立于话题去重开关和时间窗", request.instruction)
+                self.assertIn("后来的明确纠正、另一餐或新的情境则要重新理解", request.instruction)
+
+    async def test_ambiguous_statements_keep_their_original_meaning_and_date(self):
+        base = self.preferences(self.app)
+        observed_at = datetime(2026, 9, 21, 5, 27, tzinfo=timezone.utc)
+        preferences = ContactPreferences(base.snapshot, base.values, observed_at)
+        for text in ("你吃饱了吗？", "还没吃", "我没吃饱", "他吃了，我还没顾上", "吃了？并没有哦",
+                     "嗯，刚刚那份已经解决啦", "晚饭吃了", "昨天吃饱啦", "先去躺一会儿，不一定睡",
+                     "任务都交了，等明天反馈", "我还没吃饭这几个字怎么翻译？"):
+            with self.subTest(text=text):
+                request = self.composed("chat", dialogue=({"role": "user", "text": text,
+                    "received_at": "2026-09-21T04:30:54+00:00"},), preferences=preferences)
+                self.assertNotIn("continuity_signal", {item.purpose for item in request.context.materials})
+                recent = next(item for item in request.context.materials if item.purpose == "recent_private_dialogue")
+                self.assertEqual(json.loads(recent.payload)["text"], text)
+
+        yesterday = self.composed("chat", dialogue=({"role": "user", "text": "吃饱啦",
+            "received_at": "2026-09-20T04:30:54+00:00"},), preferences=preferences)
+        self.assertNotIn("continuity_signal", {item.purpose for item in yesterday.context.materials})
+        recent = next(item for item in yesterday.context.materials if item.purpose == "recent_private_dialogue")
+        self.assertEqual(json.loads(recent.payload)["received_at"], "2026-09-20T04:30:54+00:00")
+
+    async def test_later_correction_follows_the_old_reply_and_proactive_message(self):
+        request = self.composed("care", dialogue=(
+            {"role": "user", "text": "刚才说的是昨晚，今天还没顾上", "received_at": "2026-09-21T05:05:00+00:00"},
+            {"role": "assistant", "text": "午饭吃了吗？", "delivered_at": "2026-09-21T12:30:20+08:00",
+             "_history_round": "lunch"},
+            {"role": "user", "text": "吃饱啦", "received_at": "2026-09-21T04:30:54+00:00",
+             "_history_round": "lunch"}),
+            history=({"owner": GROUP, "text": "手边这本书真有趣", "delivered_at": "2026-09-21T04:55:00+00:00"},),
+            last_reply={"text": "吃饱了就好呀", "delivered_at": "2026-09-21T04:31:29+00:00"})
+        past = [json.loads(item.payload) for item in request.context.materials
+                if item.purpose in ("recent_private_dialogue", "last_confirmed_reply", "dedup_candidate",
+                                    "confirmed_background_message", "confirmed_reply_context")]
+        self.assertEqual([item.get("text", [msg["text"] for msg in item.get("messages", ())]) for item in past],
+                         [["午饭吃了吗？", "吃饱啦"], "吃饱了就好呀", "手边这本书真有趣", "刚才说的是昨晚，今天还没顾上"])
 
     async def test_relationship_inheritance_reset_and_window_isolation(self):
         target = ConfigTarget(self.context.scope.installation_id, ConfigLayer.RELATIONSHIP,

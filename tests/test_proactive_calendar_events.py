@@ -179,3 +179,32 @@ class CalendarContactTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestC
             second, _ = self.candidate()
         self.assertIsNotNone(second)
         self.assertEqual(second[2]["sequence"], 1)
+
+    async def test_post_commitment_afterglow_and_role_plan_completion_transitions(self):
+        await self.setup_contacts()
+        due = self.clock.now() + timedelta(minutes=10)
+        self.commitment("afterglow-commitment", due=due)
+        self.accept("afterglow-commitment")
+        # Duration is 60m by default in calendar_data; after due + 60m + 5m delay, post_commitment opens.
+        self.advance(self.app, 76 * 60)
+        transition, _ = self.app.contact_schedule.calendar_events.select_transitions(
+            self.origin, self.preferences(self.app, self.origin), self.clock.now())
+        self.assertIsNotNone(transition)
+        _, intents, marker = transition
+        self.assertEqual(marker["phase"], "post_commitment")
+        self.assertEqual(marker["purpose"], "followup")
+        self.assertEqual(intents[0].purpose, "followup")
+        self.app.contact_schedule.calendar_events.validate(self.origin, marker, self.clock.now())
+
+        plan_due = self.clock.now() + timedelta(minutes=5)
+        self.commitment("finished-plan", due=plan_due, kind="role_plan")
+        self.accept("finished-plan")
+        self.advance(self.app, 66 * 60)
+        plan_transition, _ = self.app.contact_schedule.calendar_events.select_transitions(
+            self.origin, self.preferences(self.app, self.origin), self.clock.now(), purpose="life")
+        self.assertIsNotNone(plan_transition)
+        _, plan_intents, plan_marker = plan_transition
+        self.assertEqual(plan_marker["phase"], "role_plan_finished")
+        self.assertEqual(plan_marker["purpose"], "life")
+        self.assertEqual(plan_intents[0].purpose, "life")
+        self.app.contact_schedule.calendar_events.validate(self.origin, plan_marker, self.clock.now())

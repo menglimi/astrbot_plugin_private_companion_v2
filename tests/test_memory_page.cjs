@@ -28,7 +28,7 @@ function targets() {
     installation_id: 'inst', operator_id: 'operator',
     targets: [{
       target_id: 'target-1', scope_kind: 'private', participant_id: 'user-1', platform_id: 'aiocqhttp', account_id: 'bot-1',
-      roles: [{role_id: 'role-1', memory_api: '/astrbot_plugin_private_companion_v2/memory'}],
+      roles: [{role_id: 'role-1', memory_api: '/astrbot_plugin_private_companion/memory'}],
     }],
   };
 }
@@ -60,7 +60,7 @@ function harness(routes, ownerDocument) {
       bridgeFor: () => ({then: resolve => resolve(window.AstrBotPluginPage)}),
     },
     AstrBotPluginPage: {
-      ready: () => Promise.resolve({pluginName: 'astrbot_plugin_private_companion_v2'}),
+      ready: () => Promise.resolve({pluginName: 'astrbot_plugin_private_companion'}),
       /* 归属是静态读数，随手回答掉。若让它排队，用例里那些「手动回答目录、
          再 settle() 若干拍」的写法会卡在这一条上：目录请求根本还没发出去，
          测试就把 settle 走完了。 */

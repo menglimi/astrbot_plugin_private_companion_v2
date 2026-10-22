@@ -1,6 +1,6 @@
 {
   "source": "docs/V1_V2_CONFIG_RESOLVED_20260928.csv",
-  "supported_v1_version": "6.6.2",
+  "supported_v1_version": "6.7.0",
   "rules": [
     {
       "source": "basic_config.enable_daily_token_soft_limit",
@@ -23,7 +23,13 @@
     {
       "source": "basic_config.enable_holiday_perception",
       "source_type": "bool",
-      "target": "conversation.perception.calendar_enabled",
+      "target": "conversation.perception.holiday_enabled",
+      "confidence": "medium"
+    },
+    {
+      "source": "basic_config.holiday_country",
+      "source_type": "string",
+      "target": "conversation.perception.holiday_country",
       "confidence": "medium"
     },
     {
@@ -191,7 +197,7 @@
     {
       "source": "proactive_reach_config.max_daily_messages",
       "source_type": "int",
-      "target": "proactive.contact.max_attempts_24h",
+      "target": "proactive.contact.max_contacts_24h",
       "confidence": "high"
     },
     {
@@ -654,7 +660,7 @@
     {
       "source": "memory_habit_config.expression_learning_mode",
       "source_type": "string",
-      "target": "expression.learning.sample_chars",
+      "target": "expression.learning.learning_mode",
       "confidence": "medium"
     },
     {
@@ -666,13 +672,13 @@
     {
       "source": "memory_habit_config.expression_group_learning_daily_batch_limit",
       "source_type": "int",
-      "target": "expression.learning.scan_interval_minutes",
+      "target": "expression.learning.group_daily_batch_limit",
       "confidence": "medium"
     },
     {
       "source": "memory_habit_config.expression_group_learning_min_new_messages",
       "source_type": "int",
-      "target": "expression.learning.min_samples",
+      "target": "expression.learning.group_new_messages",
       "confidence": "medium"
     },
     {
@@ -1983,6 +1989,7 @@
       "source_type": "list",
       "target": "conversation.presentation.component_order",
       "confidence": "high",
+      "transform": "component_order",
       "list_format": "json"
     },
     {
@@ -2030,9 +2037,27 @@
       "confidence": "medium"
     },
     {
+      "source": "legacy_compat_config.segmented_proactive_interval_max",
+      "source_type": "float",
+      "target": "conversation.presentation.part_gap_max_ms",
+      "confidence": "medium"
+    },
+    {
       "source": "legacy_compat_config.timezone",
       "source_type": "string",
       "target": "role.life.timezone",
+      "confidence": "high"
+    },
+    {
+      "source": "legacy_compat_config.enable_maintenance_token_saver",
+      "source_type": "bool",
+      "target": "model.budget.enable_daily_token_soft_limit",
+      "confidence": "high"
+    },
+    {
+      "source": "legacy_compat_config.maintenance_token_soft_limit",
+      "source_type": "string",
+      "target": "model.budget.daily_token_soft_limit",
       "confidence": "high"
     },
     {
@@ -2094,6 +2119,102 @@
       "source_type": "text",
       "target": "wardrobe.image_prompt",
       "confidence": "high"
+    },
+    {
+      "source": "humanized_state_config.advanced_cycle_follicular_days",
+      "source_type": "int",
+      "target": "role.state.cycle_follicular_days",
+      "confidence": "high"
+    },
+    {
+      "source": "humanized_state_config.advanced_cycle_follicular_prompt",
+      "source_type": "string",
+      "target": "role.state.cycle_follicular_prompt",
+      "confidence": "high"
+    },
+    {
+      "source": "humanized_state_config.advanced_cycle_follicular_mood",
+      "source_type": "string",
+      "target": "role.state.cycle_follicular_mood",
+      "confidence": "high"
+    },
+    {
+      "source": "humanized_state_config.advanced_cycle_follicular_energy",
+      "source_type": "int",
+      "target": "role.state.cycle_follicular_energy",
+      "confidence": "high"
+    },
+    {
+      "source": "humanized_state_config.advanced_cycle_pre_ovulation_days",
+      "source_type": "int",
+      "target": "role.state.cycle_pre_ovulation_days",
+      "confidence": "high"
+    },
+    {
+      "source": "humanized_state_config.advanced_cycle_pre_ovulation_prompt",
+      "source_type": "string",
+      "target": "role.state.cycle_pre_ovulation_prompt",
+      "confidence": "high"
+    },
+    {
+      "source": "humanized_state_config.advanced_cycle_pre_ovulation_mood",
+      "source_type": "string",
+      "target": "role.state.cycle_pre_ovulation_mood",
+      "confidence": "high"
+    },
+    {
+      "source": "humanized_state_config.advanced_cycle_pre_ovulation_energy",
+      "source_type": "int",
+      "target": "role.state.cycle_pre_ovulation_energy",
+      "confidence": "high"
+    },
+    {
+      "source": "humanized_state_config.advanced_cycle_ovulation_days",
+      "source_type": "int",
+      "target": "role.state.cycle_ovulation_days",
+      "confidence": "high"
+    },
+    {
+      "source": "humanized_state_config.advanced_cycle_ovulation_prompt",
+      "source_type": "string",
+      "target": "role.state.cycle_ovulation_prompt",
+      "confidence": "high"
+    },
+    {
+      "source": "humanized_state_config.advanced_cycle_ovulation_mood",
+      "source_type": "string",
+      "target": "role.state.cycle_ovulation_mood",
+      "confidence": "high"
+    },
+    {
+      "source": "humanized_state_config.advanced_cycle_ovulation_energy",
+      "source_type": "int",
+      "target": "role.state.cycle_ovulation_energy",
+      "confidence": "high"
+    },
+    {
+      "source": "humanized_state_config.advanced_cycle_luteal_days",
+      "source_type": "int",
+      "target": "role.state.cycle_luteal_days",
+      "confidence": "high"
+    },
+    {
+      "source": "humanized_state_config.advanced_cycle_luteal_prompt",
+      "source_type": "string",
+      "target": "role.state.cycle_luteal_prompt",
+      "confidence": "high"
+    },
+    {
+      "source": "humanized_state_config.advanced_cycle_luteal_mood",
+      "source_type": "string",
+      "target": "role.state.cycle_luteal_mood",
+      "confidence": "high"
+    },
+    {
+      "source": "humanized_state_config.advanced_cycle_luteal_energy",
+      "source_type": "int",
+      "target": "role.state.cycle_luteal_energy",
+      "confidence": "high"
     }
   ],
   "plugin_rules": [
@@ -2142,50 +2263,6 @@
       }
     },
     {
-      "source": "proactive_reach_config.inbound_message_debounce_seconds",
-      "source_type": "float",
-      "target": "runtime.quiet_seconds",
-      "confidence": "high",
-      "transform": "integer",
-      "contract": {
-        "type": "int",
-        "default": 0
-      }
-    },
-    {
-      "source": "message_debounce_config.SMART_MESSAGE_DEBOUNCE_PROVIDER_ID",
-      "source_type": "string",
-      "target": "model.provider_id",
-      "confidence": "medium",
-      "transform": "identity",
-      "contract": {
-        "type": "string",
-        "default": ""
-      }
-    },
-    {
-      "source": "message_debounce_config.text_message_debounce_seconds",
-      "source_type": "float",
-      "target": "runtime.quiet_seconds",
-      "confidence": "high",
-      "transform": "integer",
-      "contract": {
-        "type": "int",
-        "default": 0
-      }
-    },
-    {
-      "source": "message_debounce_config.text_message_debounce_max_wait_seconds",
-      "source_type": "float",
-      "target": "runtime.maximum_wait_seconds",
-      "confidence": "high",
-      "transform": "integer",
-      "contract": {
-        "type": "int",
-        "default": 0
-      }
-    },
-    {
       "source": "external_memory_config.new_framework_s4_max_context_chars",
       "source_type": "int",
       "target": "model.maximum_input_estimate",
@@ -2200,11 +2277,26 @@
       "source": "forward_message_config.forward_message_max_messages",
       "source_type": "int",
       "target": "runtime.forward_max_nodes",
-      "confidence": "medium",
-      "transform": "integer",
+      "confidence": "high",
+      "transform": "identity",
       "contract": {
         "type": "int",
-        "default": 32
+        "default": 32,
+        "min": 1,
+        "max": 300,
+        "minimum": 1,
+        "maximum": 300
+      }
+    },
+    {
+      "source": "forward_message_config.forward_message_parse_nested",
+      "source_type": "bool",
+      "target": "runtime.forward_parse_nested",
+      "confidence": "high",
+      "transform": "identity",
+      "contract": {
+        "type": "bool",
+        "default": true
       }
     },
     {
@@ -2230,6 +2322,19 @@
       }
     },
     {
+      "source": "reactive_poke_config.reactive_poke_normal_reply_probability",
+      "source_type": "float",
+      "target": "poke.model_reply_probability",
+      "confidence": "medium",
+      "transform": "one_minus_probability",
+      "contract": {
+        "type": "float",
+        "default": 0.3,
+        "minimum": 0.0,
+        "maximum": 1.0
+      }
+    },
+    {
       "source": "reactive_poke_config.reactive_poke_back_probability",
       "source_type": "float",
       "target": "poke.back_probability",
@@ -2238,6 +2343,19 @@
       "contract": {
         "type": "float",
         "default": 0.0
+      }
+    },
+    {
+      "source": "reactive_poke_config.reactive_poke_back_times",
+      "source_type": "int",
+      "target": "poke.back_times",
+      "confidence": "medium",
+      "transform": "identity",
+      "contract": {
+        "type": "int",
+        "default": 1,
+        "minimum": 1,
+        "maximum": 5
       }
     },
     {
@@ -2307,7 +2425,7 @@
       "source_type": "string",
       "target": "voice_reply.generation_mode",
       "confidence": "medium",
-      "transform": "identity",
+      "transform": "voice_generation_mode",
       "contract": {
         "type": "string",
         "default": "plain",
@@ -2367,15 +2485,15 @@
     {
       "source": "voice_action_config.tts_conversion_scope",
       "source_type": "string",
-      "target": "voice_reply.delivery_mode",
+      "target": "voice_reply.conversion_scope",
       "confidence": "high",
-      "transform": "voice_delivery_scope",
+      "transform": "identity",
       "contract": {
         "type": "string",
-        "default": "voice_and_text",
+        "default": "full",
         "options": [
-          "voice_and_text",
-          "voice_only"
+          "full",
+          "partial"
         ]
       }
     },
@@ -2415,23 +2533,27 @@
     {
       "source": "voice_action_config.tts_private_min_interval_seconds",
       "source_type": "float",
-      "target": "voice_reply.cooldown_seconds",
+      "target": "voice_reply.private_cooldown_seconds",
       "confidence": "high",
       "transform": "integer",
       "contract": {
         "type": "int",
-        "default": 0
+        "default": -1,
+        "min": -1,
+        "max": 86400
       }
     },
     {
       "source": "voice_action_config.tts_group_min_interval_seconds",
       "source_type": "float",
-      "target": "voice_reply.cooldown_seconds",
+      "target": "voice_reply.group_cooldown_seconds",
       "confidence": "high",
       "transform": "integer",
       "contract": {
         "type": "int",
-        "default": 0
+        "default": -1,
+        "min": -1,
+        "max": 86400
       }
     },
     {
@@ -2486,15 +2608,15 @@
     {
       "source": "auto_voice_config.auto_voice_full_conversion_enabled",
       "source_type": "bool",
-      "target": "voice_reply.delivery_mode",
+      "target": "voice_reply.conversion_scope",
       "confidence": "medium",
-      "transform": "bool_to_voice_delivery",
+      "transform": "bool_to_voice_scope",
       "contract": {
         "type": "string",
-        "default": "voice_and_text",
+        "default": "full",
         "options": [
-          "voice_and_text",
-          "voice_only"
+          "full",
+          "partial"
         ]
       }
     },
@@ -2518,6 +2640,39 @@
       "contract": {
         "type": "int",
         "default": 0
+      }
+    },
+    {
+      "source": "auto_voice_config.main_user_mention_voice_keywords",
+      "source_type": "text",
+      "target": "voice_reply.primary_mention_keywords",
+      "confidence": "high",
+      "transform": "identity",
+      "contract": {
+        "type": "text",
+        "default": ""
+      }
+    },
+    {
+      "source": "auto_voice_config.main_user_mention_voice_probability",
+      "source_type": "int",
+      "target": "voice_reply.primary_mention_probability",
+      "confidence": "high",
+      "transform": "percent",
+      "contract": {
+        "type": "float",
+        "default": 0.8
+      }
+    },
+    {
+      "source": "auto_voice_config.main_user_mention_voice_prompt",
+      "source_type": "text",
+      "target": "voice_reply.primary_mention_prompt",
+      "confidence": "high",
+      "transform": "identity",
+      "contract": {
+        "type": "text",
+        "default": ""
       }
     },
     {
@@ -2620,20 +2775,31 @@
       }
     },
     {
-      "source": "legacy_compat_config.segmented_proactive_interval_max",
-      "source_type": "float",
-      "target": "runtime.part_gap_seconds",
+      "source": "model_assignment_config.enable_llm_streaming",
+      "source_type": "bool",
+      "target": "model.streaming",
       "confidence": "medium",
-      "transform": "integer",
+      "transform": "identity",
       "contract": {
-        "type": "int",
-        "default": 0
+        "type": "bool",
+        "default": false
       }
     },
     {
-      "source": "legacy_compat_config.enable_maintenance_token_saver",
+      "source": "model_assignment_config.model_replacement_rules",
+      "source_type": "template_list",
+      "target": "model.replacement_rules",
+      "confidence": "high",
+      "transform": "route_rules",
+      "contract": {
+        "type": "text",
+        "default": "[]"
+      }
+    },
+    {
+      "source": "model_assignment_config.enable_sensitive_model_replacement",
       "source_type": "bool",
-      "target": "runtime.enable_daily_token_soft_limit",
+      "target": "model.fallback_on_refusal",
       "confidence": "high",
       "transform": "identity",
       "contract": {
@@ -2642,17 +2808,143 @@
       }
     },
     {
-      "source": "legacy_compat_config.maintenance_token_soft_limit",
+      "source": "model_assignment_config.SENSITIVE_REPLACEMENT_PROVIDER_ID",
       "source_type": "string",
-      "target": "runtime.daily_token_soft_limit",
-      "confidence": "high",
-      "transform": "numeric_string_integer",
+      "target": "model.fallback_provider_id",
+      "confidence": "medium",
+      "transform": "identity",
       "contract": {
-        "type": "int",
-        "default": 800000
+        "type": "string",
+        "default": ""
       }
     }
   ],
+  "plugin_defaults": {
+    "storage.path": "",
+    "storage.backup_path": "",
+    "storage.retention_count": 10,
+    "storage.retention_days": 90,
+    "staging.enabled": false,
+    "staging.profile_id": "main",
+    "staging.delivery_mode": "onebot_private",
+    "target.platform_id": "default",
+    "target.account_id": "",
+    "target.participant_id": "",
+    "target.bot_id": "staging-bot",
+    "target.role_id": "staging-role",
+    "target.persona_id": "",
+    "multi_host.enabled": false,
+    "multi_host.installation_id": "main",
+    "multi_host.targets": [],
+    "multi_host.personas": [],
+    "multi_host.group_targets": [],
+    "multi_host.capabilities": [
+      "configuration.read",
+      "conversation.reply",
+      "memory.propose",
+      "memory.read",
+      "memory.reflect",
+      "memory.subscribe",
+      "text"
+    ],
+    "multi_host.delivery_mode": "onebot_private",
+    "multi_host.group_delivery_mode": "onebot_group",
+    "model.provider_id": "",
+    "model.task_prompt": "沿用当前 AstrBot 人格，先回应本轮真正的问题或话题。自然、具体地说清意思；只使用本轮输入和有依据的材料，不补造事实。按任务需要调整长短与格式，闲聊不复述、不写客服式收尾。",
+    "model.fallback_provider_id": "",
+    "model.fallback_on_refusal": false,
+    "model.replacement_rules": "[]",
+    "model.max_output_tokens": 2048,
+    "model.streaming": false,
+    "model.maximum_input_estimate": 131072,
+    "model.output_parameter": "max_tokens",
+    "model.input_microusd_per_million": 0,
+    "model.cached_input_microusd_per_million": 0,
+    "model.output_microusd_per_million": 0,
+    "segmentation.streaming_mode": "buffered",
+    "segmentation.enabled": true,
+    "segmentation.llm_controlled": false,
+    "segmentation.rule_mode": "words",
+    "segmentation.split_words": "[\"。\", \"？\", \"！\", \"~\", \"～\", \"?\", \".\", \"!\", \";\", \"；\", \"……\", \"）\", \"“\", \"…\"]",
+    "segmentation.match_width_variants": true,
+    "segmentation.rule_regex": "(?<=[。！？!?…~～])\\s*|\\n+",
+    "segmentation.threshold": 500,
+    "segmentation.min_segment_chars": 5,
+    "segmentation.max_segments": 5,
+    "segmentation.prompt": "",
+    "voice_reply.enabled": false,
+    "voice_reply.trigger_mode": "always",
+    "voice_reply.generation_mode": "plain",
+    "voice_reply.segment_mode": "each",
+    "voice_reply.delivery_mode": "voice_and_text",
+    "voice_reply.position": "after_media",
+    "voice_reply.language": "zh",
+    "voice_reply.foreign_text_mode": "original",
+    "voice_reply.probability": 1.0,
+    "voice_reply.private_probability": -1.0,
+    "voice_reply.group_probability": -1.0,
+    "voice_reply.cooldown_seconds": 0,
+    "voice_reply.max_speech_chars": 1800,
+    "voice_reply.timeout_seconds": 30,
+    "voice_reply.trigger_keywords": "",
+    "voice_reply.primary_mention_keywords": "",
+    "voice_reply.primary_mention_probability": 0.8,
+    "voice_reply.primary_mention_prompt": "",
+    "voice_reply.provider_id": "",
+    "voice_reply.zh_provider_id": "",
+    "voice_reply.ja_provider_id": "",
+    "voice_reply.en_provider_id": "",
+    "voice_reply.extra_prompt": "",
+    "voice_reply.conversion_scope": "full",
+    "voice_reply.private_cooldown_seconds": -1,
+    "voice_reply.group_cooldown_seconds": -1,
+    "poke.enabled": false,
+    "poke.trigger_probability": 1.0,
+    "poke.replies": [
+      "在呢，怎么啦？",
+      "收到你的戳戳啦。",
+      "我在这里。"
+    ],
+    "poke.back_probability": 0.0,
+    "poke.back_times": 1,
+    "poke.model_reply_enabled": false,
+    "poke.model_reply_probability": 0.3,
+    "runtime.enable_daily_model_hard_limit": false,
+    "runtime.budget_tokens": 1000000,
+    "runtime.budget_cost_microusd": 100000000,
+    "runtime.enable_daily_token_soft_limit": false,
+    "runtime.daily_token_soft_limit": 800000,
+    "runtime.daily_token_soft_deferred_kinds": "",
+    "runtime.quiet_seconds": 0,
+    "runtime.maximum_wait_seconds": 0,
+    "runtime.turn_timeout_seconds": 300,
+    "runtime.part_gap_seconds": 0,
+    "runtime.foreground_slots": 2,
+    "runtime.background_slots": 1,
+    "runtime.queued_per_lane": 64,
+    "runtime.retained_tasks": 10000,
+    "runtime.forward_max_nodes": 32,
+    "runtime.forward_max_depth": 4,
+    "runtime.forward_max_forwards": 4,
+    "runtime.forward_parse_nested": true,
+    "weather.provider": "auto",
+    "weather.api_host": "",
+    "weather.credential": "",
+    "weather.refresh_minutes": 5,
+    "service_balance.url": "",
+    "service_balance.api_key": "",
+    "service_balance.user_id": "",
+    "service_balance.value_divisor": "500000",
+    "news.source_kind": "rss",
+    "news.bilibili_uid": "",
+    "news.feed_url": "https://daily.juya.uk/rss.xml",
+    "news.hot_sources": "weibo,hackernews",
+    "news.search_url": "",
+    "news.hot_result_count": 10,
+    "solar_terms.minimum_year": 1901,
+    "solar_terms.maximum_year": 2099,
+    "legacy.v1_root": ""
+  },
   "exclusions": [
     {
       "source": "basic_config.owner_exclusive_proactive_limit",
@@ -2712,6 +3004,43 @@
       "contract": {
         "type": "bool",
         "default": true
+      }
+    },
+    {
+      "source": "group_slang_topic_config.enable_group_slang_web_search",
+      "source_type": "bool",
+      "target": "semantic.slang_web_search_enabled",
+      "confidence": "high",
+      "transform": "identity",
+      "contract": {
+        "type": "bool",
+        "default": false
+      }
+    },
+    {
+      "source": "group_slang_topic_config.group_slang_web_search_terms",
+      "source_type": "int",
+      "target": "semantic.slang_web_search_candidates",
+      "confidence": "high",
+      "transform": "identity",
+      "contract": {
+        "type": "int",
+        "default": 4,
+        "minimum": 1,
+        "maximum": 12
+      }
+    },
+    {
+      "source": "group_slang_topic_config.group_slang_web_search_results",
+      "source_type": "int",
+      "target": "semantic.slang_web_search_results",
+      "confidence": "high",
+      "transform": "identity",
+      "contract": {
+        "type": "int",
+        "default": 2,
+        "minimum": 1,
+        "maximum": 5
       }
     },
     {
@@ -3139,11 +3468,11 @@
     {
       "source": "basic_config.enable_environment_perception",
       "source_type": "bool",
-      "resolved_kind": "unresolved",
-      "target": "",
+      "resolved_kind": "registry",
+      "target": "conversation.perception",
       "verdict": "renamed-equivalent",
       "confidence": "high",
-      "summary": "conversation.perception 的 calendar_enabled / platform_enabled / model_route_enabled / configured_modalities_enabled（总开关拆分为分项开关）"
+      "summary": "一对多迁移到 conversation.perception 的四个分项；旧总开关关闭时关闭四项，开启时保留各自分项配置。"
     },
     {
       "source": "basic_config.environment_perception_timezone",
@@ -3158,19 +3487,19 @@
       "source": "basic_config.enable_holiday_perception",
       "source_type": "bool",
       "resolved_kind": "registry",
-      "target": "conversation.perception.calendar_enabled",
+      "target": "conversation.perception.holiday_enabled",
       "verdict": "renamed-equivalent",
       "confidence": "medium",
-      "summary": "并入 conversation.perception.calendar_enabled 的日历投影（固定公历节日 + 运维年度日历的节假日/调休）"
+      "summary": "conversation.perception.holiday_enabled（只控制节假日/调休投影；日历总开关仍由 calendar_enabled 独立控制）"
     },
     {
       "source": "basic_config.holiday_country",
       "source_type": "string",
-      "resolved_kind": "external",
-      "target": "",
-      "verdict": "not-migrated-by-design",
+      "resolved_kind": "registry",
+      "target": "conversation.perception.holiday_country",
+      "verdict": "renamed-equivalent",
       "confidence": "medium",
-      "summary": "无国家/地区选择项；节假日改为运维显式提供的年度日历数据"
+      "summary": "conversation.perception.holiday_country（支持 CN 与 WEEKEND_ONLY）"
     },
     {
       "source": "basic_config.enable_platform_perception",
@@ -4256,7 +4585,7 @@
       "source": "proactive_reach_config.max_daily_messages",
       "source_type": "int",
       "resolved_kind": "registry",
-      "target": "proactive.contact.max_attempts_24h",
+      "target": "proactive.contact.max_contacts_24h",
       "verdict": "renamed-equivalent",
       "confidence": "high",
       "summary": "proactive.contact.max_contacts_24h（投递额度）+ proactive.contact.max_attempts_24h，关系级另有 max_relationship_contacts_24h / max_relationship_attempts_24h"
@@ -4264,11 +4593,11 @@
     {
       "source": "proactive_reach_config.inbound_message_debounce_seconds",
       "source_type": "float",
-      "resolved_kind": "plugin-config",
-      "target": "runtime.quiet_seconds",
-      "verdict": "renamed-equivalent",
+      "resolved_kind": "runtime",
+      "target": "",
+      "verdict": "implemented-elsewhere",
       "confidence": "high",
-      "summary": "runtime.quiet_seconds（宿主运行时段字段 → ConversationPolicy.quiet_seconds，连续输入合并窗口）"
+      "summary": "平台消息 ID 的幂等接收由消息输入层承担；旧无 ID 指纹去重秒数没有等价配置，不能映射为补话等待。"
     },
     {
       "source": "proactive_reach_config.enable_reply_interception_forward",
@@ -4597,11 +4926,11 @@
     {
       "source": "message_debounce_config.enable_message_debounce",
       "source_type": "bool",
-      "resolved_kind": "plugin-config",
-      "target": "runtime.maximum_wait_seconds",
+      "resolved_kind": "registry",
+      "target": "conversation.presentation.private_debounce_enabled",
       "verdict": "already-in-v2",
       "confidence": "high",
-      "summary": "runtime.quiet_seconds + runtime.maximum_wait_seconds -> ConversationPolicy.quiet_seconds / maximum_wait_seconds"
+      "summary": "主回复链文本补话总开关；按旧主键优先、兼容别名回退，并结合文本等待为 0 的实际行为迁移。"
     },
     {
       "source": "message_debounce_config.enable_smart_message_debounce",
@@ -4615,11 +4944,11 @@
     {
       "source": "message_debounce_config.SMART_MESSAGE_DEBOUNCE_PROVIDER_ID",
       "source_type": "string",
-      "resolved_kind": "plugin-config",
-      "target": "model.provider_id",
-      "verdict": "renamed-equivalent",
+      "resolved_kind": "unresolved",
+      "target": "",
+      "verdict": "owed",
       "confidence": "medium",
-      "summary": "model.provider_id（遗留键名迁移表 constants.py:154 已把 SMART_MESSAGE_DEBOUNCE_PROVIDER_ID 映射为 FAST_RESPONSE_PROVIDER_ID，归入模型配置域）"
+      "summary": "旧智能收口专用模型没有等价的新版任务档；保留来源配置并列入差异，不能覆盖插件主模型。"
     },
     {
       "source": "message_debounce_config.smart_message_debounce_model_timeout_seconds",
@@ -4660,11 +4989,11 @@
     {
       "source": "message_debounce_config.text_message_debounce_seconds",
       "source_type": "float",
-      "resolved_kind": "plugin-config",
-      "target": "runtime.quiet_seconds",
-      "verdict": "already-in-v2",
+      "resolved_kind": "registry",
+      "target": "conversation.presentation.private_debounce_min_ms",
+      "verdict": "renamed-equivalent",
       "confidence": "high",
-      "summary": "runtime.quiet_seconds（统一连续输入静默窗口，文本走同一路径）"
+      "summary": "将旧固定静默秒数无损换算为主回复链 private_debounce_min_ms/max_ms；0 表示关闭文本等待。"
     },
     {
       "source": "message_debounce_config.image_message_debounce_seconds",
@@ -4687,11 +5016,11 @@
     {
       "source": "message_debounce_config.text_message_debounce_max_wait_seconds",
       "source_type": "float",
-      "resolved_kind": "plugin-config",
-      "target": "runtime.maximum_wait_seconds",
-      "verdict": "already-in-v2",
+      "resolved_kind": "registry",
+      "target": "conversation.presentation.private_debounce_total_ms",
+      "verdict": "renamed-equivalent",
       "confidence": "high",
-      "summary": "runtime.maximum_wait_seconds -> ConversationPolicy.maximum_wait_seconds（merge_until）"
+      "summary": "旧文本总等待秒数换算为主回复链总等待毫秒；无限等待保留明确差异。"
     },
     {
       "source": "message_debounce_config.message_debounce_max_merge_messages",
@@ -4705,20 +5034,20 @@
     {
       "source": "message_debounce_config.enable_semantic_message_debounce",
       "source_type": "bool",
-      "resolved_kind": "unresolved",
-      "target": "",
-      "verdict": "not-applicable",
+      "resolved_kind": "registry",
+      "target": "conversation.presentation.private_debounce_enabled",
+      "verdict": "renamed-equivalent",
       "confidence": "high",
-      "summary": "该设置不适用于当前迁移目标。"
+      "summary": "仅在 enable_message_debounce 缺省时回退；由主链文本补话专用转换器处理。"
     },
     {
       "source": "message_debounce_config.semantic_message_debounce_seconds",
       "source_type": "float",
-      "resolved_kind": "unresolved",
-      "target": "",
-      "verdict": "not-applicable",
+      "resolved_kind": "registry",
+      "target": "conversation.presentation.private_debounce_min_ms",
+      "verdict": "renamed-equivalent",
       "confidence": "high",
-      "summary": "该设置不适用于当前迁移目标。"
+      "summary": "仅在 text_message_debounce_seconds 缺省或空值时回退；不能与主键当作独立设置合并。"
     },
     {
       "source": "message_debounce_config.private_image_vision_wait_seconds",
@@ -5588,7 +5917,7 @@
       "source": "memory_habit_config.expression_learning_mode",
       "source_type": "string",
       "resolved_kind": "registry",
-      "target": "expression.learning.sample_chars",
+      "target": "expression.learning.learning_mode",
       "verdict": "renamed-equivalent",
       "confidence": "medium",
       "summary": "三档预设取消，改为逐项显式上下限：expression.learning.sample_chars(40-4000，默认 800)、sample_limit(4-64，默认 24)、rules_per_turn(1-16，默认 8)、rotation_candidate_limit(1-64)、rotation_decay_hours(1-8760)（companion_v2/expression/configuration.py:24-48；读取 companion_v2/expression/style_service.py:113-116,131-132、companion_v2/conversation/style_context.py:42-52,164-168）。V1 预设的三个自由度（样本长度、样本量、每轮引用量）在 V2 都有独立字段，V1 硬编码的每轮最多 2 条改由 rules_per_turn 配置"
@@ -5660,7 +5989,7 @@
       "source": "memory_habit_config.expression_group_learning_daily_batch_limit",
       "source_type": "int",
       "resolved_kind": "registry",
-      "target": "expression.learning.scan_interval_minutes",
+      "target": "expression.learning.group_daily_batch_limit",
       "verdict": "renamed-equivalent",
       "confidence": "medium",
       "summary": "expression.learning.scan_interval_minutes（默认 1440、5-10080：companion_v2/expression/configuration.py:45；节流点 companion_v2/expression/style_service.py:234-239 的 due() 按游标加间隔判断、:219-232 每作用域游标、:268-283 的 _scan 才发起模型归纳）。口径由所有群共享的每日批次配额改为每会话扫描节奏；V2 无全局共享配额（companion_v2/model_gateway/budget.py:30-34 的每日软上限可推迟任务种类不含 role.expression.learn）"
@@ -5669,7 +5998,7 @@
       "source": "memory_habit_config.expression_group_learning_min_new_messages",
       "source_type": "int",
       "resolved_kind": "registry",
-      "target": "expression.learning.min_samples",
+      "target": "expression.learning.group_new_messages",
       "verdict": "renamed-equivalent",
       "confidence": "medium",
       "summary": "expression.learning.min_samples（默认 4、1-16：companion_v2/expression/configuration.py:39；门槛点 companion_v2/expression/style_service.py:116-117 样本不足直接不学、:131-132 复核同一门槛）配合 window_hours（默认 168）界定的新素材窗口。口径由上次归纳后新增群消息条数改为窗口内角色自己已确认送达的回复条数（companion_v2/expression/style_evidence.py:137-158）"
@@ -7272,9 +7601,9 @@
       "source_type": "int",
       "resolved_kind": "plugin-config",
       "target": "runtime.forward_max_nodes",
-      "verdict": "owed",
+      "verdict": "renamed-equivalent",
       "confidence": "high",
-      "summary": "配置项部分落地但上限被收紧：V2 确有条数上限配置 runtime.forward_max_nodes（_conf_schema.json，默认 32，schema 明写「结构上限为 32，只能收紧不能放宽」），由 astrbot_host/settings.py:190 消费为 ForwardIntakePolicy；但 maximum=MAX_NODES（astrbot_host 常量 32）把可调范围钉死，而 V1 默认 80、且用户可调高（V1 _conf_schema.json 该键 default=80）。因此本条仍为 owed，性质是「刻意收紧导致的能力缺失」而非「配置项缺失」：V1 可放宽到更高条数的能力在 V2 不存在。是否放宽属产品决策。"
+      "summary": "runtime.forward_max_nodes：默认保留 V2 原值 32，支持 1–300；旧版可配置节点数完整映射，结构校验、宿主配置与管理页统一采用 300 上限。总文本仍受 MAX_TEXT=65536 及共享媒体预算约束。"
     },
     {
       "source": "forward_message_config.forward_message_max_chars",
@@ -7288,11 +7617,11 @@
     {
       "source": "forward_message_config.forward_message_parse_nested",
       "source_type": "bool",
-      "resolved_kind": "external",
-      "target": "",
-      "verdict": "owed",
+      "resolved_kind": "plugin-config",
+      "target": "runtime.forward_parse_nested",
+      "verdict": "renamed-equivalent",
       "confidence": "high",
-      "summary": "配置项缺失：V2 恒尝试展开嵌套、由路径长度强制封顶 MAX_DEPTH = 4（companion_v2/conversation/forwards/models.py:17，models.py:36 `1 <= len(path) <= 2*MAX_DEPTH - 1`），Adapter 侧同限（adapters/astrbot/forwards.py:64-65 `len(prefix) >= 2*MAX_DEPTH`）。开关本体（可关闭嵌套展开）无字段可关，全仓无 parse_nested/nested 开关项。"
+      "summary": "runtime.forward_parse_nested：默认开启以保持旧版行为；关闭后保留明确的未展开占位，不遍历嵌套转发节点。配置贯通宿主解析、隔离运行档与管理页。"
     },
     {
       "source": "forward_message_config.forward_message_image_vision",
@@ -7657,29 +7986,29 @@
     {
       "source": "group_slang_topic_config.enable_group_slang_web_search",
       "source_type": "bool",
-      "resolved_kind": "external",
-      "target": "",
-      "verdict": "owed",
+      "resolved_kind": "semantic-config",
+      "target": "semantic.slang_web_search_enabled",
+      "verdict": "renamed-equivalent",
       "confidence": "high",
-      "summary": "缺失：V2 无黑话释义联网参考开关，也无等价的搜索证据注入通道"
+      "summary": "semantic.slang_web_search_enabled（黑话外部参考开关）"
     },
     {
       "source": "group_slang_topic_config.group_slang_web_search_terms",
       "source_type": "int",
-      "resolved_kind": "external",
-      "target": "",
-      "verdict": "owed",
+      "resolved_kind": "semantic-config",
+      "target": "semantic.slang_web_search_candidates",
+      "verdict": "renamed-equivalent",
       "confidence": "high",
-      "summary": "缺失：V2 无语义搜索候选扫描数设置"
+      "summary": "semantic.slang_web_search_candidates（候选扫描数，1-12）"
     },
     {
       "source": "group_slang_topic_config.group_slang_web_search_results",
       "source_type": "int",
-      "resolved_kind": "external",
-      "target": "",
-      "verdict": "owed",
+      "resolved_kind": "semantic-config",
+      "target": "semantic.slang_web_search_results",
+      "verdict": "renamed-equivalent",
       "confidence": "high",
-      "summary": "缺失：V2 无每词搜索摘要条数设置"
+      "summary": "semantic.slang_web_search_results（每个词保留的结果数，1-5）"
     },
     {
       "source": "group_relationship_config.enable_group_relationship_graph",
@@ -9341,28 +9670,28 @@
       "source": "photo_action_config.external_image_api_custom_headers",
       "source_type": "string",
       "resolved_kind": "external",
-      "target": "",
-      "verdict": "not-migrated-by-design",
+      "target": "image.output.endpoints[].custom_headers",
+      "verdict": "implemented-elsewhere",
       "confidence": "high",
-      "summary": "V2 原生在线生图只支持 Bearer API Key，没有 V1 custom_headers 的等价配置；显式迁移时若此项非空应停止并提示。当前已迁移的 V1 端点未配置自定义请求头。"
+      "summary": "旧版主在线端点的自定义请求头迁入 V2 端点配置，保存后由在线生图执行器发送；公开配置只显示请求头名称，不回传值。"
     },
     {
       "source": "photo_action_config.external_image_download_proxy",
       "source_type": "string",
       "resolved_kind": "external",
-      "target": "",
-      "verdict": "not-migrated-by-design",
+      "target": "image.output.network.download_proxy",
+      "verdict": "implemented-elsewhere",
       "confidence": "high",
-      "summary": "V2 原生在线生图使用 trust_env=False 且没有代理配置项，不迁移 V1 下载代理。当前 V1 代理未配置。"
+      "summary": "旧版图片下载代理迁入 V2 在线生图网络配置，仅在下载图片结果时使用；公开配置只显示是否已设置。"
     },
     {
       "source": "photo_action_config.external_image_download_use_environment_proxy",
       "source_type": "bool",
       "resolved_kind": "external",
-      "target": "",
-      "verdict": "not-migrated-by-design",
+      "target": "image.output.network.use_environment_proxy",
+      "verdict": "implemented-elsewhere",
       "confidence": "high",
-      "summary": "V2 原生在线生图使用 trust_env=False 且没有代理配置项，不迁移 V1 下载代理。当前 V1 代理未配置。"
+      "summary": "旧版环境代理开关迁入 V2 在线生图网络配置，下载结果图片时可使用进程环境代理。"
     },
     {
       "source": "photo_action_config.enable_backup_external_image_api",
@@ -9431,10 +9760,10 @@
       "source": "photo_action_config.backup_external_image_api_custom_headers",
       "source_type": "string",
       "resolved_kind": "external",
-      "target": "",
-      "verdict": "not-migrated-by-design",
+      "target": "image.output.endpoints[].custom_headers",
+      "verdict": "implemented-elsewhere",
       "confidence": "high",
-      "summary": "V2 原生在线生图只支持 Bearer API Key，没有 V1 custom_headers 的等价配置；显式迁移时若此项非空应停止并提示。当前已迁移的 V1 端点未配置自定义请求头。"
+      "summary": "旧版备用在线端点的自定义请求头迁入 V2 端点配置，保存后由在线生图执行器发送；公开配置只显示请求头名称，不回传值。"
     },
     {
       "source": "photo_action_config.external_image_api_endpoints",
@@ -9754,11 +10083,11 @@
     {
       "source": "reactive_poke_config.reactive_poke_normal_reply_probability",
       "source_type": "float",
-      "resolved_kind": "external",
-      "target": "",
-      "verdict": "owed",
+      "resolved_kind": "plugin-config",
+      "target": "poke.model_reply_probability",
+      "verdict": "renamed-equivalent",
       "confidence": "medium",
-      "summary": "无对应字段：V2 被戳链只有预设短句一条路径，没有「不调用 LLM 的概率」档。companion_v2/conversation/pokes.py:12-17 仅 enabled/trigger_probability/replies/back_probability 四项（:23 还对未知字段直接报错），astrbot_host/pokes.py:101-109 命中后无条件发送预设短句"
+      "summary": "poke.model_reply_probability（V1 预设回复概率转换为 1-旧值；同时推导 model_reply_enabled）"
     },
     {
       "source": "reactive_poke_config.reactive_poke_back_probability",
@@ -9781,11 +10110,11 @@
     {
       "source": "reactive_poke_config.reactive_poke_back_times",
       "source_type": "int",
-      "resolved_kind": "external",
-      "target": "",
-      "verdict": "owed",
+      "resolved_kind": "plugin-config",
+      "target": "poke.back_times",
+      "verdict": "renamed-equivalent",
       "confidence": "medium",
-      "summary": "无对应字段：V2 被动反戳固定一次（astrbot_host/pokes.py:126 单次 call_action）；多戳机制只存在于主动链的 PokePlan.count（companion_v2/delivery/plan.py:34 MAX_POKE_COUNT=3、:160-163），而唯一生产者固定 count=1（companion_v2/proactive/service.py:176），poke 配置组（_conf_schema.json:300-311）无任何次数项"
+      "summary": "poke.back_times（V2 支持 1-5；超出范围保留差异，不静默截断）"
     },
     {
       "source": "reactive_poke_config.reactive_poke_super_poke_times",
@@ -9927,9 +10256,9 @@
       "source_type": "string",
       "resolved_kind": "plugin-config",
       "target": "voice_reply.generation_mode",
-      "verdict": "already-in-v2",
+      "verdict": "renamed-equivalent",
       "confidence": "medium",
-      "summary": "voice_reply.generation_mode（_conf_schema.json:280，options plain/model_tag，默认 plain）"
+      "summary": "fast_tag 及其旧别名映射为 model_tag；postprocess 改由主回复模型编写语音标签，明确报告取消独立转换模型的行为差异。"
     },
     {
       "source": "voice_action_config.tts_voice_language",
@@ -9980,10 +10309,10 @@
       "source": "voice_action_config.tts_conversion_scope",
       "source_type": "string",
       "resolved_kind": "plugin-config",
-      "target": "voice_reply.delivery_mode",
+      "target": "voice_reply.conversion_scope",
       "verdict": "renamed-equivalent",
       "confidence": "high",
-      "summary": "voice_reply.segment_mode + voice_reply.delivery_mode"
+      "summary": "转换范围 full/partial 独立于发送形态，显式主键优先于 auto_voice_full_conversion_enabled 兼容别名。"
     },
     {
       "source": "voice_action_config.tts_conversion_provider_id",
@@ -10043,19 +10372,19 @@
       "source": "voice_action_config.tts_private_min_interval_seconds",
       "source_type": "float",
       "resolved_kind": "plugin-config",
-      "target": "voice_reply.cooldown_seconds",
+      "target": "voice_reply.private_cooldown_seconds",
       "verdict": "renamed-equivalent",
       "confidence": "high",
-      "summary": "voice_reply.cooldown_seconds（按 route_key 逐会话生效，不再单独配置私聊覆盖值）"
+      "summary": "私聊覆盖值 -1 继承基础会话冷却，0 不等待；主回复与后台投递均按实际作用域读取。"
     },
     {
       "source": "voice_action_config.tts_group_min_interval_seconds",
       "source_type": "float",
       "resolved_kind": "plugin-config",
-      "target": "voice_reply.cooldown_seconds",
+      "target": "voice_reply.group_cooldown_seconds",
       "verdict": "renamed-equivalent",
       "confidence": "high",
-      "summary": "voice_reply.cooldown_seconds（按 route_key 逐会话生效，不再单独配置群聊覆盖值）"
+      "summary": "群聊覆盖值 -1 继承基础会话冷却，0 不等待；主回复与后台投递均按实际作用域读取。"
     },
     {
       "source": "voice_action_config.tts_trigger_probability",
@@ -10151,10 +10480,10 @@
       "source": "auto_voice_config.auto_voice_full_conversion_enabled",
       "source_type": "bool",
       "resolved_kind": "plugin-config",
-      "target": "voice_reply.delivery_mode",
+      "target": "voice_reply.conversion_scope",
       "verdict": "renamed-equivalent",
       "confidence": "medium",
-      "summary": "voice_reply.delivery_mode + voice_reply.segment_mode"
+      "summary": "仅在 tts_conversion_scope 缺省时作为 full/partial 回退；不改变 voice_and_text/voice_only。"
     },
     {
       "source": "auto_voice_config.auto_voice_probability",
@@ -10179,9 +10508,9 @@
       "source_type": "int",
       "resolved_kind": "plugin-config",
       "target": "voice_reply.cooldown_seconds",
-      "verdict": "already-in-v2",
+      "verdict": "renamed-equivalent",
       "confidence": "high",
-      "summary": "voice_reply.cooldown_seconds"
+      "summary": "仅旧 legacy 频控分支采用；global 分支忽略此旧自动语音冷却，避免覆盖会话冷却。legacy 统一冷却的路径差异另行报告。"
     },
     {
       "source": "auto_voice_config.main_user_voice_probability",
@@ -10195,29 +10524,29 @@
     {
       "source": "auto_voice_config.main_user_mention_voice_keywords",
       "source_type": "text",
-      "resolved_kind": "unresolved",
-      "target": "",
-      "verdict": "owed",
+      "resolved_kind": "plugin-config",
+      "target": "voice_reply.primary_mention_keywords",
+      "verdict": "renamed-equivalent",
       "confidence": "high",
-      "summary": "该配置仍在迁移欠账中，目前没有经过核实的自动转换规则。"
+      "summary": "voice_reply.primary_mention_keywords（核心用户提及语音词）"
     },
     {
       "source": "auto_voice_config.main_user_mention_voice_probability",
       "source_type": "int",
-      "resolved_kind": "unresolved",
-      "target": "",
-      "verdict": "owed",
+      "resolved_kind": "plugin-config",
+      "target": "voice_reply.primary_mention_probability",
+      "verdict": "renamed-equivalent",
       "confidence": "high",
-      "summary": "该配置仍在迁移欠账中，目前没有经过核实的自动转换规则。"
+      "summary": "voice_reply.primary_mention_probability（核心用户 @ 命中配置关键词后的语音概率）"
     },
     {
       "source": "auto_voice_config.main_user_mention_voice_prompt",
       "source_type": "text",
-      "resolved_kind": "unresolved",
-      "target": "",
-      "verdict": "owed",
+      "resolved_kind": "plugin-config",
+      "target": "voice_reply.primary_mention_prompt",
+      "verdict": "renamed-equivalent",
       "confidence": "high",
-      "summary": "该配置仍在迁移欠账中，目前没有经过核实的自动转换规则。"
+      "summary": "voice_reply.primary_mention_prompt（核心用户提及语音提示）"
     },
     {
       "source": "auto_voice_config.voice_action_max_chars",
@@ -11734,11 +12063,11 @@
     {
       "source": "legacy_compat_config.segmented_proactive_interval_max",
       "source_type": "float",
-      "resolved_kind": "plugin-config",
-      "target": "runtime.part_gap_seconds",
+      "resolved_kind": "registry",
+      "target": "conversation.presentation.part_gap_max_ms",
       "verdict": "renamed-equivalent",
       "confidence": "medium",
-      "summary": "runtime.part_gap_seconds（同上一项：_conf_schema.json:360-364、astrbot_host/settings.py:176、companion_v2/conversation/flow.py:313；V2 单一间隔值同时承担原下界与上界的位置）"
+      "summary": "旧分段间隔上界秒数换算为毫秒；正式迁移按窗口类型与分段算法专门转换，不能写入整数固定间隔。"
     },
     {
       "source": "legacy_compat_config.segmented_proactive_log_base",
@@ -11761,20 +12090,20 @@
     {
       "source": "legacy_compat_config.enable_maintenance_token_saver",
       "source_type": "bool",
-      "resolved_kind": "plugin-config",
-      "target": "runtime.enable_daily_token_soft_limit",
+      "resolved_kind": "registry",
+      "target": "model.budget.enable_daily_token_soft_limit",
       "verdict": "renamed-equivalent",
       "confidence": "high",
-      "summary": "runtime.enable_daily_token_soft_limit（_conf_schema.json:327-332 bool 默认 true，hint 明写「沿用 V1 默认开启」）→ model_gateway/budget.py:43-45 注册为 model.budget 组字段、:56-69 effective_soft() 读取、:129-134,176-177 在预算结算处按软限额延后可选后台任务"
+      "summary": "旧软限额开关只在 basic_config.enable_daily_token_soft_limit 缺省时回退；不覆盖有效主配置。"
     },
     {
       "source": "legacy_compat_config.maintenance_token_soft_limit",
       "source_type": "string",
-      "resolved_kind": "plugin-config",
-      "target": "runtime.daily_token_soft_limit",
+      "resolved_kind": "registry",
+      "target": "model.budget.daily_token_soft_limit",
       "verdict": "renamed-equivalent",
       "confidence": "high",
-      "summary": "runtime.daily_token_soft_limit（_conf_schema.json:333-338 int 默认 800000，hint「沿用 V1 默认 800000；0 表示不设软限额」）→ model_gateway/budget.py:46-48 字段定义（model.budget 组，上下限 0-10^12）、:56-69 effective_soft() 读取、:164-177 与硬额度互相独立地判定延后"
+      "summary": "旧软限额阈值只在 basic_config.daily_token_soft_limit 缺省时回退；空字符串不迁移、不覆盖有效主配置。"
     },
     {
       "source": "legacy_compat_config.DIARY_PROVIDER_ID",

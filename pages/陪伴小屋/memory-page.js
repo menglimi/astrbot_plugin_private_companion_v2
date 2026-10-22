@@ -19,7 +19,7 @@
  */
 "use strict";
 window.CompanionMemoryPage = (() => {
-  const HOST = "astrbot_plugin_private_companion_v2";
+  const HOST = "astrbot_plugin_private_companion";
   const PREFIX = "/" + HOST + "/";
   const STORE = "companion-memory-page-v1:";
   const askConfirm = options => typeof window.CompanionConfirm === "function"
@@ -140,7 +140,7 @@ window.CompanionMemoryPage = (() => {
   function current() { return data?.catalog?.targets[data.target]; }
   function role() { return current()?.roles[data.role]; }
   /* 桥要的是**插件相对路径**：目录给的是绝对地址
-     `/astrbot_plugin_private_companion_v2/host/targets/...`，交给桥之前
+     `/astrbot_plugin_private_companion/host/targets/...`，交给桥之前
      要切掉插件目录名，让它变成 `host/targets/...`。
      真实 SDK（AstrBot 的 plugin_page_bridge.js）自己会把插件目录名拼回去。
      这一条是查出来的，不是猜的：`tools/check_product_page.cjs` 的合成 SDK
@@ -285,7 +285,7 @@ window.CompanionMemoryPage = (() => {
     if (active) {
       const breadcrumb = document.querySelector("#breadcrumb strong");
       if (breadcrumb) breadcrumb.textContent = "事实与经历";
-      document.title = "事实与经历 · 陪伴 V2";
+      document.title = "陪伴小屋";
     }
   }
 
@@ -849,7 +849,7 @@ window.CompanionMemoryPage = (() => {
     root.innerHTML = `<div class="mem-app">
       ${railMarkup()}
       <div class="mem-main">
-        <div class="mem-progress"${data.loading?"":" hidden"} role="progressbar" aria-label="正在读取"><i></i></div>
+        <div class="mem-progress"${data.loading?"":" hidden"} role="progressbar" aria-label="正在读取…"><i></i></div>
         ${headMarkup()}
         ${ownership?`<p class="mem-ownership" role="status">${e(ownership)}</p>`:""}
         ${data.notice?`<div id="memory-notice" class="mem-notice${data.error?" is-error":""}" role="status" aria-live="polite">${data.error?ICON.alert:ICON.info}<span>${e(data.notice)}</span></div>`:""}

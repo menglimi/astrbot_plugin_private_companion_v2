@@ -158,6 +158,7 @@ class ExternalToolResponse:
     receipt_ref: str | None = None
     images: tuple[CapturedImage, ...] = field(default=(), repr=False)
     dependencies: tuple[SourceRef, ...] = field(default=(), repr=False)
+    error_code: str | None = None
 
     def __post_init__(self):
         for name in ("invocation_id", "origin_key", "arguments_hash"):
@@ -166,6 +167,9 @@ class ExternalToolResponse:
             raise ValueError("external response requires its original binding and explicit outcome")
         TaskResult("uncertain" if self.state == "unknown" else self.state, self.effect,
                    receipt_ref=self.receipt_ref, operation_id=self.operation_id)
+        if (self.error_code is not None and (type(self.error_code) is not str
+                or re.fullmatch(r"[a-z][a-z0-9_]{0,95}", self.error_code) is None)):
+            raise ValueError("external error code must be a bounded stable identifier")
         if self.state == "succeeded":
             if not isinstance(self.source, SourceRecord):
                 raise ValueError("successful extension result requires a governed original")
@@ -188,10 +192,12 @@ class ExternalToolProvider:
     descriptor: ExtensionToolDescriptor
     invoke: Callable[[ExternalToolInvocation], Awaitable[ExternalToolResponse]]
     current_binding: Callable[[], ProviderBinding | None]
+    admit: Callable[[TaskContext, datetime], object] | None = None
 
     def __post_init__(self):
         if (not isinstance(self.descriptor, ExtensionToolDescriptor) or not inspect.iscoroutinefunction(self.invoke)
-                or not callable(self.current_binding) or inspect.iscoroutinefunction(self.current_binding)):
+                or not callable(self.current_binding) or inspect.iscoroutinefunction(self.current_binding)
+                or self.admit is not None and (not callable(self.admit) or inspect.iscoroutinefunction(self.admit))):
             raise ValueError("provider requires a cooperative async call and bounded synchronous binding attestation")
 
 
@@ -254,8 +260,11 @@ class ExternalToolExecutor:
     def _admit(self, descriptor, context, at):
         if context.scope.kind is ScopeKind.GROUP and descriptor.tool.action not in GROUP_IMAGE_ACTIONS:
             raise TaskError("tool_not_available", "this external action is not exposed to a group conversation")
+        provider = self._provider(descriptor)
+        if provider.admit is not None:
+            require(self.tasks.authorize_context(context, action="conversation.reply", observed_at=at))
+            return require(provider.admit(context, at))
         require(self.tasks.authorize_context(context, action="extension.tool.invoke", observed_at=at))
-        self._provider(descriptor)
         package = descriptor.package
         installed = require(self.capabilities.installation(extension_id=package.extension_id))
         if (installed.package_id, installed.package_version, installed.artifact_hash) != (
@@ -601,7 +610,8 @@ class ExternalToolExecutor:
                 encode(source.reference) if source else None, digest(source) if source else None,
                 (SCREEN_REJECTED_ADOPTION if invocation.descriptor.tool.action == SCREEN_ACTION
                  else REJECTED_ADOPTION) + adoption_error if adoption_error is not None else
-                None if response.state == "succeeded" else "external_not_started" if response.state == "failed" else "external_result_unknown",
+                None if response.state == "succeeded" else response.error_code or
+                ("external_not_started" if response.state == "failed" else "external_result_unknown"),
                 stamp(self.tasks.now()), invocation.invocation_id))
 
     def material_bytes(self, batch_id):

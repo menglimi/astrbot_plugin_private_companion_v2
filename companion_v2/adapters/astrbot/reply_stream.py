@@ -10,10 +10,7 @@ from .model_wire import decode_text_response, strict_json
 
 _STRING_UNIT = re.compile(r'[^"\\\x00-\x1f]+|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4})')
 STREAM_REPLY_INSTRUCTION = (
-    "本轮采用边生成边发送：JSON 字段顺序必须是 action、claims、可选 images、最后 text。"
-    "先确定完整动作和事实引用，再生成正文；claims 的 statement 仍须逐字出现在 text 中。"
-    "text 必须是最后一个字段。正文一旦输出不能修改或重写；需调用工具时只输出工具调用，不同时写正文。"
-    "正常使用本轮分段词、自然停顿或已启用的分段标记；不要在正文里解释发送机制。"
+    "本轮采用边生成边发送：JSON 字段顺序必须是 action、claims、可选 images、最后 text。先确定完整动作和事实引用，再生成正文；claims 的 statement 仍须逐字出现在 text 中，text 必须是最后一个字段。正文一旦输出不能修改或重写；需调用工具时只输出工具调用，不同时写正文。正常使用本轮分段词、自然停顿或已启用的分段标记；不在正文里解释发送机制。"
 )
 
 

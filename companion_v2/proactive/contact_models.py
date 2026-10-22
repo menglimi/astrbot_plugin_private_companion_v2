@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from companion_v2.execution.models import TaskContext
+from companion_v2.conversation.voice_reply import VoiceReplyPolicy
 
 from .configuration import PURPOSES
 from .models import Thought, ThoughtKind
@@ -49,3 +50,4 @@ class ContactJob:
     expression_style: dict | None = None
     dialogue_history: dict | None = None
     diagnostic_image_intent: str | None = None
+    voice_policy: VoiceReplyPolicy | None = None

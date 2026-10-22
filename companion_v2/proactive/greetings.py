@@ -77,7 +77,50 @@ class GreetingContactEvents:
         conditions = (state.get("values") or {}).get("conditions") or []
         texts = [item.get("text", "") for item in conditions
                  if isinstance(item, dict) and item.get("kind") == "sleep" and item.get("text")]
-        return texts[0][:200] if texts else ""
+        if texts:
+            return texts[0][:200]
+        body_clock = getattr(self.role_state, "body_clock", None)
+        if body_clock is not None:
+            try:
+                body_sleep = (state.get("body_sleep") or {})
+                if isinstance(body_sleep, dict) and body_sleep.get("state") == "awake":
+                    last = body_sleep.get("last_completed")
+                    if isinstance(last, dict) and isinstance(last.get("completed_at"), str):
+                        woke_at = datetime.fromisoformat(last["completed_at"])
+                        elapsed_min = int((at - woke_at).total_seconds() // 60)
+                        if 0 <= elapsed_min <= 90:
+                            slept_min = max(1, int((last.get("slept_seconds") or 0) // 60))
+                            return f"角色刚醒来约{elapsed_min}分钟（共睡约{slept_min}分钟）"
+            except Exception:
+                pass
+        return ""
+
+    def _state_hint(self, context, at):
+        """A short, non-binding summary of the role's own current energy/mood/sleep."""
+        if self.role_state is None:
+            return ""
+        try:
+            state = self.role_state.read(context, at=at)
+        except (TaskError, ValueError, TypeError, KeyError):
+            return ""
+        values = state.get("values") or {}
+        if not isinstance(values, dict):
+            return ""
+        parts = []
+        if isinstance(values.get("energy"), int):
+            parts.append(f"精力={values['energy']}")
+        for key in ("sleep", "busy"):
+            if isinstance(values.get(key), str) and values[key].strip():
+                parts.append(values[key].strip()[:60])
+        mood_val = values.get("mood")
+        if isinstance(mood_val, str) and mood_val.strip():
+            parts.append("心情=" + mood_val.strip()[:60])
+        elif isinstance(mood_val, dict) and isinstance(mood_val.get("description"), str) and mood_val["description"].strip():
+            parts.append("心情=" + mood_val["description"].strip()[:60])
+        sleep_hint = self._sleep_hint(context, at)
+        if sleep_hint and sleep_hint not in parts:
+            parts.append(sleep_hint[:80])
+        return "；".join(parts)[:180]
 
     # ---- day anchors -----------------------------------------------------
     def _anchor_slot(self, context, preferences, at):
@@ -168,13 +211,15 @@ class GreetingContactEvents:
             return None
         if marker["kind"] == "insomnia_night":
             hint = self._sleep_hint(context, at)
-            summary = ("现在落在配置的夜间低压力问候窗口，可以留一句轻的话；不把时段当成事实，不报时、不追问、不要求回应。"
+            summary = ("现在落在配置的夜间低压力问候窗口，可以留一句轻的话；不把时段当成事实，不报时、不报日期和星期、不追问、不要求回应。"
                        + ("角色状态里有一条睡眠相关的临时状况：" + hint if hint else ""))
             purpose = INSOMNIA_PURPOSE
         else:
             why, topic = ANCHOR_MEANING[marker["anchor"]]
+            state_hint = self._state_hint(context, at)
             summary = (f"按已配置时区，现在的本地日期是{marker['local_date']}，这是「{topic}」的问候窗口：{why}。"
-                       "窗口只提供一个可以自然碰面的时机，不代表对方刚醒、刚吃完饭或已经空闲；没有合适的具体话头就跳过。")
+                       "窗口只提供一个可以自然碰面的时机，不代表对方刚醒、刚吃完饭或已经空闲；没有合适的具体话头就跳过。"
+                       + ("（角色当前自身状态参考：" + state_hint + "）" if state_hint else ""))
             purpose = ANCHOR_PURPOSE
         thought = Thought("greeting-event-" + digest(marker), opportunity, ThoughtKind.CONVERSATION,
                           summary, EvidenceSnapshot(context.scope, at), 1.0)

@@ -22,7 +22,7 @@ const page = fs.readFileSync(path.resolve(__dirname, PAGE + 'memory-settings-sec
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const drains = async (times = 12) => { for (let index = 0; index < times; index += 1) await flush(); };
 const TOKEN = 'a'.repeat(64);
-const HOST = 'astrbot_plugin_private_companion_v2';
+const HOST = 'astrbot_plugin_private_companion';
 const PREFIX = '/' + HOST + '/';
 const MEMORY_PATH = PREFIX + 'memory';
 const SETTINGS_ROUTE = 'memory/settings';

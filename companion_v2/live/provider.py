@@ -11,7 +11,7 @@ from typing import Any
 
 
 SCHEMA = "companion.native-provider.v1"
-PLUGIN_ID = "astrbot_plugin_private_companion_v2.live"
+PLUGIN_ID = "astrbot_plugin_private_companion.live"
 PROVIDER_ID = "live.native"
 STATUS = "live.status.read"
 EVENTS = "live.events.recent"

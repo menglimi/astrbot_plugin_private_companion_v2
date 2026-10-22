@@ -70,8 +70,12 @@ class MultiHostSettings:
             data["common"].pop("segmentation")
         if self.common.forward_intake == ForwardIntakePolicy():
             data["common"].pop("forward_intake")
-        if not self.common.budget_soft.enabled and not self.common.budget_soft.tokens:
-            data["common"].pop("budget_soft")  # A daily soft ceiling is not an identity pin.
+        elif self.common.forward_intake.parse_nested:
+            # The default predates this field. Preserve custom intake fingerprints
+            # written before the switch existed; an explicit False is serialized.
+            data["common"]["forward_intake"].pop("parse_nested")
+        if not self.common.budget_soft.enabled:
+            data["common"].pop("budget_soft")  # A disabled daily soft ceiling is not an identity pin.
         data["common"].pop("voice_reply_enabled")  # Delivery presentation can change without re-pinning identity.
         data["common"].pop("voice_reply_policy")
         # Routing is adopted at assembly/request boundaries, not an identity pin.

@@ -15,8 +15,8 @@ from companion_v2.sources.models import GovernanceState
 from companion_v2.together.mobile.requests import MobileRoomRequests
 
 
-REALITY_PLUGIN_ID = "astrbot_plugin_private_companion_v2.reality"
-TOGETHER_PLUGIN_ID = "astrbot_plugin_private_companion_v2.together"
+REALITY_PLUGIN_ID = "astrbot_plugin_private_companion.reality"
+TOGETHER_PLUGIN_ID = "astrbot_plugin_private_companion.together"
 TOGETHER_ACTIONS = {
     "create": "together.room.create",
     "invite": "together.room.invite",

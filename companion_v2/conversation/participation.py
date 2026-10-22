@@ -244,6 +244,11 @@ class GroupParticipation:
             instruction += ("\n本轮没有明确 @，入站候选依据是：" + reasons
                             + "。候选只表示可以考虑参与；仍须按当前语境判断，不适合就 skip，"
                             "决定接话时先记录 mode=reply 和简短 reason。")
+            if any(reason in ("active_follow_up", "reply_follow_up") for reason in admission["reasons"]):
+                instruction += ("这是机器人上一轮互动后的非点名接话候选，发言者可能是另一位群成员；结合上一轮群聊上下文，"
+                                "若仍在回答你的追问、补充刚才未说完的信息或顺着刚才与你的话头继续交流，可自然接住（mode=reply）；"
+                                "若对话已收尾或对方已转向他人，则选择 skip。时间接近和话题相关都不等于仍在向你说话，"
+                                "不要为了保持对话而逐句跟答，也不必反复回应礼貌收尾。")
         saved = json.loads(batch["contributions_json"])
         captured = saved.get("reply_settings") if isinstance(saved, dict) else None
         if captured is not None:

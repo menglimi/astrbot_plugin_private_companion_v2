@@ -6,7 +6,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const source = fs.readFileSync(path.join(__dirname, "..", "pages", "陪伴小屋", "role-profile-migration.js"), "utf8");
-const HOST = "astrbot_plugin_private_companion_v2";
+const HOST = "astrbot_plugin_private_companion";
 const flush = () => new Promise(resolve => setTimeout(resolve, 0));
 async function settleUntil(predicate) {
   for (let index = 0; index < 50 && !predicate(); index++) await flush();

@@ -9,17 +9,21 @@ import re
 from companion_v2.conversation.segment_control import controlled_parts
 from companion_v2.execution.models import digest, stamp
 from companion_v2.foundation.refs import ScopeKind
-from .voice_markup import slice_speech, visible_speech
+from .voice_markup import (
+    VOICE_PROTOCOL_GT, VOICE_PROTOCOL_LT, VOICE_TAG_NAME_PATTERN, canonical_voice_tag,
+    slice_speech, visible_speech,
+)
 
 
-_PROTOCOL_LT = r"(?:<|&lt;|&#0*60;|&#x0*3c;)"
-_PROTOCOL_GT = r"(?:>|&gt;|&#0*62;|&#x0*3e;)"
 _TAG = re.compile(
-    rf"(?is){_PROTOCOL_LT}\s*(?P<tag>pc_tts|tts)\b[^>]*?{_PROTOCOL_GT}(?P<speech>.*?)"
-    rf"{_PROTOCOL_LT}\s*/\s*(?P=tag)\s*{_PROTOCOL_GT}"
+    rf"(?is){VOICE_PROTOCOL_LT}\s*(?P<open_tag>{VOICE_TAG_NAME_PATTERN})\b[^>]*?{VOICE_PROTOCOL_GT}(?P<speech>.*?)"
+    rf"{VOICE_PROTOCOL_LT}\s*/\s*(?P<close_tag>{VOICE_TAG_NAME_PATTERN})\s*{VOICE_PROTOCOL_GT}"
 )
 _STRAY_TAG = re.compile(
-    rf"(?is){_PROTOCOL_LT}\s*/?\s*(?:pc_tts|tts)\b[^>]*?{_PROTOCOL_GT}"
+    rf"(?is){VOICE_PROTOCOL_LT}\s*/?\s*{VOICE_TAG_NAME_PATTERN}\b[^>]*?{VOICE_PROTOCOL_GT}"
+)
+_BARE_STRAY_TAG = re.compile(
+    rf"(?is){VOICE_PROTOCOL_LT}\s*/?\s*{VOICE_TAG_NAME_PATTERN}\b(?![^>]*>)"
 )
 _TURN_LANGUAGE_NAMES = {
     "ja": r"(?:日语|日語|日文|日本语|日本語|japanese)",
@@ -84,11 +88,25 @@ def strip_voice_markup(text):
     """Remove internal voice wrappers while keeping their authored text visible."""
     if type(text) is not str:
         return text
-    return _STRAY_TAG.sub("", _TAG.sub(lambda match: visible_speech(match.group("speech")), text))
+    return _strip_stray_voice_tags(_TAG.sub(_visible_voice_match, text))
+
+
+def _matching_voice_tags(match):
+    return canonical_voice_tag(match.group("open_tag")) == canonical_voice_tag(match.group("close_tag"))
+
+
+def _visible_voice_match(match):
+    if not _matching_voice_tags(match):
+        return match.group(0)
+    return visible_speech(match.group("speech"))
+
+
+def _strip_stray_voice_tags(text):
+    return _BARE_STRAY_TAG.sub("", _STRAY_TAG.sub("", text))
 
 
 def _has_chinese_translation(text):
-    visible = _STRAY_TAG.sub("", text)
+    visible = _strip_stray_voice_tags(text)
     visible = "".join(controlled_parts(visible)[0]).strip()
     if not visible or re.search(r"[\u3040-\u30ff\u31f0-\u31ff]", visible):
         return False
@@ -107,6 +125,7 @@ def _has_chinese_translation(text):
 class VoiceReplyPolicy:
     trigger_mode: str = "always"
     generation_mode: str = "plain"
+    conversion_scope: str = "full"
     segment_mode: str = "each"
     delivery_mode: str = "voice_and_text"
     position: str = "after_media"
@@ -116,6 +135,8 @@ class VoiceReplyPolicy:
     private_probability: float = -1.0
     group_probability: float = -1.0
     cooldown_seconds: int = 0
+    private_cooldown_seconds: int = -1
+    group_cooldown_seconds: int = -1
     max_speech_chars: int = 1800
     timeout_seconds: int = 30
     trigger_keywords: str = ""
@@ -131,6 +152,7 @@ class VoiceReplyPolicy:
     def __post_init__(self):
         choices = ((self.trigger_mode, {"always", "request", "adaptive"}),
                    (self.generation_mode, {"plain", "model_tag"}),
+                   (self.conversion_scope, {"full", "partial"}),
                    (self.segment_mode, {"each", "first", "last"}),
                    (self.delivery_mode, {"voice_and_text", "voice_only"}),
                    (self.position, {"after_media", "after_text", "before_text"}),
@@ -145,6 +167,8 @@ class VoiceReplyPolicy:
         if not 0 <= self.probability <= 1 or not 0 <= self.primary_mention_probability <= 1:
             raise ValueError("voice reply probability must be between zero and one")
         for value, low, high in ((self.cooldown_seconds, 0, 86400),
+                                 (self.private_cooldown_seconds, -1, 86400),
+                                 (self.group_cooldown_seconds, -1, 86400),
                                  (self.max_speech_chars, 1, 10000), (self.timeout_seconds, 1, 120)):
             if type(value) is not int or not low <= value <= high:
                 raise ValueError("voice reply limit is invalid")
@@ -160,11 +184,18 @@ class VoiceReplyPolicy:
             raise ValueError("primary mention voice keywords are invalid")
 
     @property
+    def uses_model_tags(self):
+        return (self.generation_mode == "model_tag" or self.trigger_mode == "adaptive"
+                or self.conversion_scope == "partial")
+
+    @property
     def instruction(self):
-        if self.generation_mode != "model_tag" and self.trigger_mode != "adaptive":
+        if not self.uses_model_tags:
             return ""
         prompt = "只有实际要朗读的原文放在 <pc_tts> 与 </pc_tts> 之间；标签内不放分段标记、代码、链接或图片说明。"
-        if self.trigger_mode == "request":
+        if self.conversion_scope == "partial":
+            prompt = "按本轮语境选取适合口述的自然短句放进语音标签，其余内容保留为文字；无需让语音覆盖整条回复。" + prompt
+        elif self.trigger_mode == "request":
             prompt = "用户本轮请求语音时，用语音标签承载实际说给对方听的完整回应。" + prompt
         elif self.trigger_mode == "always":
             prompt = "本轮采用语音回复，普通短句也将完整口语回应放进语音标签，不必等用户重复请求。" + prompt
@@ -174,13 +205,15 @@ class VoiceReplyPolicy:
             "标签由程序消费，不向用户解释或当作代码展示。代码、链接等适合阅读的内容留在标签外；"
             "本轮明确要求只用文字时，尊重这次要求。"
         )
+        if self.conversion_scope == "full" and self.trigger_mode in {"always", "request"}:
+            prompt += "同一条回复若自然分成多段，各段都保持一致的语音标签与可见文字配对；不要只给前几段加标签，却把后续仍属于本次口语回应的内容留在标签外。"
         prompt += f"每段朗读控制在 {self.max_speech_chars} 字以内；较长内容按自然语意停顿分成多个语音标签。"
         if self.language != "zh":
             label = "日语" if self.language == "ja" else "英语"
             prompt += f"标签内用自然{label}完整表达该段意思，语气贴合当前对话。"
             if self.foreign_text_mode == "translation":
                 prompt += "每个语音标签后紧接与该段完整对应的自然中文译文，不加标题或省略关键信息；译文作为可见文字。"
-                if self.trigger_mode in {"always", "request"}:
+                if self.conversion_scope == "full" and self.trigger_mode in {"always", "request"}:
                     prompt += "中文聊天正文都对应相邻的朗读片段，不在译文后另加没有朗读的口语回应；代码和链接可单独保留。"
                 example = ("<pc_tts>おやすみ。ゆっくり休んでね。</pc_tts>晚安，好好休息呀。"
                            if self.language == "ja" else "<pc_tts>Good night. Rest well.</pc_tts>晚安，好好休息呀。")
@@ -199,6 +232,10 @@ class VoiceReplyPolicy:
     def chance(self, kind):
         override = self.group_probability if kind == "group" else self.private_probability
         return float(self.probability if override < 0 else override)
+
+    def cooldown(self, kind):
+        override = self.group_cooldown_seconds if kind == "group" else self.private_cooldown_seconds
+        return self.cooldown_seconds if override < 0 else override
 
     def keywords(self):
         return tuple(word.strip().casefold() for word in re.split(r"[,，;；\n]+", self.trigger_keywords)
@@ -221,28 +258,28 @@ def capability_instruction(policy):
 
 def separate_spoken(text, policy):
     """Return visible text and (offset, speech) pairs before segmentation."""
-    if policy is None or (policy.generation_mode != "model_tag" and policy.trigger_mode != "adaptive"):
+    if policy is None or not policy.uses_model_tags:
         return strip_voice_markup(text), ()
     translate = policy.language != "zh" and policy.foreign_text_mode == "translation"
-    matches = tuple(_TAG.finditer(text))
+    matches = tuple(match for match in _TAG.finditer(text) if _matching_voice_tags(match))
     visible, spoken, cursor = [], [], 0
     for index, match in enumerate(matches):
         visible.append(text[cursor:match.start()])
         speech = match.group("speech").strip()
         if speech:
-            spoken.append((len(_STRAY_TAG.sub("", "".join(visible))), speech))
+            spoken.append((len(_strip_stray_voice_tags("".join(visible))), speech))
         following = text[match.end():matches[index + 1].start() if index + 1 < len(matches) else len(text)]
         translated = translate and _has_chinese_translation(following)
         if not translated:
             visible.append(visible_speech(match.group("speech")))
         cursor = match.end()
     visible.append(text[cursor:])
-    return _STRAY_TAG.sub("", "".join(visible)), tuple(spoken)
+    return _strip_stray_voice_tags("".join(visible)), tuple(spoken)
 
 
 def speech_candidates(text, parts, spans, policy):
     """Map authored speech to the original segments before presentation cleanup."""
-    if policy.generation_mode != "model_tag" and policy.trigger_mode != "adaptive":
+    if not policy.uses_model_tags:
         candidates = tuple(part.strip() for part in parts)
     else:
         buckets = [[] for _ in parts]

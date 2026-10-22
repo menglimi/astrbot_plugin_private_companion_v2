@@ -48,13 +48,17 @@ class MoodModelTests(unittest.TestCase):
         self.assertFalse(mood.neutral(mood_data(joy=2, fear=5), 4))
 
     def test_decay_moves_toward_the_baseline_by_a_half_life(self):
-        previous = {"updated_at": NOW, "baseline": 6, "joy": 10, "anger": 1, "sorrow": 2, "fear": 1}
+        previous = {"updated_at": NOW, "baseline": 6, "joy": 10, "anger": 7, "sorrow": 3, "fear": 1}
         one = mood.decayed(previous, 6, NOW + timedelta(minutes=90), 90)
         self.assertAlmostEqual(one["joy"], 8.0, places=3)
-        self.assertAlmostEqual(one["anger"], 3.5, places=3)
+        self.assertAlmostEqual(one["anger"], 4.0, places=3)
+        self.assertAlmostEqual(one["sorrow"], 2.0, places=3)
+        self.assertAlmostEqual(one["fear"], 1.0, places=3)
         two = mood.decayed(previous, 6, NOW + timedelta(minutes=180), 90)
         self.assertAlmostEqual(two["joy"], 7.0, places=3)
-        self.assertEqual(mood.decayed(None, 6, NOW, 90), {name: 6.0 for name in mood.AXES})
+        self.assertAlmostEqual(two["anger"], 2.5, places=3)
+        self.assertEqual(mood.decayed(None, 6, NOW, 90),
+                         {"joy": 6.0, "anger": 1.0, "sorrow": 1.0, "fear": 1.0})
 
     def test_acceleration_is_bounded_while_relaxation_is_not(self):
         previous = {"updated_at": NOW, "baseline": 6, "joy": 9, "anger": 1, "sorrow": 2, "fear": 1}
@@ -91,6 +95,14 @@ class MoodModelTests(unittest.TestCase):
         self.assertAlmostEqual(projected["reference"]["joy"], 7.0, places=3)
         self.assertFalse(projected["neutral"])
 
+    def test_reply_tone_block_surfaces_decay_reference_and_mixed_emotions(self):
+        mixed = mood_data(joy=8, sorrow=5, intensity="moderate", description="开心但又有点舍不得")
+        dynamics = {"reference": {"joy": 6.5, "anger": 1.0, "sorrow": 2.8, "fear": 1.0}, "cross_window": False}
+        text = mood.prompts.reply(mixed, dynamics, neutral=False)
+        self.assertIn("随时间缓和后的当前参考：joy→6.5、sorrow→2.8", text)
+        self.assertIn("当前喜悦与顾虑/低落并存", text)
+        self.assertIn("开心但又有点舍不得", text)
+
     def test_mood_settings_are_closed_ranges(self):
         values = {name: DEFAULTS[name] for name in DEFAULTS}
         validate_mood_settings(values)
@@ -109,7 +121,7 @@ class MoodStateTests(StateFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_structured_mood_is_stored_projected_and_bounded(self):
         _, app, context, _ = await self.ready(mood_enabled=True)
-        app.role_state.write(context, data=state_data(mood=mood_data(joy=9, description="被夸了")),
+        app.role_state.write(context, data=state_data(mood=mood_data(joy=9, anger=5, description="被夸了但刚才有点急")),
                              expected_revision=0, operation_key="first")
         first = app.role_state.read(context)
         self.assertEqual(first["values"]["mood"]["joy"], 9)
@@ -119,9 +131,10 @@ class MoodStateTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         self.clock.advance(timedelta(minutes=45))
         drifted = app.role_state.read(context)
         self.assertLess(drifted["mood_dynamics"]["reference"]["joy"], 8.2)
+        self.assertLess(drifted["mood_dynamics"]["reference"]["anger"], 5)
         self.assertGreater(drifted["mood_dynamics"]["reference"]["anger"], 1)
         # Numbers move by one bounded step, and an extreme swing is refused.
-        app.role_state.write(context, data=state_data(mood=mood_data(joy=8, description="余韵")),
+        app.role_state.write(context, data=state_data(mood=mood_data(joy=8, anger=3, description="余韵")),
                              expected_revision=1, operation_key="second")
         with self.assertRaises(TaskError):
             app.role_state.write(context, data=state_data(mood=mood_data(joy=2)), expected_revision=2,
@@ -260,10 +273,10 @@ class MoodMaintenanceTests(StateFixture, unittest.IsolatedAsyncioTestCase):
         self.advance(app)
         self.assertEqual((await self.done(app, batch))["state"], "complete")
         instruction = self.called[0].original.instruction
-        self.assertIn("语气滤镜", instruction)
+        self.assertIn("情绪数值只影响角色的用词、节奏与情绪浓度", instruction)
         self.assertIn("joy=9", instruction)
         self.assertIn("被夸得有点慌", instruction)
-        self.assertIn("四轴可以同时偏高", instruction)
+        self.assertIn("四轴允许并存", instruction)
         self.assertNotIn("当前情绪处于中性带", instruction)
         materials = [m for m in self.called[0].original.context.materials if m.purpose == "role_state"]
         self.assertTrue(json.loads(materials[0].payload)["simulation"]["mood_dynamics"])

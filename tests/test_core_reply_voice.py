@@ -3,6 +3,7 @@
 from types import SimpleNamespace as NS
 import unittest
 
+from tests import astrbot_data_root  # Isolate the SDK before importing the host.
 from astrbot.core.message.components import Plain, Record
 from astrbot.core.message.message_event_result import MessageChain
 
@@ -125,6 +126,13 @@ class CoreReplyVoiceTests(unittest.IsolatedAsyncioTestCase):
         inject_core_reply_prompt(event, request)
         self.assertEqual(request.system_prompt, first_prompt)
 
+    def test_always_voice_prompt_covers_all_natural_reply_parts(self):
+        policy = VoiceReplyPolicy(generation_mode="model_tag", trigger_mode="always",
+                                  language="ja", foreign_text_mode="translation")
+        instruction = voice_prompt_instruction(policy)
+        self.assertIn("各段都保持一致的语音标签", instruction)
+        self.assertIn("后续仍属于本次口语回应", instruction)
+
     async def test_long_spoken_text_is_split_without_losing_content_or_translation(self):
         event = FakeEvent()
         policy = VoiceReplyPolicy(generation_mode="model_tag", language="ja", max_speech_chars=6,
@@ -141,6 +149,26 @@ class CoreReplyVoiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("".join(spoken), "こんにちは。元気ですか。")
         self.assertEqual(output.get_plain_text(), "你好，最近还好吗？")
         self.assertEqual(len([part for part in output.chain if isinstance(part, Record)]), 2)
+
+    async def test_extra_c_in_voice_closing_tag_keeps_translation_visible_and_spoken_text(self):
+        event = FakeEvent()
+        policy = VoiceReplyPolicy(generation_mode="model_tag", language="ja",
+                                  foreign_text_mode="translation")
+        prepared = {"voice_reply_policy": policy, "context": object(), "event_id": "typo-tag"}
+        spoken = []
+
+        async def renderer(_, text, **__):
+            spoken.append(text)
+            return {"type": "record", "data": {"file": "base64://YQ=="}}
+
+        source = "<pc_tts>ごめんね。呼び方はね。</pcc_tts>抱歉，不是故意。称呼嘛。"
+        output = await prepare_core_reply_voice_message(
+            event, prepared, MessageChain(chain=[Plain(source)]), renderer=renderer,
+            delivery=None, authorize=_allow)
+
+        self.assertEqual(spoken, ["ごめんね。呼び方はね。"])
+        self.assertEqual(output.get_plain_text(), "抱歉，不是故意。称呼嘛。")
+        self.assertNotIn("pcc_tts", output.get_plain_text())
 
     async def test_captured_performance_is_preserved_after_visible_reply_is_segmented(self):
         event = FakeEvent()

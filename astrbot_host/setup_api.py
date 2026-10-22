@@ -24,11 +24,12 @@ from .binding_store import PendingBinding, binding_path, read_binding, write_bin
 from .identity_derivation import derive_bot_id, derive_role_id
 from .management_identity import dashboard_operator
 from .persona_catalog import available_personas
+from .settings import HostControlError
 from .setup_state import SETUP_STEPS, SetupStateStore
 from .display_names import display_names
 
 
-PREFIX = "/astrbot_plugin_private_companion_v2/setup"
+PREFIX = "/astrbot_plugin_private_companion/setup"
 logger = logging.getLogger(__name__)
 
 PROACTIVE_TEST_SUGGESTIONS = {
@@ -161,6 +162,7 @@ class SetupWebAPI:
     def routes(self):
         return [
             (PREFIX + "/status", self.status, ["GET"], "Read persistent Companion V2 setup progress"),
+            (PREFIX + "/upgrade", self.prepare_upgrade, ["POST"], "Confirm existing legacy account and persona mappings"),
             (PREFIX + "/targets", self.api_targets, ["GET"], "Read connected OneBot accounts and native personas"),
             (PREFIX + "/binding/confirm", self.confirm_binding, ["POST"], "Confirm the Companion V2 core administrator window"),
             (PREFIX + "/model", self.model, ["POST"], "Choose the initial Companion V2 text provider"),
@@ -291,6 +293,8 @@ class SetupWebAPI:
                     self.progress.finish_proactive_test(outcome="unknown",
                         finished_at=datetime.now(timezone.utc).isoformat(), error_code="setup_test_interrupted")
             document = self._status_document()
+            from .upgrade_setup import UpgradeSetup
+            document["upgrade"], _ = await UpgradeSetup(self.controller).plan()
             names = display_names(self.controller)
             if document["binding"].get("participant_id"):
                 document["binding"] = (await names.targets([document["binding"]]))[0]
@@ -300,6 +304,19 @@ class SetupWebAPI:
             return self._error(error.code, str(error))
         except (ValueError, OSError, UnicodeError):
             return self._error("setup_progress_unavailable", "the saved setup progress cannot be read")
+
+    async def prepare_upgrade(self):
+        try:
+            self._admin()
+            body = await self._body({"confirmed", "plan_token"})
+            if body["confirmed"] is not True or type(body["plan_token"]) is not str:
+                raise ValueError("review confirmation is required")
+            from .upgrade_setup import UpgradeSetup
+            return self._response(Outcome.success(await UpgradeSetup(self.controller).prepare(body["plan_token"])))
+        except (TaskError, HostControlError) as error:
+            return self._error(error.code, str(error))
+        except (ValueError, OSError, UnicodeError):
+            return self._error("upgrade_prepare_failed", "旧版连接准备未完成，请保留来源并重新读取状态。")
 
     async def api_targets(self):
         try:
@@ -348,7 +365,7 @@ class SetupWebAPI:
             result = confirm()
             if result.get("confirmed") is not True:
                 raise TaskError(result.get("reason", "setup_binding_missing"),
-                                result.get("detail", "send companion_bind from the core administrator private window first"))
+                                result.get("detail", "send 我会永远陪着你 from the core administrator private window first"))
             return self._response(Outcome.success({"binding": self._binding(), "confirmed": True}))
         except TaskError as error:
             return self._error(error.code, str(error))

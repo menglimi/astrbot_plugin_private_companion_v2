@@ -175,6 +175,21 @@ LEGACY_COMPATIBILITY_CATALOG = LegacyCompatibilityCatalog(
             acceptance_scope=("RG-03", "RG-05", "RG-06", "RG-09"),
         ),
         LegacyCatalogEntry(
+            source_id="private.authoritative_memory",
+            source_plugin_id=V1_PLUGIN_ID,
+            source_version=V1_SUPPORTED_VERSION,
+            owner="private_companion.req041_private_memory",
+            source_paths=("companions.json",),
+            format_signature="private-core-authoritative-memory.req041.v1",
+            action=CatalogAction.DATA_CONVERTED,
+            handler_id="v2.person-private-memory-importer",
+            acceptance_scope=("RG-03", "RG-05", "RG-06", "RG-09"),
+            disposition_reason=(
+                "V1 的 _req041_private_memory 经原身份登记、内容哈希及当前账号/用户核对后，"
+                "由操作者确认写入所选 V2 角色的历史查询库；不恢复旧任务、实时状态或发送行为。"
+            ),
+        ),
+        LegacyCatalogEntry(
             source_id="private.group_relationship_graph",
             source_plugin_id=V1_PLUGIN_ID,
             source_version=V1_SUPPORTED_VERSION,
@@ -207,6 +222,21 @@ LEGACY_COMPATIBILITY_CATALOG = LegacyCompatibilityCatalog(
             action=CatalogAction.DATA_CONVERTED,
             handler_id="v2.reaction-asset-importer",
             acceptance_scope=("RG-03", "RG-05", "RG-08"),
+        ),
+        LegacyCatalogEntry(
+            source_id="memory.configuration",
+            source_plugin_id="astrbot_plugin_memory_companion",
+            source_version=V1_SUPPORTED_VERSION,
+            owner="memory_companion.settings",
+            source_paths=("host-config:astrbot_plugin_memory_companion",),
+            format_signature="memory-companion-config.json.v1",
+            action=CatalogAction.CONVERTED,
+            handler_id="v2.memory-config-migrator",
+            acceptance_scope=("RG-03", "RG-05", "RG-06", "RG-12"),
+            disposition_reason=(
+                "相关记忆检索的开关和数量、字符预算迁入原生记忆配置；旧摘要、采集、模型、"
+                "跨窗口桥接及权限设置逐项说明，不替换为含义不同的新开关。"
+            ),
         ),
         LegacyCatalogEntry(
             source_id="memory.timeline_and_governance",
@@ -275,6 +305,80 @@ LEGACY_COMPATIBILITY_CATALOG = LegacyCompatibilityCatalog(
             action=CatalogAction.RETAINED_EXTERNAL,
             handler_id="v2.image-owner-adapter",
             acceptance_scope=("RG-03", "RG-05", "RG-08", "RG-12"),
+        ),
+        LegacyCatalogEntry(
+            source_id="image.configuration",
+            source_plugin_id="astrbot_plugin_image_companion",
+            source_version=V1_SUPPORTED_VERSION,
+            owner="image_companion.generation_and_assets",
+            source_paths=("host-config:astrbot_plugin_image_companion",),
+            format_signature="image-companion-config.json.v1",
+            action=CatalogAction.CONVERTED,
+            handler_id="v2.image-config-migrator",
+            acceptance_scope=("RG-03", "RG-05", "RG-08", "RG-12"),
+        ),
+        LegacyCatalogEntry(
+            source_id="game.configuration",
+            source_plugin_id="astrbot_plugin_game_companion",
+            source_version=V1_SUPPORTED_VERSION,
+            owner="game_companion.settings",
+            source_paths=("host-config:astrbot_plugin_game_companion",),
+            format_signature="game-companion-config.json.v1",
+            action=CatalogAction.CONVERTED,
+            handler_id="v2.native-extension-config-migrator",
+            acceptance_scope=("RG-03", "RG-05", "RG-07", "RG-12"),
+        ),
+        LegacyCatalogEntry(
+            source_id="together.configuration",
+            source_plugin_id="astrbot_plugin_together_companion",
+            source_version=V1_SUPPORTED_VERSION,
+            owner="together_companion.settings",
+            source_paths=("host-config:astrbot_plugin_together_companion",),
+            format_signature="together-companion-config.json.v1",
+            action=CatalogAction.CONVERTED,
+            handler_id="v2.native-extension-config-migrator",
+            acceptance_scope=("RG-03", "RG-05", "RG-07", "RG-12"),
+        ),
+        LegacyCatalogEntry(
+            source_id="live.configuration",
+            source_plugin_id="astrbot_plugin_live_stream_companion",
+            source_version=V1_SUPPORTED_VERSION,
+            owner="live_stream_companion.settings",
+            source_paths=("host-config:astrbot_plugin_live_stream_companion",),
+            format_signature="live-stream-companion-config.json.v1",
+            action=CatalogAction.CONVERTED,
+            handler_id="v2.native-extension-config-migrator",
+            acceptance_scope=("RG-03", "RG-05", "RG-07", "RG-12"),
+        ),
+        LegacyCatalogEntry(
+            source_id="content.configuration",
+            source_plugin_id="astrbot_plugin_content_companion",
+            source_version=V1_SUPPORTED_VERSION,
+            owner="content_companion.settings",
+            source_paths=("host-config:astrbot_plugin_content_companion",),
+            format_signature="content-companion-config.json.v1",
+            action=CatalogAction.CONVERTED,
+            handler_id="v2.content-config-migrator",
+            acceptance_scope=("RG-03", "RG-05", "RG-12"),
+            disposition_reason=(
+                "创作开关、主创作模型、方向提示词和封面偏好迁入原生创作配置；空间发布、账号凭据与"
+                "没有同义入口的多阶段模型保留旧配置并逐项报告。"
+            ),
+        ),
+        LegacyCatalogEntry(
+            source_id="screen.configuration",
+            source_plugin_id="astrbot_plugin_screen_companion",
+            source_version=V1_SUPPORTED_VERSION,
+            owner="screen_companion.private_device_settings",
+            source_paths=("host-config:astrbot_plugin_screen_companion",),
+            format_signature="screen-companion-config.json.v1",
+            action=CatalogAction.DOCUMENTED_SKIP,
+            handler_id="documented-skip.screen-private-settings",
+            acceptance_scope=("RG-03", "RG-05", "RG-07", "RG-12"),
+            disposition_reason=(
+                "本机屏幕、麦克风和使用记录涉及管理员隐私；新版需要按当前设备与授权重新开启，"
+                "不沿用旧版采集开关、目标会话、令牌或预设。原配置保留供人工核对。"
+            ),
         ),
         LegacyCatalogEntry(
             source_id="reality.configuration",

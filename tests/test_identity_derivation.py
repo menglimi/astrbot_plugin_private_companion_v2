@@ -24,6 +24,7 @@ from astrbot_host.identity_derivation import (
     derived_identity,
     normalize_persona_id,
     persona_label,
+    role_display_name,
 )
 from astrbot_host.settings import HostControlError
 
@@ -119,6 +120,15 @@ class PersonaNormalizationTests(unittest.TestCase):
     def test_the_label_falls_back_to_the_conversation_persona(self):
         self.assertEqual(persona_label(""), "随会话当前人格")
         self.assertEqual(persona_label("晚星"), "晚星")
+
+    def test_role_display_name_removes_only_channel_suffixes_with_optional_spaces(self):
+        for value in ("星缘-私聊", "星缘 - 私聊", "星缘_群聊", "星缘 _ 群聊"):
+            with self.subTest(value=value):
+                self.assertEqual(role_display_name(value), "星缘")
+        self.assertEqual(role_display_name("深夜-来信"), "深夜-来信")
+
+    def test_generated_role_display_name_uses_normalized_persona_labels(self):
+        self.assertEqual(role_display_name("role-account-persona", ["星缘 - 私聊"]), "星缘")
 
 
 if __name__ == "__main__":

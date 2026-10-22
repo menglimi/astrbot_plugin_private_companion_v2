@@ -8,9 +8,24 @@ import unittest
 from unittest.mock import patch
 
 from companion_v2.execution.models import TaskError, digest
-from companion_v2.foundation.refs import AudienceRef, SourceRef, VersionRef
+from companion_v2.foundation.refs import AudienceRef, RoleOwnerRef, SourceRef, VersionRef
 from companion_v2.proactive.events import ActivityContactEvents, PAGE_SIZE
-from companion_v2.role_work.models import RoleActivity, RoleActivityState as State, RoleReadingReceipt
+from companion_v2.proactive.models import ThoughtKind
+from companion_v2.relationships.models import (
+    EmotionSubject,
+    RelationshipMemory,
+    RelationshipMemoryKind,
+    RelationshipMemoryState,
+)
+from companion_v2.role_work.growth.models import GrowthKind, GrowthState, RoleGrowthRecord
+from companion_v2.role_work.models import (
+    RoleActivity,
+    RoleActivityState as State,
+    RoleArtifact,
+    RoleArtifactJournalMeaning,
+    RoleArtifactKind,
+    RoleReadingReceipt,
+)
 from companion_v2.role_work.work_models import RoleWorkSpec
 from companion_v2.sources.models import SourceRecord
 from tests.contact_schedule_support import ContactScheduleFixture
@@ -24,7 +39,9 @@ class ActivityContactTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestC
         self.host_instance, batch = await self.scheduled()
         self.app = self.host_instance.application
         self.origin = self.context(self.app, batch)
-        self.settings(self.app, {"chat.enabled": False, **settings}).unwrap()
+        self.settings(self.app, {"chat.enabled": False,
+            **{name + ".enabled": False for name in ("affection", "care", "play", "repair", "invitation")},
+            **settings}).unwrap()
         self.assertIsInstance(self.app.contact_schedule.events, ActivityContactEvents)
 
     def reading(self, identifier="reading", *, state=State.ACTIVE, finish=True,
@@ -313,3 +330,116 @@ class ActivityContactTests(ContactScheduleFixture, unittest.IsolatedAsyncioTestC
         await self.until(lambda: not self.app.proactive.active_handles)
         await self.app.close(grace_seconds=0)
         self.assertEqual(len(self.sent), 1)
+
+    async def test_creative_artifact_activity_prepares_share_candidate_and_growth_progress_selects(self):
+        await self.setup_contacts()
+        owner = RoleOwnerRef(self.origin.scope.installation_id, self.origin.scope.bot_id,
+                             self.origin.role_binding.role.subject_id)
+        now = self.clock.now()
+        art_source = SourceRef("creative-text-1", "role.life", self.origin.scope,
+                               VersionRef("creative-text-1", 1), now)
+        art_text = "给普通的一天留一盏小灯，风吹过窗台时刚好亮着。"
+        self.app.proactive.sources.publish(
+            SourceRecord(art_source, self.origin.audience, digest(art_text), art_text),
+            observed_at=now,
+        ).unwrap()
+        activity = self.app.role_life.add_activity(RoleActivity(
+            "write-1", owner.persona_id, self.origin.scope, now - timedelta(minutes=5), State.ACTIVE,
+            description="写一段随笔",
+        ))
+        self.app.role_life.add_artifact(RoleArtifact(
+            "artifact-write-1", "write-1",
+            RoleArtifactKind.TEXT, art_source, now,
+            owner=owner,
+            journal_meaning=RoleArtifactJournalMeaning.CREATIVE_TEXT,
+        ), owner=owner)
+        self.app.role_life.transition_activity(
+            "write-1", owner=owner, expected_revision=activity.revision,
+            state=State.COMPLETED, operation_id="complete-write-1", observed_at=now,
+        )
+        candidate, _ = self.app.contact_schedule.events.select(
+            self.origin, self.preferences(self.app, self.origin), now, purpose="creation")
+        self.assertIsNotNone(candidate)
+        _, intents, marker = candidate
+        self.assertEqual(intents[0].purpose, "creation")
+        self.assertIs(intents[0].thought.kind, ThoughtKind.CONVERSATION)
+        self.app.contact_schedule.events.validate(self.origin, marker, now)
+
+        # Also verify GrowthContactEvents selects confirmed skill/goal progress and validates receipts.
+        growth_source = SourceRef("growth-ev-1", "conversation.input", self.origin.scope,
+                                  VersionRef("growth-ev-1", 1), now)
+        self.app.proactive.sources.publish(
+            SourceRecord(growth_source, self.origin.audience, digest("练琴记录"), "练琴记录"),
+            observed_at=now,
+        ).unwrap()
+        proposed = RoleGrowthRecord(
+            growth_id="skill-guitar", owner=owner, scope=self.origin.scope, kind=GrowthKind.SKILL,
+            title="指弹吉他练习", description="练习和弦转换与泛音", progress_note="",
+            sources=(growth_source,), created_at=now, updated_at=now, revision=1,
+            state=GrowthState.PROPOSED, proposed_by=self.origin.actor.subject,
+        )
+        self.app.role_growth.propose(proposed, operation_id="propose-guitar")
+        active = self.app.role_growth.transition(
+            "skill-guitar", owner=owner, state=GrowthState.ACTIVE, expected_revision=1,
+            observed_at=now, scope=self.origin.scope, actor=self.origin.actor.subject,
+            operation_id="activate-guitar",
+        )
+        progressed = self.app.role_growth.apply_progress(
+            "skill-guitar", owner=owner, expected_revision=active.revision,
+            progress_note="今天换把位时小指终于不会蹭到邻弦了，慢速弹完了一整段。",
+            sources=(growth_source,), observed_at=now, scope=self.origin.scope,
+            actor=self.origin.actor.subject, operation_id="progress-guitar-1",
+        )
+        growth_candidate, _ = self.app.contact_schedule.growth_events.select(
+            self.origin, self.preferences(self.app, self.origin), now, purpose="creation")
+        self.assertIsNotNone(growth_candidate)
+        _, g_intents, g_marker = growth_candidate
+        self.assertEqual(g_marker["growth_id"], progressed.growth_id)
+        self.assertEqual(g_intents[0].purpose, "creation")
+        self.app.contact_schedule.growth_events.validate(self.origin, g_marker, now)
+
+    async def test_reminiscence_events_select_aged_adopted_relationship_memory(self):
+        await self.setup_contacts(**{"affection.enabled": True, "care.enabled": True})
+        self.grant(self.important, SCOPE, "relationship.memory.propose")
+        self.grant(self.important, SCOPE, "relationship.memory.review")
+        self.grant(self.important, SCOPE, "relationship.memory.adopt")
+        self.grant(self.important, SCOPE, "relationship.memory.read")
+        owner = RoleOwnerRef(self.origin.scope.installation_id, self.origin.scope.bot_id,
+                             self.origin.role_binding.role.subject_id)
+        created_at = self.clock.now()
+        mem_source = SourceRef("rel-ev-1", "conversation.input", self.origin.scope,
+                               VersionRef("rel-ev-1", 1), created_at)
+        self.app.proactive.sources.publish(
+            SourceRecord(mem_source, self.origin.audience, digest("以前聊过雨天听爵士乐"), "以前聊过雨天听爵士乐"),
+            observed_at=created_at,
+        ).unwrap()
+        proposal = RelationshipMemory(
+            memory_id="mem-jazz-rain",
+            owner=owner,
+            subject=self.origin.actor.subject,
+            scope=self.origin.scope,
+            kind=RelationshipMemoryKind.EMOTION_EPISODE,
+            interpretation="那天下雨时一起聊过窝在窗边听慢节奏爵士乐会觉得很安心。",
+            sources=(mem_source,),
+            created_at=created_at,
+            observed_at=created_at,
+            emotion_subject=EmotionSubject.HUMAN,
+        )
+        self.app.relationship_memories.propose(
+            proposal, actor=self.origin.actor, observed_at=created_at, operation_id="prop-jazz").unwrap()
+        self.app.relationship_memories.transition(
+            "mem-jazz-rain", expected_revision=1, actor=self.origin.actor,
+            scope=self.origin.scope, state=RelationshipMemoryState.REVIEWED,
+            observed_at=created_at, operation_id="review-jazz").unwrap()
+        self.app.relationship_memories.transition(
+            "mem-jazz-rain", expected_revision=2, actor=self.origin.actor,
+            scope=self.origin.scope, state=RelationshipMemoryState.ADOPTED,
+            observed_at=created_at, operation_id="adopt-jazz").unwrap()
+        self.advance(self.app, 18 * 3600)
+        rem_candidate, _ = self.app.contact_schedule.reminiscence_events.select(
+            self.origin, self.preferences(self.app, self.origin), self.clock.now())
+        self.assertIsNotNone(rem_candidate)
+        _, r_intents, r_marker = rem_candidate
+        self.assertEqual(r_marker["memory_id"], "mem-jazz-rain")
+        self.assertEqual(r_intents[0].purpose, "care")
+        self.app.contact_schedule.reminiscence_events.validate(self.origin, r_marker, self.clock.now())

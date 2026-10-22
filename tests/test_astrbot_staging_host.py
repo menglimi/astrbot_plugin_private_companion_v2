@@ -120,20 +120,20 @@ class AstrBotStagingHostTests(unittest.IsolatedAsyncioTestCase):
         self.controller.register_routes()
         routes = {route for route, _, _, _ in self.native.registered_web_apis}
         self.assertTrue({
-            "/astrbot_plugin_private_companion_v2/host-options",
-            "/astrbot_plugin_private_companion_v2/host-options/voice",
-            "/astrbot_plugin_private_companion_v2/host-options/poke",
-            "/astrbot_plugin_private_companion_v2/host-options/forward_intake",
-            "/astrbot_plugin_private_companion_v2/host-options/balance",
-            "/astrbot_plugin_private_companion_v2/storage",
+            "/astrbot_plugin_private_companion/host-options",
+            "/astrbot_plugin_private_companion/host-options/voice",
+            "/astrbot_plugin_private_companion/host-options/poke",
+            "/astrbot_plugin_private_companion/host-options/forward_intake",
+            "/astrbot_plugin_private_companion/host-options/balance",
+            "/astrbot_plugin_private_companion/storage",
         }.issubset(routes))
         storage_methods = {tuple(methods) for route, _, methods, _ in self.native.registered_web_apis
-                           if route == "/astrbot_plugin_private_companion_v2/storage"}
+                           if route == "/astrbot_plugin_private_companion/storage"}
         self.assertEqual(storage_methods, {("GET",), ("POST",)})
         self.controller.unregister_routes()
-        self.assertFalse(any(route.startswith("/astrbot_plugin_private_companion_v2/host-options")
+        self.assertFalse(any(route.startswith("/astrbot_plugin_private_companion/host-options")
                              for route, _, _, _ in self.native.registered_web_apis))
-        self.assertFalse(any(route == "/astrbot_plugin_private_companion_v2/storage"
+        self.assertFalse(any(route == "/astrbot_plugin_private_companion/storage"
                              for route, _, _, _ in self.native.registered_web_apis))
 
     async def asyncTearDown(self):
@@ -592,7 +592,7 @@ class AstrBotStagingHostTests(unittest.IsolatedAsyncioTestCase):
         new_handlers = {route: id(handler) for route, handler, _, _ in self.native.registered_web_apis}
         self.assertEqual(set(old_handlers), set(new_handlers))
         self.assertTrue(all(old_handlers[route] != new_handlers[route] for route in old_handlers))
-        self.assertTrue(all(route.startswith("/astrbot_plugin_private_companion_v2/") for route in new_handlers))
+        self.assertTrue(all(route.startswith("/astrbot_plugin_private_companion/") for route in new_handlers))
 
         old.unregister_routes()
         self.assertEqual(

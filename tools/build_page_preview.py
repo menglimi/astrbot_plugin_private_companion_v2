@@ -68,7 +68,7 @@ def reply_efficiency_mock_script():
 (() => {
   if (new URLSearchParams(location.search).get("mock") !== "reply-efficiency") return;
   const fixture = __FIXTURE__;
-  const host = "astrbot_plugin_private_companion_v2";
+  const host = "astrbot_plugin_private_companion";
   const responses = {
     "integration/manifest": {extensions: [], providers: [], summary: {extension_ready_count: 0, connected_count: 0}},
     "page/targets": {

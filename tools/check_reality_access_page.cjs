@@ -60,8 +60,8 @@ async function main() {
           hosted:() => true, scopeKey:() => qa.scope,
           selection:() => ({target_id:qa.scope, role_id:"合成测试人格"}),
           target:() => ({bot_id:"测试 Bot"}),
-          role:() => ({reality_access_api:"/astrbot_plugin_private_companion_v2/" + qa.scope + "/reality-access"}),
-          relative:path => path.slice("/astrbot_plugin_private_companion_v2/".length),
+          role:() => ({reality_access_api:"/astrbot_plugin_private_companion/" + qa.scope + "/reality-access"}),
+          relative:path => path.slice("/astrbot_plugin_private_companion/".length),
           request:async (method, endpoint, body) => {
             qa.calls.push({method,endpoint,body});
             const prefix = qa.scope + "/reality-access";

@@ -21,7 +21,7 @@ const style = fs.readFileSync(path.resolve(__dirname, '../pages/陪伴小屋/con
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const settle = async () => { for (let i = 0; i < 8; i++) await flush(); };
 
-const HOST = 'astrbot_plugin_private_companion_v2';
+const HOST = 'astrbot_plugin_private_companion';
 const NATIVE = '/' + HOST + '/perception-native';
 const CONFIG = '/' + HOST + '/config';
 const activeHarnesses = new Set();
@@ -581,6 +581,13 @@ const CONTACT_FIELDS = {
     "proactive_hour_activity_enabled", "quiet_enabled", "quiet_end", "quiet_start",
     "quiet_timezone",
   ],
+  morning: [
+    "morning_chain_enabled", "morning_nudge_delay_minutes", "morning_nudge_enabled",
+    "morning_nudge_max_attempts", "morning_role_greeting_enabled", "morning_wake_confidence_floor",
+    "routine_learning_enabled", "routine_window_days", "wake_contact_max_daily",
+    "wake_contact_min_confidence", "wake_contact_window_minutes", "wake_morning_end",
+    "wake_morning_start", "wake_require_device_evidence",
+  ],
   purposes: [
     "affection.enabled", "affection.weight", "care.enabled", "care.weight", "chat.enabled",
     "chat.weight", "creation.enabled", "creation.weight", "environment.enabled",
@@ -627,7 +634,7 @@ const CONTACT_FIELDS = {
   ],
 };
 
-test('五个设置视图渲染出的字段清单与本页写出口完全一致', async () => {
+test('设置视图渲染出的字段清单与本页写出口完全一致', async () => {
   const h = harness();
   await boot(h);
   const seen = new Set();
@@ -644,7 +651,7 @@ test('五个设置视图渲染出的字段清单与本页写出口完全一致',
     assert.deepEqual(names.slice().sort(), expected.slice(),
       view + ' 的字段清单变了。加字段要连这份清单一起改；少字段说明有控件没接上。');
   }
-  assert.equal(seen.size, 120, '五个设置视图合起来必须是 120 个 data-field 绑定');
+  assert.equal(seen.size, 134, '设置视图合起来必须是 134 个 data-field 绑定');
   /* 强度档位是五档共用一个字段，走 data-tier 而不是 data-field：
      只数 data-field 会把它整个漏掉。三个问候锚点同理（它们不是控件，是环上的热点）。 */
   h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]' ? {dataset: {view: 'dial'}} : null}});
@@ -1265,10 +1272,10 @@ test('消息测试是一级视图，未读到设置时也可以打开', async ()
   }
 });
 
-test('七个视图都能渲染出内容', async () => {
+test('八个视图都能渲染出内容', async () => {
   const h = harness();
   await boot(h);
-  const markers = {tests: 'ct-tests', purposes: 'ct-purposes', gates: 'ct-gates',
+  const markers = {tests: 'ct-tests', purposes: 'ct-purposes', gates: 'ct-gates', morning: 'ct-block',
     budgets: 'ct-budgets', sources: 'ct-sources', materials: 'ct-materials', dial: 'ct-dial'};
   for (const [view, marker] of Object.entries(markers)) {
     h.element.dispatch('click', {target: {closest: sel => sel === '[data-view]' ? {dataset: {view}} : null}});

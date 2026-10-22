@@ -21,7 +21,7 @@ from companion_v2.identity_policy.models import AuthorizationTier
 from companion_v2.identity_policy.object_access import ObjectAccessPolicy
 from companion_v2.product import PRODUCT_VERSION
 
-PREFIX = "/astrbot_plugin_private_companion_v2"
+PREFIX = "/astrbot_plugin_private_companion"
 
 
 class RegistryTests(unittest.IsolatedAsyncioTestCase):

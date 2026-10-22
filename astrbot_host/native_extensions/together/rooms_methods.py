@@ -407,6 +407,11 @@ class TogetherRoomsMethods:
     def _room_vision_provider(self, room: RoomSession | None) -> Any | None:
         if room is None or room.native_v2 is None:
             return self._get_vision_provider()
+        provider_id = str(getattr(self, 'vision_provider_id', '') or '').strip()
+        if provider_id:
+            provider = self._get_provider_by_id(provider_id)
+            return provider if (callable(getattr(provider, 'text_chat', None))
+                and self._provider_image_capability(provider) is not False) else None
         provider = self._room_chat_provider(room)
         return provider if provider is not None and self._provider_image_capability(provider) is not False else None
 

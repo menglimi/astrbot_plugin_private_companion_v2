@@ -12,7 +12,7 @@ from companion_v2.role_work.state.configuration import GROUP, target_for
 from .growth_api import _source
 from .management_identity import dashboard_operator
 
-PREFIX = "/astrbot_plugin_private_companion_v2/state"
+PREFIX = "/astrbot_plugin_private_companion/state"
 
 
 class StateWebAPI:

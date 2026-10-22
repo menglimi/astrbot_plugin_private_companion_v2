@@ -20,7 +20,14 @@ class ReleaseSecretDetectionTests(unittest.TestCase):
         excluded = (
             "pages/陪伴小屋/shell-preview.html",
             "pages/陪伴小屋/shell-preview-mock.html",
+            "docs/page-designs/01-cottage-home.md",
+            "docs/page-designs/learning-track-preview.html",
+            "pages/陪伴小屋/design-previews/old/index.html",
+            "docs/RELEASE_V2_0.md",
+            "docs/INTEGRATION_ACCEPTANCE_V2_0.md",
+            "docs/V670_TO_V700_MIGRATION_20261019.md",
             "fixtures/reply_efficiency_preview.json",
+            "tests/bubble_bonbon_smoke.mjs",
             "pages/陪伴小屋/semantic-page.css.backup",
             "tests/group-test.out",
             "tools/_archive/old_check.py",
@@ -34,6 +41,13 @@ class ReleaseSecretDetectionTests(unittest.TestCase):
         self.assertNotIn("pages/陪伴小屋/shell-preview.html", names)
         self.assertNotIn("pages/陪伴小屋/shell-preview-mock.html", names)
         self.assertNotIn("fixtures/reply_efficiency_preview.json", names)
+        self.assertFalse(any("/page-designs/" in "/" + name for name in names))
+        self.assertFalse(any("/design-previews/" in "/" + name for name in names))
+        self.assertNotIn("docs/V670_TO_V700_MIGRATION_20261019.md", names)
+        self.assertNotIn("docs/RELEASE_V2_0.md", names)
+        self.assertNotIn("docs/INTEGRATION_ACCEPTANCE_V2_0.md", names)
+        self.assertNotIn("tests/bubble_bonbon_smoke.mjs", names)
+        self.assertFalse(any(name.startswith("games/") for name in names))
         self.assertNotIn("pages/陪伴小屋/semantic-page.css.backup", names)
 
     def test_page_build_manifest_omits_local_shell_preview(self):

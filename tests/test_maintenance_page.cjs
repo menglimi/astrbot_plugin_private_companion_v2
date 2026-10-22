@@ -65,7 +65,7 @@ function harness(responses) {
   };
   const window = {
     CompanionProduct: {
-      role: () => ({model_api: '/astrbot_plugin_private_companion_v2/model', role_id: 'role-a'}),
+      role: () => ({model_api: '/astrbot_plugin_private_companion/model', role_id: 'role-a'}),
       bridgeNow: () => bridge,
     },
     lucide: {createIcons() {}},
@@ -1085,7 +1085,7 @@ test('maintenance offers today, total, date drilldown, ranked detail, cache and 
   assert.match(root.innerHTML, /请求前缀签名/);
   assert.match(root.innerHTML, /近期事件与运行快照/);
   assert.match(root.innerHTML, /V2 SQLite 存储/);
-  assert.match(root.innerHTML, /REQ-041/);
+  assert.match(root.innerHTML, /本次管理请求/);
   assert.match(root.innerHTML, /统一身份与隔离/);
   const balanceReads = requests.filter(item => item[0] === 'GET' && item[1].endsWith('/balance')).length;
   root.click('[data-balance-refresh]');
@@ -1100,7 +1100,7 @@ test('maintenance offers today, total, date drilldown, ranked detail, cache and 
   assert.doesNotMatch(root.innerHTML, /<main>/);
 
   root.click('[data-token-source]', {tokenSource: 'memory'});
-  assert.match(root.innerHTML, /SOURCE \/ NOT CONNECTED/);
+  assert.match(root.innerHTML, /来源 \/ 未连接/);
   assert.match(root.innerHTML, /记忆插件 Token/);
   assert.doesNotMatch(root.innerHTML, /class="maint-token-hero"/);
   assert.match(root.innerHTML, /当前角色数据不会替代它/);
@@ -1149,7 +1149,7 @@ test('maintenance offers today, total, date drilldown, ranked detail, cache and 
   root.click('[data-diagnostic-category]', {diagnosticCategory: 'identity'});
   assert.match(root.innerHTML, /data-diagnostic-category="identity" aria-pressed="true" class="is-active" title="管理身份与角色账本边界/);
   assert.match(root.innerHTML, /data-evidence-kind="identity"/);
-  assert.match(root.innerHTML, /REQ-041 结果为什么只显示状态/);
+  assert.match(root.innerHTML, /管理身份校验为什么只显示结论/);
   let evidenceOpened = false;
   let focusedIdentity = false;
   root.querySelector = selector => selector === '[data-focus-target="identity-evidence"]' ? {

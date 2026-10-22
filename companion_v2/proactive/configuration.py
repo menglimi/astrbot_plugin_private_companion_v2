@@ -178,7 +178,7 @@ class ContactField(FieldDefinition):
                 return instant.isoformat() if instant else ""
             if self.field_id.endswith((".quiet_start", ".quiet_end", ".meal_lunch_time", ".meal_dinner_time",
                                        ".weather_checkin_time", ".date_checkin_time",
-                                       ".insomnia_night_start", ".insomnia_night_end")):
+                                       ".insomnia_night_start", ".insomnia_night_end", ".wake_morning_start", ".wake_morning_end")):
                 local_time(value)
             if self.field_id.endswith(".proactive_intensity_preset"):
                 return intensity_preset(value)
@@ -266,6 +266,15 @@ def configuration_fields():
                 "greeting_evening_window": "20:10-21:20",
                 "insomnia_night_start": "23:00", "insomnia_night_end": "06:00",
                 "insomnia_require_sleep_state": False,
+                # Morning chain (T43): role wake greeting, routine learning and one
+                # bounded wake-up confirmation. All switches default off.
+                "morning_chain_enabled": False,
+                "morning_role_greeting_enabled": True,
+                "morning_nudge_enabled": True,
+                "routine_learning_enabled": True,
+                "wake_require_device_evidence": False,
+                "wake_morning_start": "05:00",
+                "wake_morning_end": "11:30",
                 # Appointment execution (T39) and the post-draft persona judge (T41).
                 "enable_llm_proactive_persona_judge": False,
                 "proactive_persona_judge_exempt_purposes": ""}
@@ -337,11 +346,18 @@ def configuration_fields():
             ("appointment_lag_minutes", 0, 0, 180),
             ("appointment_pre_silence_minutes", 20, 0, 240),
             ("proactive_persona_judge_threshold", 62, 0, 100),
-            ("proactive_persona_judge_cache_minutes", 180, 0, 720))) + tuple(
+            ("proactive_persona_judge_cache_minutes", 180, 0, 720),
+            # T43 morning chain: one wake-up confirmation at most, bounded window.
+            ("morning_nudge_delay_minutes", 25, 10, 90),
+            ("morning_nudge_max_attempts", 1, 0, 2),
+            ("routine_window_days", 60, 14, 180),
+            ("wake_contact_window_minutes", 90, 15, 240),
+            ("wake_contact_min_confidence", 65, 40, 100),
+            ("wake_contact_max_daily", 1, 0, 3))) + tuple(
         ContactField(GROUP + "." + name, GROUP, GROUP, ValueKind.INTEGER, default,
             minimum=minimum, maximum=maximum, layers=LAYERS, apply_mode=ApplyMode.IMMEDIATE, owner_id=GROUP)
         for name, default, minimum, maximum in (
-            ("generation_history_limit", 8, 0, 8),
+            ("generation_history_limit", 8, 0, 64),
             ("history_max_chars", 8192, 0, 8192),
             ("official_alert_poll_minutes", 5, 1, 1440),
             ("weather_sample_minutes", 60, 10, 1440))) + (ContactField(
@@ -354,7 +370,9 @@ def configuration_fields():
         GROUP + ".silence_feedback_penalty", GROUP, GROUP, ValueKind.PROBABILITY, 0.2,
         layers=LAYERS, apply_mode=ApplyMode.IMMEDIATE, owner_id=GROUP), ContactField(
         GROUP + ".external_event_self_link_weight", GROUP, GROUP, ValueKind.WEIGHT, 1.5,
-        minimum=0.1, maximum=5.0, layers=LAYERS, apply_mode=ApplyMode.IMMEDIATE, owner_id=GROUP))
+        minimum=0.1, maximum=5.0, layers=LAYERS, apply_mode=ApplyMode.IMMEDIATE, owner_id=GROUP),
+        ContactField(GROUP + ".morning_wake_confidence_floor", GROUP, GROUP, ValueKind.PROBABILITY, 0.25,
+            layers=LAYERS, apply_mode=ApplyMode.IMMEDIATE, owner_id=GROUP))
 
 
 def with_contact_fields(registry):

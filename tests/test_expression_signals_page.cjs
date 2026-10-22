@@ -6,7 +6,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const source = fs.readFileSync(path.join(__dirname, "..", "pages", "陪伴小屋", "expression-signals-page.js"), "utf8");
-const HOST = "astrbot_plugin_private_companion_v2";
+const HOST = "astrbot_plugin_private_companion";
 const flush = () => new Promise(resolve => setTimeout(resolve, 0));
 
 test("规则库导出与 V1 分享包预览/导入使用已选择角色路由", async () => {

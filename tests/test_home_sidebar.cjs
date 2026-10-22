@@ -186,6 +186,21 @@ test("空日程仍说明自动规划状态，并区分调度巡检与日程覆�
   assert.match(renderSchedule({now,state,life:life([])}),/日历写入尚未开启/);
 });
 
+test("当日规划失败时显示原因和后续评估，不把空日历画成全天空闲", () => {
+  const state=status([]);
+  state.planning={enabled:true,calendar_enabled:true,next_check:"2026-09-30T04:01:00Z",
+    daily_result:{state:"failed",code:"provider_wait_timed_out"},next_review_at:"2026-09-30T10:00:00Z"};
+  const html=renderSchedule({now,state,life:life([])});
+  assert.match(html,/今日规划尚未生成/);
+  assert.match(html,/当日规划未完成：模型等待超时/);
+  assert.match(html,/18:00 重新评估剩余时段/);
+  assert.doesNotMatch(html,/今日暂无安排|当前未安排|调度巡检/);
+  state.planning.running=true;
+  assert.match(renderSchedule({now,state,life:life([])}),/今日规划正在生成/);
+  state.planning.running=false;state.planning.daily_result={state:"succeeded",saved:0};
+  assert.match(renderSchedule({now,state,life:life([])}),/今日暂无安排/);
+});
+
 test("四项图标用不同状态呈现，无法归类的自由描述原样保留在详情中", () => {
   const state=status([]);state.state.values={energy:12,health:"恢复中",hunger:"有点饿",sleep:"睡不着"};
   const html=renderState({now,state,life:life([])});

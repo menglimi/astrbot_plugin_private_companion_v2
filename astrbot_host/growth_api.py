@@ -16,7 +16,7 @@ from companion_v2.role_work.journal.self_review_management import SelfReviewMana
 from .management_identity import dashboard_operator
 
 
-PREFIX = "/astrbot_plugin_private_companion_v2/growth"
+PREFIX = "/astrbot_plugin_private_companion/growth"
 
 
 def _source(value):

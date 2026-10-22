@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from astrbot.api import logger
+from companion_v2.execution.models import TaskError
 
 from .helpers import _now_ts, _safe_float, _safe_int, _single_line
 
@@ -502,10 +503,10 @@ class RealityTouchCameraMixin:
         user_id: str = "",
     ) -> dict[str, Any]:
         if not self._reality_touch_camera_user_eligible(user_id):
-            raise ValueError("主机摄像头只允许 AstrBot 管理员或主要用户本人使用")
+            raise TaskError("camera_user_ineligible", "主机摄像头只允许 AstrBot 管理员或主要用户本人使用")
         enabled = bool(payload.get("camera_enabled"))
         if enabled and not self._reality_touch_camera_consented(user):
-            raise ValueError("该用户尚未在私聊中完成摄像头独立知情确认")
+            raise TaskError("camera_consent_required", "请先确认该用户的摄像头授权，再保存启用策略")
         policy = self._reality_touch_camera_policy(user)
         policy["enabled"] = enabled
         policy["proactive_mode"] = self._normalize_reality_touch_camera_proactive_mode(

@@ -142,7 +142,7 @@
   let acquaintanceDirectory = null;
   const accountApi = "accounts";
   const TOPOLOGY_SESSION_PAGE_SIZE = 5;
-  const TOPOLOGY_PIN_STORAGE_KEY = "astrbot_plugin_private_companion_v2.topology.pinned_sessions";
+  const TOPOLOGY_PIN_STORAGE_KEY = "astrbot_plugin_private_companion.topology.pinned_sessions";
   let topologyPinnedSessions = readPinnedTopologySessions();
 
   function readPinnedTopologySessions() {
@@ -152,7 +152,7 @@
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed)) return new Set(parsed.filter(value => typeof value === "string" && value));
       }
-      const legacy = window.localStorage.getItem("astrbot_plugin_private_companion_v2.topology.pinned_session");
+      const legacy = window.localStorage.getItem("astrbot_plugin_private_companion.topology.pinned_session");
       const migrated = new Set(legacy ? [legacy] : []);
       if (migrated.size) writePinnedTopologySessions(migrated);
       return migrated;
@@ -163,7 +163,7 @@
     try {
       if (values.size) window.localStorage.setItem(TOPOLOGY_PIN_STORAGE_KEY, JSON.stringify([...values]));
       else window.localStorage.removeItem(TOPOLOGY_PIN_STORAGE_KEY);
-      window.localStorage.removeItem("astrbot_plugin_private_companion_v2.topology.pinned_session");
+      window.localStorage.removeItem("astrbot_plugin_private_companion.topology.pinned_session");
       return true;
     } catch { return false; }
   }
@@ -191,6 +191,29 @@
   };
   const personaName = name => name === "[%None]" ? "未指定人格" : !name ? "未确定人格" : name;
   const personaLabel = item => personaName(item.name || item.personaId);
+  const stripRoleChannel = value => String(value || "").replace(/\s*[-_]\s*(?:私聊|群聊)\s*$/, "").trim();
+  const roleDisplayName = (roleId, personaLabels = []) => {
+    const key = String(roleId || "").trim();
+    if (key && !/^(role-|staging-|dashboard:|onebot-user:)/.test(key))
+      return stripRoleChannel(key) || "当前角色";
+    const labels = [...new Set(personaLabels.map(label =>
+      stripRoleChannel(personaName(label))).filter(Boolean))];
+    return labels.join("、") || key || "当前角色";
+  };
+  const personaSourceLabels = Object.freeze({
+    v2_window_override: "V2 窗口覆盖",
+    astrbot_selection: "AstrBot 当前选择",
+    role_mapping: "仅按角色映射",
+    unresolved: "未确定",
+  });
+  function personaSourceLabel(row) {
+    if (personaSourceLabels[row?.persona_source]) return personaSourceLabels[row.persona_source];
+    if (row?.persona_override) return personaSourceLabels.v2_window_override;
+    if (!row || row.details_available === false || !(row.persona_id || row.persona_override))
+      return personaSourceLabels.unresolved;
+    if (row.persona_pinned === true) return personaSourceLabels.role_mapping;
+    return row.native === true ? personaSourceLabels.astrbot_selection : personaSourceLabels.unresolved;
+  }
   const topologySessionPinKey = row => row?.session_key ? `session:${row.session_key}`
     : row?.managed && row.target_id ? `target:${row.target_id}` : "";
   function personaChoiceLabel(item) {
@@ -270,6 +293,10 @@
         account.roleKeys.add(roleKey);
         role.accountKeys.add(account.key);
       }
+    }
+    for (const role of roles.values()) {
+      role.name = roleDisplayName(role.roleId, [...role.personaKeys]
+        .map(key => personas.get(key)?.label || personas.get(key)?.personaId));
     }
     targets.forEach((target, targetIndex) => {
       const account = ensureAccount(target);
@@ -430,10 +457,22 @@
     if (kind === "account") detail.textContent = `${item.sessionKeys.size} 个原生会话窗口`;
     else if (kind === "persona") detail.textContent = item.roleId
       ? bindingsDirty ? "角色映射尚未保存" : "随角色自动接入窗口" : "归入角色后自动运行";
-    else detail.textContent = item.raw.details_available === false
-      ? "详情暂未读到；账号与人格未推断"
-      : `${item.draft ? "角色映射尚未保存" : item.registered ? "随角色自动运行" : "等待归入角色"}${item.raw.native
-        ? item.raw.session_enabled === false ? " · 会话已停用" : item.raw.llm_enabled === false ? " · 回复已关闭" : " · 回复已开启" : ""}`;
+    else {
+      const row = item.raw;
+      const selectedPersona = item.personaKeys.map(key =>
+        topologySnapshot?.personas.find(persona => persona.key === key)).find(Boolean);
+      const persona = row.details_available === false ? "未确定人格"
+        : personaLabel(selectedPersona || {personaId: row.persona_override || row.persona_id});
+      const role = item.roleId
+        ? topologySnapshot?.roles.find(entry => entry.key === item.roleKey)?.name || roleDisplayName(item.roleId)
+        : "未归入角色";
+      const mapping = item.draft ? "角色映射未保存" : item.registered ? "随角色运行"
+        : row.details_available === false ? "详情未读到" : "等待归入角色";
+      const runtime = row.native
+        ? row.session_enabled === false ? "会话已停用" : row.llm_enabled === false ? "回复已关闭" : "回复已开启"
+        : "尚未建立 AstrBot 会话";
+      detail.textContent = `人格 ${persona} → 角色 ${role} · 来源：${personaSourceLabel(row)} · ${mapping} · ${runtime}`;
+    }
     button.append(head, meta, detail);
     button.style.setProperty("--node-index", String(index));
     wireTopologyControl(button, item, kind);
@@ -483,6 +522,7 @@
     count.textContent = `${personas.length} 个人格`;
     heading.append(title, count);
     wireTopologyControl(heading, role, "role");
+    if (role.mapped && role.name !== role.roleId) heading.title += " · 内部标识 " + role.roleId;
     const list = document.createElement("div");
     list.className = "topology-personas";
     list.append(...personas.map((persona, personaIndex) => topologyNode(persona, "persona", index + personaIndex)));
@@ -676,7 +716,7 @@
     if (item.kind !== "session") {
       $("session-manager-meta").textContent = item.kind === "account"
         ? `${platformLabel(item.platform_id)} · ${mappedRoleCount(item)} 个角色 · ${item.sessionKeys.size} 个原生会话`
-        : item.kind === "persona" ? `${item.roleId ? `角色 ${item.roleId}` : "未归入角色"} · ${item.sessionKeys.size} 个会话窗口`
+        : item.kind === "persona" ? `${item.roleId ? `角色 ${topologySnapshot.roles.find(role => role.key === item.roleKey)?.name || item.roleId}` : "未归入角色"} · ${item.sessionKeys.size} 个会话窗口`
           : `${item.personaKeys.size} 个 AstrBot 人格 · ${item.accountKeys.size} 个账号 · ${item.sessionKeys.size} 个会话窗口`;
       const appendRelated = (label, key) => {
         const button = document.createElement("button");
@@ -708,10 +748,18 @@
     }
     const row = item.raw;
     const account = topologySnapshot.accounts.find(entry => entry.key === item.accountKey);
-    $("session-manager-meta").textContent = `${platformLabel(item.platform)} · ${accountChoiceLabel(account || {})}`;
-    $("session-manager-state").textContent = !row.native ? "尚未建立 AstrBot 会话"
+    const selectedPersona = item.personaKeys.map(key =>
+      topologySnapshot.personas.find(persona => persona.key === key)).find(Boolean);
+    const persona = row.details_available === false ? "未确定人格"
+      : personaLabel(selectedPersona || {personaId: row.persona_override || row.persona_id});
+    const mappedRole = item.roleId
+      ? topologySnapshot.roles.find(entry => entry.key === item.roleKey)?.name || roleDisplayName(item.roleId)
+      : "未归入角色";
+    $("session-manager-meta").textContent = `${platformLabel(item.platform)} · ${accountChoiceLabel(account || {})} · ${item.label}`;
+    const mappingState = !row.native ? "尚未建立 AstrBot 会话"
       : item.draft ? "角色映射尚未保存" : item.registered ? "已归入角色，随角色自动运行"
         : "AstrBot 已发现，等待账号下的人格归入角色";
+    $("session-manager-state").textContent = `人格 ${persona} → 角色 ${mappedRole} · 来源：${personaSourceLabel(row)} · ${mappingState}`;
   }
 
   function renderGroupNetwork(row) {
@@ -1053,9 +1101,7 @@
     if (!personaId) return false;
     return targets.some(target => target?.native && String(target.bot_id || "") === String(persona.bot_id || "")
       && (!account || (target.platform_id === account.platform_id && target.account_id === account.account_id))
-      && (String(target.persona_id ?? "") === personaId
-        || String(target.persona_override || "") === personaId
-        || (target.roles || []).some(role => (role.persona_ids || []).map(String).includes(personaId))));
+      && String(target.persona_override || target.persona_id || "") === personaId);
   }
 
   function roleBindingCard(account, roleId = "", mappings = []) {
@@ -1072,6 +1118,7 @@
     input.value = roleId;
     input.placeholder = "角色名";
     input.setAttribute("aria-label", "角色名");
+    input.title = roleId;
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "button button-quiet binding-remove";
@@ -1080,7 +1127,23 @@
       const owner = card.closest(".account-binding-card");
       card.remove(); markBindingsDirty(owner);
     });
-    heading.append(input, remove);
+    const personaLabels = mappings.map(row => {
+      const native = (bindingConfig?.discovered?.personas || []).find(choice =>
+        choice.bot_id === row.bot_id && choice.persona_id === row.persona_id);
+      return native?.label || row.persona_id;
+    });
+    const displayName = roleDisplayName(roleId, personaLabels);
+    if (roleId && displayName !== roleId) {
+      const identity = document.createElement("div");
+      identity.className = "role-binding-identity";
+      const name = document.createElement("strong");
+      name.textContent = displayName;
+      const hint = document.createElement("small");
+      hint.textContent = "内部标识 · 保留以继续关联已有资料";
+      input.setAttribute("aria-label", "内部角色标识");
+      identity.append(name, input, hint);
+      heading.append(identity, remove);
+    } else heading.append(input, remove);
     const choices = document.createElement("div");
     choices.className = "role-persona-choices";
     const selected = new Set(mappings.map(row => nativePersonaKey(row.bot_id, row.persona_id)));

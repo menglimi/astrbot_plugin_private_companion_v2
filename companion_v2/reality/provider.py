@@ -21,7 +21,7 @@ from typing import Any, Callable
 
 
 SCHEMA = "companion.native-provider.v1"
-PLUGIN_ID = "astrbot_plugin_private_companion_v2.reality"
+PLUGIN_ID = "astrbot_plugin_private_companion.reality"
 PROVIDER_ID = "reality.native"
 VERSION = "0.4.2"
 # Device verbs the provider will forward.  "power" is the original single

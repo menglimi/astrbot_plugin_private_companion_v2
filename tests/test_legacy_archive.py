@@ -120,5 +120,26 @@ class LegacyArchiveTests(unittest.TestCase):
             self.assertEqual(verified["excluded_count"], 1)
 
 
+    def test_archived_work_can_be_inspected_without_replaying_or_changing_it(self):
+        import sqlite3
+        from companion_v2.legacy.archived_work import archived_work_inventory, archived_work_rows
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);source=root/'v1';(source/'framework_work').mkdir(parents=True)
+            database=source/'framework_work'/'work.db'
+            with sqlite3.connect(database) as connection:
+                connection.executescript("CREATE TABLE jobs(id TEXT,status TEXT); INSERT INTO jobs VALUES('old','interrupted_unknown');")
+            connection.close()
+            before=hashlib.sha256(database.read_bytes()).hexdigest()
+            plan=build_v1_archive_plan(source);copy_v1_archive(plan,root/'archive')
+            inventory=archived_work_inventory(root/'archive')
+            self.assertEqual(inventory['archives'][0]['areas']['work']['jobs'],1)
+            rows=archived_work_rows(root/'archive',plan.fingerprint,'work','jobs')
+            self.assertEqual(rows['items'][0]['status'],'interrupted_unknown')
+            self.assertFalse(rows['execution_restored'])
+            with self.assertRaises(ValueError):
+                archived_work_rows(root/'archive','../v1','work','jobs')
+            self.assertEqual(hashlib.sha256(database.read_bytes()).hexdigest(),before)
+
+
 if __name__ == "__main__":
     unittest.main()

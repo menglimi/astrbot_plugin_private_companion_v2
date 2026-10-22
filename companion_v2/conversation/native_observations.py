@@ -5,7 +5,7 @@ a platform delivery receipt or prove a recipient saw the text. Generated output
 stays ``output_observed`` until that callback, and is excluded from recall.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import logging
 
@@ -149,6 +149,39 @@ class NativeConversationObservations:
             for statement in STATEMENTS:
                 connection.execute(statement)
 
+    def _awareness_enabled(self, context):
+        owner = getattr(self.messages, "cross_window", None)
+        try:
+            return owner is not None and owner.enabled(context)
+        except Exception:
+            return False
+
+    def _peer_count(self, context, at):
+        """Distinct other speakers in a short group window; metadata only."""
+        if context.scope.kind is not ScopeKind.GROUP:
+            return 0
+        owner = getattr(self.messages, "cross_window", None)
+        try:
+            minutes = owner.peer_minutes(context) if owner is not None else 5
+        except Exception:
+            minutes = 5
+        try:
+            rows = input_rows_for_context(self.runtime, context, start=stamp(at - timedelta(minutes=minutes)),
+                                          end=stamp(at), limit=64)
+        except Exception:
+            return 0
+        current = context.actor.principal.native_account_id
+        accounts = set()
+        for row in rows:
+            try:
+                original = TaskContext.restore(json.loads(row["context_json"]))
+            except Exception:
+                continue
+            account = original.actor.principal.native_account_id
+            if account and account != current:
+                accounts.add(account)
+        return min(64, len(accounts))
+
     def capture_input(self, context, native_input, *, turn_id):
         if (context.scope != native_input.route.scope or context.actor.principal != native_input.principal
                 or context.role_binding.role != native_input.role or context.audience != native_input.recipients):
@@ -162,7 +195,11 @@ class NativeConversationObservations:
         identifier = "core-input-" + digest([context.scope, context.role_binding.role,
                                              context.actor.subject, native_input.event_id])
         reference = self._record(context, identifier, turn_id, native_input.event_id, native_input.text,
-                                 native_input.at, kind="input", state="input_observed")
+                                 native_input.at, kind="input", state="input_observed",
+                                 awareness_enabled=self._awareness_enabled(context),
+                                 peer_count=self._peer_count(context, native_input.at),
+                                 quote_sender_ids=tuple(
+                                     quote.sender_id for quote in getattr(native_input, "quotes", ())))
         NativeConversationTurns(self.runtime).admit(context, native_input, turn_id, reference)
         return reference
 
@@ -172,7 +209,8 @@ class NativeConversationObservations:
         if type(text) is not str or not text.strip():
             return None
         identifier = "core-output-" + digest([turn_id, text])
-        return self._record(context, identifier, turn_id, event_id, text, at, kind="assistant", state=state)
+        return self._record(context, identifier, turn_id, event_id, text, at, kind="assistant", state=state,
+                            awareness_enabled=self._awareness_enabled(context))
 
     def capture_together(self, context, *, observation_id, event_id, text, at, kind):
         """A real room input or successful WebSocket send, with its own source owner."""
@@ -193,7 +231,8 @@ class NativeConversationObservations:
         return self._record(context, observation_id, event_id, event_id, text, at, kind="assistant",
             state="send_returned", source_owner=REALITY_ASSISTANT_OWNER)
 
-    def _record(self, context, identifier, turn_id, event_id, text, at, *, kind, state, source_owner=None):
+    def _record(self, context, identifier, turn_id, event_id, text, at, *, kind, state,
+                source_owner=None, awareness_enabled=False, peer_count=0, quote_sender_ids=()):
         require(self.tasks.check_context_access(context, action="conversation.reply", observed_at=self.tasks.now()))
         with self.runtime.transaction() as connection:
             existing = connection.execute("SELECT * FROM conversation_native_observations WHERE observation_id = ?",
@@ -232,7 +271,9 @@ class NativeConversationObservations:
             if kind == "input" and existing is None:
                 self._observe_input(connection, context, inbound_event({
                     "event_id": event_id, "context_json": encode(context), "source_json": encode(reference),
-                    "content_hash": record.content_hash, "observed_at": stamp(issued_at)}), record.payload)
+                    "content_hash": record.content_hash, "observed_at": stamp(issued_at)}), record.payload,
+                    awareness_enabled=awareness_enabled, peer_count=peer_count,
+                    quote_sender_ids=quote_sender_ids)
             elif core_reply and kind == "assistant" and state == "send_returned":
                 from .native_turns import NativeConversationTurns
                 NativeConversationTurns(self.runtime).sent(turn_id, at, observation_id=reference.source_id)
@@ -240,6 +281,10 @@ class NativeConversationObservations:
                 if owner is not None:
                     self._optional_observer(connection, "expression_sent", lambda: owner.confirm_delivery(
                         connection, batch_id=turn_id, context=context, delivered_at=at))
+                awareness = getattr(self.messages, "cross_window", None)
+                if awareness_enabled and awareness is not None:
+                    self._optional_observer(connection, "cross_window_reply", lambda: awareness.record_reply(
+                        connection, context, at, enabled=True))
             return reference
 
     @staticmethod
@@ -255,7 +300,8 @@ class NativeConversationObservations:
             connection.execute("RELEASE SAVEPOINT " + savepoint)
             logger.warning("[CompanionV2] 核心聊天衍生观察降级 owner=%s error_type=%s", name, type(error).__name__)
 
-    def _observe_input(self, connection, context, event, text):
+    def _observe_input(self, connection, context, event, text, *, awareness_enabled=False, peer_count=0,
+                       quote_sender_ids=()):
         for name in ("acquaintance", "habits"):
             owner = getattr(self.messages, name, None)
             if owner is not None:
@@ -280,3 +326,8 @@ class NativeConversationObservations:
             if network is not None:
                 self._optional_observer(connection, "group_network", lambda: network.observe(
                     context, event, connection, text=text))
+        awareness = getattr(self.messages, "cross_window", None)
+        if awareness_enabled and awareness is not None:
+            self._optional_observer(connection, "cross_window", lambda: awareness.record_input(
+                connection, context, event.received_at, text, event.event_id, enabled=True,
+                source=event.source, peer_count=peer_count, quote_sender_ids=quote_sender_ids))

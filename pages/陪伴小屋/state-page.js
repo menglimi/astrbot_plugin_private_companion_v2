@@ -1,6 +1,6 @@
 "use strict";
 window.CompanionStatePage = (() => {
-  const HOST = "astrbot_plugin_private_companion_v2";
+  const HOST = "astrbot_plugin_private_companion";
   const PREFIX = "/" + HOST + "/";
   const phaseNames = {menstrual:"经期", follicular:"卵泡期", pre_ovulation:"排卵前", ovulation:"排卵期",
     luteal:"黄体期", pms:"经前期", recovery:"恢复期"};
@@ -185,29 +185,50 @@ window.CompanionStatePage = (() => {
     const explain=code=>presentationReasons[code]||reason(code);
     const configured=option=>!settings[option]?"开关已关闭":effective[option]?.allowed
       ?"已开启 · 授权通过":effective[option]?.reason?`已开启 · ${explain(effective[option].reason)}`:"已开启 · 授权待核对";
-    const activity=(value,typing=false)=>{
+    /* 三条通道的 idle 含义不同：正在输入是「本轮没有回复」，在线状态是
+       「这轮没轮到它」（短文案或日程文案优先），短状态是「没有待展示文案」。
+       分开写，别让在线状态那一行显示「暂无待展示文案」。 */
+    const activity=(value,channel="custom")=>{
       if(!value)return "尚无运行诊断";
-      const labels=typing?{idle:"当前会话没有进行中的回复",waiting:"等待刷新任务",refreshing:"刷新任务运行中",suppressed:"本轮已停止刷新"}
-        :{idle:"暂无待展示文案",waiting:"等待处理当前文案",recorded:"相同文案已有请求记录，不自动重发",deduplicated:"账号已有相同文案记录，不重复请求"};
-      return [labels[value.state]||({disabled:"未启用",unavailable:"展示端口不可用",blocked:"当前条件未满足",paused:"展示已暂停"})[value.state]||"状态待核对",
+      const idle={typing:"当前会话没有进行中的回复",online:"当前不展示在线状态（日程文案或短状态优先）",custom:"暂无待展示文案"};
+      const labels={
+        typing:{waiting:"等待刷新任务",refreshing:"刷新任务运行中",suppressed:"本轮已停止刷新"},
+        online:{waiting:"等待上报在线状态",recorded:"相同状态已有请求记录，不自动重发",deduplicated:"账号已有相同状态记录，不重复请求"},
+        custom:{waiting:"等待处理当前文案",recorded:"相同文案已有请求记录，不自动重发",deduplicated:"账号已有相同文案记录，不重复请求"},
+      }[channel]||{};
+      return [value.state==="idle"?idle[channel]:labels[value.state]
+        ||({disabled:"未启用",unavailable:"展示端口不可用",blocked:"当前条件未满足",paused:"展示已暂停"})[value.state]||"状态待核对",
         value.reason?explain(value.reason):null].filter(Boolean).join(" · ");
     };
-    const typing=diagnostics?.typing, custom=diagnostics?.custom_status;
+    const typing=diagnostics?.typing, custom=diagnostics?.custom_status, online=diagnostics?.online_status;
     const basis=value=>({calendar_plan:"当前日程的公开文案",role_simulation:"角色模拟的公开文案"})[value]||"公开文案";
+    /* 在线模式的四个档位与适配层的映射一致（delivery 侧 status 10/30/50/40）。 */
+    const onlineMode=value=>({online:"在线",away:"离开",busy:"忙碌",invisible:"隐身"})[value]||value;
     const configuration=`<dl class="state-presentation-settings"><div><dt>正在输入 · ${e(configured("typing_enabled"))}</dt>
-      <dd>${e(activity(typing,true))}</dd><dd class="state-presentation-note">配置刷新间隔：${e(typing?.refresh_seconds??settings.typing_refresh_seconds??"未提供")} 秒</dd></div>
+      <dd>${e(activity(typing,"typing"))}</dd><dd class="state-presentation-note">配置刷新间隔：${e(typing?.refresh_seconds??settings.typing_refresh_seconds??"未提供")} 秒</dd></div>
+      <div><dt>在线状态 · ${e(configured("online_status_enabled"))}</dt><dd>${e(activity(online,"online"))}</dd>
+      ${online?.desired?.mode?`<dd class="state-presentation-note">待展示：${e(onlineMode(online.desired.mode))} · ${e(basis(online.desired.basis))}</dd>`:""}
+      <dd class="state-presentation-note">与自定义短状态共用同一路：同一时刻只报一种，在线状态优先；日程里写了公开文案时以日程为准。</dd></div>
       <div><dt>自定义短状态 · ${e(configured("presence_enabled"))}</dt><dd>${e(activity(custom))}</dd>
       ${custom?.desired?`<dd class="state-presentation-note">待展示：${e(custom.desired.wording)} · ${e(basis(custom.desired.basis))}</dd>`:""}</div></dl>`;
     const items=Object.entries(receipts).filter(([,result])=>result&&typeof result==="object");
+    /* 回复确认按账号存一份，三种通道共用它；标名字要靠请求内容本身，
+       不能只看 key——否则在线状态的确认会被写成「自定义短状态」，
+       而请求文案一栏对模式类的请求是空的（没有 wording 字段）。 */
+    const channelName=(key,result)=>key.startsWith("typing:")?"正在输入"
+      :result?.desired?.mode?"在线状态":"自定义短状态";
+    const desiredText=result=>result.desired?.wording
+      ?`${e(result.desired.wording)} · ${e(basis(result.desired.basis))}`
+      :result.desired?.mode?`${e(onlineMode(result.desired.mode))} · ${e(basis(result.desired.basis))}`:"";
     const label=(key,result)=>result.state==="unknown"?(key.startsWith("typing:")?"确认未知，本轮不再重试":"确认未知，相同文案不自动重发")
       :({accepted:"平台已受理",failed:"平台拒绝",not_started:"未发送（授权或环境未满足）",blocked:"展示被阻止，未发送"})[result.state]||"状态未识别";
     return `<section class="state-presentation${receiptsOnly?" state-config-group":""}"><header>${receiptsOnly?'<span class="state-config-index">02</span><div>':""}<h4>${receiptsOnly?"平台展示确认":"QQ 平台展示确认"}</h4>
       <p>受理确认不代表客户端当前展示状态。${diagnostics?.observed_at?`诊断时间：${when(diagnostics.observed_at)}`:""}</p>${receiptsOnly?"</div>":""}</header>
       ${receiptsOnly?"":configuration}${receipts.state==="preview"?"<p>当前为本地预览，未连接 QQ 展示能力。</p>":items.length?`<ul class="state-receipts">${items.map(([key,result],index)=>`<li>
-        <strong>${key.startsWith("typing:")?"正在输入":"自定义短状态"}</strong><div><span class="state-receipt-result ${e(result.state)}">${e(label(key,result))}</span>
+        <strong>${e(channelName(key,result))}</strong><div><span class="state-receipt-result ${e(result.state)}">${e(label(key,result))}</span>
         <small class="state-receipt-detail">${result.recorded_at?`记录于 ${when(result.recorded_at)}`:"旧确认未记录时间"}${key.startsWith("typing:")?" · 仅保留本次插件运行记录":""}</small>
         ${result.code?`<small class="state-receipt-detail">${e(explain(result.code))}</small>`:""}
-        ${result.desired?`<small class="state-receipt-detail">请求文案：${e(result.desired.wording)} · ${e(basis(result.desired.basis))}</small>`:""}
+        ${desiredText(result)?`<small class="state-receipt-detail">请求内容：${desiredText(result)}</small>`:""}
         ${result.operation_state==="started"?"<small class=\"state-receipt-detail\">仅记录了请求开始，尚无完成确认；时间为开始记录时间。</small>":""}
         ${result.operation_id||result.batch_id?`<details class="state-receipt-reference" data-receipt="${e(result.operation_id||result.batch_id)}"><summary id="state-receipt-summary-${index}">查看执行详情</summary><p>执行结果：${e(label(key,result))}</p>${result.batch_id?"<p>关联当前会话的回复。</p>":""}</details>`:""}</div></li>`).join("")}</ul>`:"<p>尚无 QQ 展示确认。</p>"}</section>`;
   }
@@ -224,7 +245,7 @@ window.CompanionStatePage = (() => {
     hunger:"结合角色的生活节奏与活动变化，渐进调整进食表达。",
     sleep:"查看睡眠作息与当前睡眠状态，休息时如何回复可单独设置。",
     cycle:"周期模拟与阶段表达；精力偏移和氛围词只是趋势参考，不替角色下结论。",
-    busy:"忙碌状态由日程形成，可设置忙碌时的回复阀门。",
+    busy:"忙碌状态由日程形成，可设置忙碌时的回复方式。",
     location:"对话中记录的人格位置模拟，随人格在窗口间共享。",
     mood:"心情随互动变化并逐步回归基线，不记录聊天对象的情绪。",
     planning:"维护日程与公开文案计划，连续陪伴模式可在这里设置。",
@@ -272,7 +293,10 @@ window.CompanionStatePage = (() => {
       const detail=({timeout:"执行超时",worker_error:"执行出错",worker_lost:"执行任务失联",
         owner_unavailable:"原任务材料已不可用",state_foreground_active:"对话正在使用当前状态",
         model_budget_exhausted:"插件本地硬预算已触发，请查看治理与维护中的预算设置",
-        model_budget_soft_deferred:"插件本地软限额已触发，等待下一轮维护"})[code];
+        model_budget_soft_deferred:"插件本地软限额已触发，等待下一轮维护",
+        model_usage_unknown:"模型调用未完成确认，可能超时或返回格式不符；保留上次状态",
+        response_contract_rejected:"模型返回格式不符合状态要求，保留上次状态",
+        provider_wait_timed_out:"等待模型超时，保留上次状态"})[code];
       return {label:failed[result.state]+(detail?`：${detail}`:CODE.test(code||"")?`（${code}）`:""),tone:"is-warning",scheduled:true};
     }
     return {label:statusLabel(status.state?.state),tone:status.state?.state==="unknown"?"is-pending":"",scheduled:true};
@@ -310,7 +334,7 @@ window.CompanionStatePage = (() => {
     const local=options=>{try{return new Intl.DateTimeFormat("zh-CN",{timeZone:zone,...options}).format(new Date());}catch{return "时区待核对";}};
     const location=window.CompanionStateMaintenance?.weatherLocationParts(settings.planning_weather_location)?.name;
     const cards=[
-      {name:"presentation",label:"QQ 状态",icon:"radio-tower",value:`${[settings.typing_enabled,settings.presence_enabled].filter(Boolean).length} 项已开启`,help:"正在输入提示 · 自定义短状态"},
+      {name:"presentation",label:"QQ 状态",icon:"radio-tower",value:`${[settings.typing_enabled,settings.presence_enabled,settings.online_status_enabled].filter(Boolean).length} 项已开启`,help:"正在输入提示 · 在线状态 · 自定义短状态"},
       {name:"planning",label:"日程配置",icon:"calendar-days",value:settings.calendar_enabled?(settings.schedule_simulation_mode==="continuous"?"连续日程":"日程编排"):"日程已关闭",help:"规划方式 · 安排与公开文案"},
       {name:"weather",label:"天气",icon:"cloud-sun",value:settings.planning_weather_enabled?(location||"地点待配置"):"天气感知已关闭",help:"角色所在地 · 实况信息时效"},
       {name:"datetime",label:"时间与日期",icon:"calendar-clock",value:local({hour:"2-digit",minute:"2-digit",hourCycle:"h23"})+" · "+local({month:"long",day:"numeric",weekday:"long"}),help:zone+" · 日期背景"},
@@ -332,10 +356,10 @@ window.CompanionStatePage = (() => {
       const schedule=plan.enabled?`${plan.time||"未设时刻"} 入睡 · ${plan.duration_minutes??"未提供"} 分钟`:"未启用";
       body=overviewMarkup(feature,"当前睡眠",current,details,[["睡眠状态模拟",simulation],["按角色作息自动入睡",schedule],["执行窗口",plan.executor_state==="available"?`${window.CompanionProduct?.executorLabel?.(plan)||"已选定私聊窗口"}${plan.executor_is_current?"（当前窗口）":""}`:plan.enabled?"暂无有效授权窗口":"自动作息未启用"],["时区与自然浮动",`${plan.timezone||"未提供"} · ±${plan.variation_minutes??0} 分钟`],["节律阶段",plan.rhythm?.phase?`${rhythmNames[plan.rhythm.phase]||"节律观察中"} · ${plan.rhythm.basis==="execution_receipt"?"执行回执":"作息参考"}`:"尚无节律参考"]]);
       body+=`<section class="state-config-group"><header><span class="state-config-index">01</span><div><h4>作息概览</h4><p>以下是当前生效的作息参数；就寝时刻与时长在「日记与生活」编辑。</p></div></header><dl class="state-config-readonly">${[["就寝时刻",plan.time||"尚未配置"],["睡眠时长",plan.duration_minutes!=null?`${plan.duration_minutes} 分钟`:"尚未配置"],["自然浮动",plan.variation_minutes!=null?`±${plan.variation_minutes} 分钟`:"尚未配置"],["作息时区",plan.timezone||"尚未配置"]].map(([label,value])=>`<div><dt>${label}</dt><dd>${e(value)}</dd></div>`).join("")}</dl><details class="state-config-sleep-timing"><summary>查看下次入睡与执行详情</summary>${sleepMarkup(status)}</details></section>`;
-      body+=relatedSettings([["日记与生活 · 睡眠与休息","编辑就寝时刻、睡眠时长与自然浮动。","book-open","data-state-open-life-sleep"],["开口闸门 · 休息时的回复阀门","睡眠中是否回复、如何回复，在「主动联系」里设置。","message-square",'data-state-gate="sleep"']]);
+      body+=relatedSettings([["日记与生活 · 睡眠与休息","编辑就寝时刻、睡眠时长与自然浮动。","book-open","data-state-open-life-sleep"],["开口闸门 · 睡眠时是否回复","睡眠中是否回复、如何回复，在「主动联系」里设置。","message-square",'data-state-gate="sleep"']]);
     } else if(feature==="busy")body=overviewMarkup(feature,"当前状态",valueLabel(values.busy,settings.busy_enabled!==false),"忙碌状态参考已接受的日程；忙碌时如何回复单独设置。")
       +`<section class="state-config-note"><h4>为什么不能直接编辑</h4><p>忙碌是日程的产物。要改忙碌时段就改日程；要改忙碌时怎么回复，就去开口闸门。</p></section>`
-      +relatedSettings([["日程与规划 · 查看日程","查看与编辑角色的日程安排、重复规则与例外。","calendar-days",'data-state-open-feature="planning"'],["开口闸门 · 忙碌时的回复阀门","忙碌中是否回复、如何回复，在「主动联系」里设置。","message-square",'data-state-gate="busy"']]);
+      +relatedSettings([["日程与规划 · 查看日程","查看与编辑角色的日程安排、重复规则与例外。","calendar-days",'data-state-open-feature="planning"'],["开口闸门 · 忙碌时是否回复","忙碌中是否回复、如何回复，在「主动联系」里设置。","message-square",'data-state-gate="busy"']]);
     else if(feature==="location")body=overviewMarkup(feature,"人格位置",valueLabel(values.location,settings.location_enabled!==false),"由对话内容自然形成，随人格在窗口间共享。")
       +`<section class="state-config-note"><h4>关于位置</h4><p>位置只在角色自己的语境里使用，不会读取或记录聊天对象的真实位置。</p></section>`;
     else if(feature==="planning") {
@@ -367,7 +391,7 @@ window.CompanionStatePage = (() => {
     const subtitle=featureSubtitles[feature]||"";
     return `<section id="state-feature-detail" class="state-feature-detail state-config-page" data-state-config-feature="${feature}" aria-labelledby="state-feature-title">
       <header><button type="button" class="state-feature-back" data-state-feature-close aria-label="收起${title}" title="返回状态看板" ${editor?.busy?"disabled":""}><i data-lucide="arrow-left" aria-hidden="true"></i></button><div class="state-feature-head-main">
-          <span class="state-eyebrow">${feature==='patrol'?'维护':'STATE'} · ${title}</span>
+          <span class="state-eyebrow">状态 · ${title}</span>
           <h3 id="state-feature-title"><i data-lucide="${icon}" aria-hidden="true"></i>${title}</h3>
           ${subtitle?`<p class="state-feature-subtitle">${e(subtitle)}</p>`:""}
         </div>
@@ -389,6 +413,37 @@ window.CompanionStatePage = (() => {
       <header><div><span class="state-eyebrow">${e(personaLabel())} · 人格共享</span><h3 id="state-home-settings-title"><i data-lucide="settings-2" aria-hidden="true"></i>状态功能与首页展示</h3></div><button type="button" class="state-feature-close" data-state-close-home-settings aria-label="关闭状态设置" title="关闭" ${editor?.busy?"disabled":""}><i data-lucide="x" aria-hidden="true"></i></button></header>
       <div class="state-home-settings-body">${data?.status?editor?.markup({feature:"home"})||"":`<p class="memory-notice" role="status">${e(data?.notice||"正在读取状态设置…")}</p><button type="button" class="memory-button" id="state-home-settings-refresh" ${data?.loading?"disabled":""}>重新读取状态</button>`}</div>
     </dialog>`;
+  }
+  /* 地址栏的落点：`#life/state/<feature>` 进来时只切图块，不打开编辑表单
+     （打开表单是搜索落点的行为，见 openEditor）。 */
+  function openFeature(feature) {
+    if(!data?.status||data.loading||section!=="state"||!root?.isConnected||settingsOpen)return false;
+    if(!featureInfo[feature])return false;
+    if(editor&&!editor.discardIfPristine())return false;
+    if(activeFeature===feature)return true;
+    activeFeature=feature;
+    openFeatureEditor(feature);
+    render();schedule();
+    return true;
+  }
+  /* 全局搜索的落地钩子：搜索命中 role.state 的某个字段时，先切到对应图块，
+     再打开它的编辑表单，最后把焦点落到那个输入框上。
+     与「点图块 → 点配置」是同一条路径（featureEditors 把 kind 映射回图块）。 */
+  function openEditor(kind, field) {
+    if(!data?.status||data.loading||section!=="state"||!root?.isConnected||settingsOpen)return false;
+    if(editor&&!editor.discardIfPristine())return false;
+    const feature=Object.keys(featureEditors).find(name=>featureEditors[name]===kind)||null;
+    if(feature)activeFeature=feature;
+    editor?.open(kind);
+    render();schedule();
+    if(!field)return true;
+    const attempt=(tries=0)=>{
+      const input=root?.querySelector(`[data-state-field="${field}"]`);
+      if(input){input.focus({preventScroll:false});input.scrollIntoView({block:"center",behavior:"smooth"});return;}
+      if(tries<20)requestAnimationFrame(()=>attempt(tries+1));
+    };
+    requestAnimationFrame(()=>attempt());
+    return true;
   }
   function openSettings(trigger) {
     if(!data?.status||data.loading||section!=="state"||!root?.isConnected||settingsOpen)return;
@@ -592,6 +647,9 @@ window.CompanionStatePage = (() => {
       openFeatureEditor(activeFeature);
       render();schedule();
       root?.querySelector("#state-feature-detail")?.scrollIntoView({behavior:matchMedia("(prefers-reduced-motion: reduce)").matches?"auto":"smooth",block:"nearest"});
+      /* 打开的功能图块能进地址栏（见 app.js 的 secondarySubtab），
+         这样刷新或把链接发出去都落到同一屏。 */
+      window.dispatchEvent(new CustomEvent("companion:state-route"));
       return;
     }
     const sourceSettings=event.target.closest("[data-state-source-settings]");
@@ -689,7 +747,7 @@ window.CompanionStatePage = (() => {
     if(window.CompanionProduct?.hosted()&&document.querySelector("[data-host-badge]"))return;
     const badge=document.querySelector(".preview-badge");
     if(badge)badge.innerHTML=active?"<span></span>角色状态读取正常 <b>V2</b>":"<span></span>角色状态读取待检查 <b>V2</b>";
-    if(active)document.title="角色状态维护 · 陪伴 V2";
+    if(active)document.title="陪伴小屋";
   }
   async function mount(element,options={}) {
     unmount();section=["contact","weather","patrol"].includes(options.section)?options.section:"state";activeFeature=Object.hasOwn(featureInfo,options.feature)?options.feature:null;root=element;stateScopeKey=currentStateScope();data=blank();root.addEventListener("click",click);root.addEventListener("keydown",keydown);root.addEventListener("change",change);
@@ -717,5 +775,5 @@ window.CompanionStatePage = (() => {
   function unmount() { rememberState();++version;stopTimer();root?.querySelector("#state-home-settings")?.close();settingsOpen=false;settingsReturnFeature=settingsReturnFocus=null;editor?.destroy();editor=null;calendarEditor=null;root?.removeEventListener("click",click);root?.removeEventListener("keydown",keydown);root?.removeEventListener("change",change);root?.removeEventListener("input",input);root?.removeEventListener("submit",submit);root=null;data=null;bridge=null;activeFeature=null;stateScopeKey="";syncSettingsButton();setChrome(false); }
   document.addEventListener("visibilitychange",()=>{if(!data?.ready)return;if(document.hidden)stopTimer();else if(!data.loading&&!editor?.interacting)load();});
   window.addEventListener?.("beforeunload",event=>{if(editor?.dirty){event.preventDefault();event.returnValue="";}});
-  return {mount,unmount,openSettings,canLeave:()=>editor?.discardIfPristine()??true};
+  return {mount,unmount,openSettings,openEditor,openFeature,canLeave:()=>editor?.discardIfPristine()??true};
 })();

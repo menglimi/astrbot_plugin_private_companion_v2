@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from inspect import isawaitable
 from typing import Any
@@ -85,6 +86,7 @@ def prepare_core_reply_event(
     on_denied: OnDenied | None = None,
     on_sent: OnSent | None = None,
     on_delivery: OnDelivery | None = None,
+    on_reply_end: Callable[[], Any] | None = None,
     prepare_send: PrepareSend | None = None,
     media_submit: Callable | None = None,
 ) -> None:
@@ -117,8 +119,20 @@ def prepare_core_reply_event(
                 raise
 
         async def authorized_send(message: Any, *args: Any, **kwargs: Any) -> Any:
-            if (not state.get("delivery_guard_active") or
-                    getattr(message, "type", None) in {"tool_call", "tool_result", "agent_stats", "reasoning", "break"}):
+            try:
+                return await guarded_send(message, *args, **kwargs)
+            except BaseException:
+                finish_core_reply_presence(event, force=True)
+                raise
+
+        async def guarded_send(message: Any, *args: Any, **kwargs: Any) -> Any:
+            if getattr(message, "type", None) in {"tool_call", "tool_result", "agent_stats", "reasoning", "break"}:
+                return await state["_original_send"](message, *args, **kwargs)
+            if not state.get("delivery_guard_active"):
+                from .core_reply_presentation import strip_internal_expression_message
+                message = strip_internal_expression_message(message)
+                if message is None:
+                    return None
                 return await state["_original_send"](message, *args, **kwargs)
             if state.get("group_participation", {}).get("mode") == "skip":
                 return None
@@ -190,6 +204,8 @@ def prepare_core_reply_event(
                     callback(stage)
                 except Exception:
                     pass
+            if stage in {"denied", "unknown", "failed"}:
+                finish_core_reply_presence(event, force=True)
 
         def notify_sent(text: str) -> None:
             callback = state.get("on_sent")
@@ -202,6 +218,13 @@ def prepare_core_reply_event(
                     pass
 
         async def authorized_streaming(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return await guarded_streaming(*args, **kwargs)
+            except BaseException:
+                finish_core_reply_presence(event, force=True)
+                raise
+
+        async def guarded_streaming(*args: Any, **kwargs: Any) -> Any:
             # AstrBot skips result decorators for an active stream with no chain.
             # Its own streaming result therefore activates the send check here.
             if not state.get("delivery_guard_active") and not is_core_reply_stream(event):
@@ -210,6 +233,7 @@ def prepare_core_reply_event(
                 notify_delivery("finished")
                 restore_core_reply_event(event)
                 return None
+            state["_presence_stream_active"] = True
             state["delivery_guard_active"] = True
             attempts_before = state["send_attempts"]
             returned_before = state["send_returns"]
@@ -222,6 +246,7 @@ def prepare_core_reply_event(
             from .core_reply_segmentation import send_group_stream, uses_managed_group_stream
             from .core_reply_presentation import (
                 core_reply_presentation, present_core_reply_stream, presented_stream,
+                strip_internal_expression_stream,
             )
             managed_group_stream = hasattr(stream, "__aiter__") and uses_managed_group_stream(event)
             presentation = core_reply_presentation(event)
@@ -229,6 +254,8 @@ def prepare_core_reply_event(
             platform = (platform_getter() if callable(platform_getter)
                         else getattr(getattr(event, "platform_meta", None), "name", None))
             native_bubbles = presentation is not None and platform == "aiocqhttp"
+            if stream is not None and hasattr(stream, "__aiter__"):
+                stream = strip_internal_expression_stream(stream)
             prepared_stream = (presentation if not managed_group_stream and not native_bubbles
                                and hasattr(stream, "__aiter__") else None)
             if prepared_stream is not None:
@@ -284,6 +311,7 @@ def prepare_core_reply_event(
                     # real send invocations once, rather than the outer stream.
                     state["send_attempts"] -= 1
                 notify_delivery("finished")
+                state["_presence_stream_active"] = False
                 restore_core_reply_event(event)
 
         state["_send_wrapper"] = authorized_send
@@ -294,12 +322,16 @@ def prepare_core_reply_event(
 
     state.pop("_text_presentation", None)
     state.pop("_text_presentation_removed", None)
+    old_task, old_callback = state.pop("_presence_owner_task", None), state.pop("_presence_task_done", None)
+    if old_task is not None and old_callback is not None:
+        old_task.remove_done_callback(old_callback)
     state.update(
         prepared=prepared,
         authorize=authorize,
         on_denied=on_denied,
         on_sent=on_sent,
         on_delivery=on_delivery,
+        on_reply_end=on_reply_end,
         prepare_send=prepare_send,
         media_submit=media_submit,
         delivery_guard_active=False,
@@ -308,8 +340,21 @@ def prepare_core_reply_event(
         send_returns=0,
         send_unknown=0,
         send_failed=0,
+        _presence_finished=False,
+        _presence_agent_running=False,
+        _presence_stream_active=False,
     )
     event.set_extra(CORE_REPLY_CONTEXT_EXTRA, state)
+    if on_reply_end is not None:
+        # The native message task owns intake, the agent and RespondStage. Its
+        # completion is a cleanup backstop for SDK paths with no final hook.
+        task = asyncio.current_task()
+        if task is not None:
+            def reply_task_done(_task):
+                if event.get_extra(CORE_REPLY_CONTEXT_EXTRA) is state:
+                    finish_core_reply_presence(event, force=True)
+            state["_presence_owner_task"], state["_presence_task_done"] = task, reply_task_done
+            task.add_done_callback(reply_task_done)
     event.send = state["_send_wrapper"]
     if callable(state["_original_send_streaming"]):
         event.send_streaming = state["_streaming_wrapper"]
@@ -343,6 +388,26 @@ def restore_core_reply_event(event: Any) -> None:
     original_streaming = state.get("_original_send_streaming")
     if callable(original_streaming):
         event.send_streaming = original_streaming
+    finish_core_reply_presence(event)
+
+
+def finish_core_reply_presence(event: Any, *, force=False) -> None:
+    """Close once, after the whole reply rather than an intermediate tool send."""
+    state = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
+    if not isinstance(state, dict) or state.get("_presence_finished"):
+        return
+    if not force and (state.get("_presence_agent_running") or state.get("_presence_stream_active")):
+        return
+    state["_presence_finished"] = True
+    task, done = state.pop("_presence_owner_task", None), state.pop("_presence_task_done", None)
+    if task is not None and done is not None:
+        task.remove_done_callback(done)
+    callback = state.get("on_reply_end")
+    if callback is not None:
+        try:
+            callback()
+        except Exception:
+            pass  # Optional presentation must not turn a returned send into an error.
 
 
 def inject_core_reply_prompt(event: Any, req: Any) -> None:

@@ -11,7 +11,8 @@ import unittest
 from companion_v2.conversation.segmentation import LLM_SEGMENT_MARKER, SegmentationPolicy
 from companion_v2.conversation.voice_reply import (
     VoiceReplyDelivery, VoiceReplyPolicy, capability_instruction, eligible, planned_speech,
-    requested_voice_language, separate_spoken, speech_chunks, speech_decisions, voice_policy_for_turn,
+    requested_voice_language, separate_spoken, speech_chunks, speech_decisions, strip_voice_markup,
+    voice_policy_for_turn,
 )
 from companion_v2.conversation.voice_markup import visible_speech
 from companion_v2.foundation.refs import ScopeKind, ScopeRef, SubjectKind, SubjectRef
@@ -50,6 +51,26 @@ class VoicePolicyTests(unittest.TestCase):
         self.assertIn("目标语种日语", instruction)
         self.assertIn("退回文字", instruction)
         self.assertNotIn("private-provider", instruction)
+
+    def test_partial_conversion_uses_authored_short_spans_and_preserves_text_delivery(self):
+        policy = VoiceReplyPolicy(conversion_scope="partial", delivery_mode="voice_and_text")
+        self.assertIn("无需让语音覆盖整条回复", policy.instruction)
+        self.assertNotIn("各段都保持一致", policy.instruction)
+        visible, spans = separate_spoken("<pc_tts>晚安。</pc_tts>附上明天的安排。", policy)
+        self.assertEqual(visible, "晚安。附上明天的安排。")
+        self.assertEqual(planned_speech(visible, (visible,), spans, policy), ("晚安。",))
+        self.assertEqual(policy.delivery_mode, "voice_and_text")
+
+    def test_private_and_group_cooldowns_inherit_independently(self):
+        policy = VoiceReplyPolicy(cooldown_seconds=90, private_cooldown_seconds=0,
+                                  group_cooldown_seconds=180)
+        self.assertEqual(policy.cooldown("private"), 0)
+        self.assertEqual(policy.cooldown("group"), 180)
+        self.assertEqual(replace(policy, group_cooldown_seconds=-1).cooldown("group"), 90)
+        for changes in ({"private_cooldown_seconds": -2}, {"group_cooldown_seconds": True},
+                        {"conversion_scope": "voice_only"}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                replace(policy, **changes)
 
     def test_turn_language_override_is_explicit_temporary_and_selects_matching_provider(self):
         saved = VoiceReplyPolicy(language="zh", provider_id="fallback", en_provider_id="english-tts",
@@ -96,6 +117,18 @@ class VoicePolicyTests(unittest.TestCase):
             self.assertEqual(separate_spoken(source, policy), ("晚安。", ((0, "おやすみ。"),)))
             self.assertEqual(separate_spoken(source, None), ("おやすみ。晚安。", ()))
         self.assertEqual(separate_spoken("<tts>保留正文", None), ("保留正文", ()))
+
+    def test_voice_tags_tolerate_case_separator_entity_and_orphan_variants(self):
+        policy = VoiceReplyPolicy(generation_mode="model_tag", language="ja", foreign_text_mode="translation")
+        samples = (
+            ("<PC-TTS lang='ja'>おやすみ。</pcc tts>晚安。", "おやすみ。", "晚安。"),
+            ("&lt;P C TTS&gt;おはよう。&#x3C;/pc_tts&#x3E;早安。", "おはよう。", "早安。"),
+            ("<PCC.TTS>ありがとう。</PC_TTS>谢谢。", "ありがとう。", "谢谢。"),
+        )
+        for source, speech, translation in samples:
+            with self.subTest(source=source):
+                self.assertEqual(separate_spoken(source, policy), (translation, ((0, speech),)))
+        self.assertEqual(strip_voice_markup("正文 </pcc-tts> 后续 <PC_TTS"), "正文  后续 ")
 
     def test_model_tag_translation_keeps_spoken_spans_with_explicit_boundaries(self):
         policy = VoiceReplyPolicy(trigger_mode="adaptive", language="ja", foreign_text_mode="translation")

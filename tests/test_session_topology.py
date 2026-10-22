@@ -143,6 +143,7 @@ class SessionTopologyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(partial["account_id"], "")
         self.assertEqual(partial["bot_id"], "")
         self.assertEqual(partial["persona_id"], "")
+        self.assertEqual(partial["persona_source"], "unresolved")
         self.assertEqual(partial["roles"], [])
         self.assertFalse(partial["managed"])
         self.assertFalse(partial["details_available"])
@@ -269,6 +270,7 @@ class SessionTopologyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(current["persona_id"], "second")
         self.assertEqual(current["persona_override"], "second")
+        self.assertEqual(current["persona_source"], "v2_window_override")
 
     async def test_invalid_identity_target_and_persona_never_write_native_settings(self):
         row = next(row for row in await self.controller.session_topology.inventory() if row["scope_kind"] == "group")
@@ -351,7 +353,10 @@ class SharedTopologyBindingTests(GroupFixture, unittest.IsolatedAsyncioTestCase)
         unknown = next(row for row in report["targets"] if row.get("unified_msg_origin") == unknown_umo)
         self.assertEqual((private["persona_id"], private["roles"][0]["role_id"]), ("星缘-私聊", "星缘"))
         self.assertEqual((group["persona_id"], group["roles"][0]["role_id"]), ("星缘-群聊", "星缘"))
-        self.assertEqual(unknown["persona_id"], "")
+        self.assertEqual(private["persona_source"], "astrbot_selection")
+        self.assertEqual(group["persona_source"], "astrbot_selection")
+        self.assertEqual(unknown["persona_id"], "default")
+        self.assertEqual(unknown["persona_source"], "astrbot_selection")
         self.assertEqual(unknown["roles"], [])
         self.assertFalse(unknown["managed"])
         self.assertEqual(self.controller.session_topology.persona_selection_snapshot(private_umo, "100"),

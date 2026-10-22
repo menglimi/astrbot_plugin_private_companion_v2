@@ -8,7 +8,8 @@ import json
 from companion_v2.configuration.models import ConfigLayer, ConfigTarget, EffectiveValue
 from companion_v2.execution.models import TaskError, digest, require
 from companion_v2.execution.service import outcome
-from companion_v2.foundation.refs import OperationRef, VersionRef
+from companion_v2.foundation.refs import OperationRef, ScopeKind, VersionRef
+from companion_v2.identity_policy.object_access import ObjectAccessPolicy
 from companion_v2.role_work.life.management import RoleLifeManagement
 from .budget import effective_soft
 from .cache_diagnostics import checked_signature, event_severity, signature_changes, signature_snapshot
@@ -308,7 +309,16 @@ def _cache_diagnostic_summary(runtime, role_accounts, all_days, origin_key, *, c
 class ModelManagement:
     def __init__(self, app, context):
         self.app, self.context = app, context
-        self.access = RoleLifeManagement(app, context)
+        self.access = (RoleLifeManagement(app, context)
+                       if context.scope.kind is ScopeKind.PRIVATE else None)
+        self.scope_access = ObjectAccessPolicy(app.runtime)
+
+    def _authorize(self, operator, *, write=False):
+        if self.access is not None:
+            return self.access.authorize(operator)
+        return require(self.scope_access.scope_access(operator, scope=self.context.scope,
+            action="configuration.write" if write else "configuration.read",
+            observed_at=self.app.now(), core_only=True))
 
     def _profile(self, kind):
         if type(kind) is not str or kind not in self.app.router.profiles:
@@ -330,7 +340,8 @@ class ModelManagement:
         definitions = self.app.configuration.registry.group(section.config_group)
         if layer not in (ConfigLayer.ROLE, ConfigLayer.WINDOW) or layer not in definitions[0].layers:
             raise TaskError("model_configuration_invalid", "the prompt section does not support this configuration scope")
-        if ConfigLayer.RELATIONSHIP in definitions[0].layers:
+        if (ConfigLayer.RELATIONSHIP in definitions[0].layers
+                and self.context.scope.kind is ScopeKind.PRIVATE):
             scope = self.context.scope
             target = ConfigTarget(scope.installation_id, ConfigLayer.WINDOW,
                 self.context.role_binding.role, scope, bot_id=scope.bot_id,
@@ -355,9 +366,18 @@ class ModelManagement:
                     "default_prompt": section.default_prompt, "editable": section.editable,
                     "variables": list(section.variables)}
             if section.editable:
-                if section.config_group not in snapshots:
-                    snapshots[section.config_group] = self._section_snapshots(operator, section, layer)
-                current, inherited = snapshots[section.config_group]
+                definitions = self.app.configuration.registry.group(section.config_group)
+                section_layer = layer
+                group_window_inherits = (layer is ConfigLayer.WINDOW
+                    and self.context.scope.kind is ScopeKind.GROUP
+                    and ConfigLayer.RELATIONSHIP in definitions[0].layers)
+                if group_window_inherits:
+                    section_layer = ConfigLayer.ROLE
+                    item["editable"] = False
+                snapshot_key = section.config_group, section_layer
+                if snapshot_key not in snapshots:
+                    snapshots[snapshot_key] = self._section_snapshots(operator, section, section_layer)
+                current, inherited = snapshots[snapshot_key]
                 field_id = section.config_group + "." + section.field
                 field = _field(current.fields[field_id], inherited.fields[field_id])
                 item.update(field=field, edit_token=current.edit_token, config_field=field_id,
@@ -514,10 +534,10 @@ class ModelManagement:
     @outcome
     def status(self, operator, *, layer="role"):
         if layer not in (ConfigLayer.ROLE.value, ConfigLayer.WINDOW.value):
-            raise TaskError("model_configuration_invalid", "select role defaults or this private window")
+            raise TaskError("model_configuration_invalid", "select role defaults or this conversation window")
         selected_layer = ConfigLayer(layer)
         with self.app.runtime.read_snapshot():
-            self.access.authorize(operator)
+            self._authorize(operator)
             return {"configuration_layer": selected_layer.value,
                     "tasks": [self._project(operator, profile, selected_layer)
                               for profile in self.app.router.profiles.values()],
@@ -532,7 +552,7 @@ class ModelManagement:
     def maintenance(self, operator):
         """Read role-scoped model usage and diagnostics without exposing prompt material."""
         with self.app.runtime.read_snapshot():
-            self.access.authorize(operator)
+            self._authorize(operator)
             now = self.app.now()
             runtime_diagnostics = self._runtime_diagnostics()
             scope = self.context.scope
@@ -700,7 +720,7 @@ class ModelManagement:
     def check_storage(self, operator):
         """Run explicit read-only SQLite integrity and foreign-key checks."""
         with self.app.runtime.read_only_snapshot() as connection:
-            self.access.authorize(operator)
+            self._authorize(operator)
             integrity = [row[0] for row in connection.execute("PRAGMA quick_check")]
             foreign_keys = connection.execute("PRAGMA foreign_key_check").fetchmany(20)
             return {"status": "ok" if integrity == ["ok"] and not foreign_keys else "failed",
@@ -781,7 +801,7 @@ class ModelManagement:
             raise TaskError("model_configuration_invalid", "provide a stable operation key and edit token")
         selected_layer = ConfigLayer(layer)
         with self.app.runtime.transaction():
-            self.access.authorize(operator)
+            self._authorize(operator, write=True)
             profile = self._profile(kind)
             if "section" in data:
                 return self._configure_section(operator, profile, data, selected_layer)

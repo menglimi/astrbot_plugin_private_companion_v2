@@ -489,7 +489,7 @@ window.CompanionPerceptionOverviewPage = (() => {
     const focusedId = active && root.contains?.(active) ? active.id : "";
     const ready = snapshot?.ready === true;
     const configurationFailed = !ready && (!!snapshot?.error || snapshot?.loading === false);
-    const configurationState = configurationFailed ? "读取失败" : "正在读取";
+    const configurationState = configurationFailed ? "读取失败" : "正在读取…";
     const environment = snapshot?.environment || {}, model = snapshot?.model || {};
     const calendar = runtimeSnapshot?.calendar || {};
     const weather = runtimeSnapshot?.weather || {}, screenResult = runtimeSnapshot?.screen || {};

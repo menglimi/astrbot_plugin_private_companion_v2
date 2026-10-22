@@ -1,6 +1,6 @@
 "use strict";
 window.CompanionExpressionSignalsPage = (() => {
-  const PREFIX = "/astrbot_plugin_private_companion_v2/";
+  const PREFIX = "/astrbot_plugin_private_companion/";
   const DIMENSION = {
     sentence_rhythm: "句读节奏", emoji: "表情符号", punctuation: "标点",
     directness: "直接程度", diction: "措辞", formatting: "排版", other: "其他",
@@ -197,7 +197,7 @@ window.CompanionExpressionSignalsPage = (() => {
     const title = unavailable ? "依据已失效" : (item.proposal || item.observation || "表达规则");
     const body = unavailable ? "" : (item.observation || "");
     const exportChoice = adopted ? `<label class="lh-signal-export-choice"><input type="checkbox" data-signal-export="${e(item._key)}"${selectedExportIds.has(item._key) ? " checked" : ""} ${transferBusy ? "disabled" : ""}><span>导出</span></label>` : "";
-    const source = item.source_kind === "shared_pack" ? "分享包"
+    const source = item.source_kind === "legacy_expression" ? "旧版学习" : item.source_kind === "shared_pack" ? "分享包"
       : item.source_kind === "conversation_input" ? "对话表达" : "角色表达";
     const action = pending
       ? `${actions.includes("adopt") ? `<button type="button" class="lh-command is-primary" data-signal-action="adopt" data-id="${e(item._key)}" ${busy ? "disabled" : ""}>采纳</button>` : ""}${actions.includes("reject") ? `<button type="button" class="lh-command" data-signal-action="reject" data-id="${e(item._key)}" ${busy ? "disabled" : ""}>拒绝</button>` : ""}`
@@ -214,7 +214,7 @@ window.CompanionExpressionSignalsPage = (() => {
         <span class="lh-signal-state">${pending ? "待审" : adopted ? "已启用" : "已停用"}</span></div><div class="lh-signal-card-tools">${exportChoice}<span class="lh-signal-uses">${e(item.injections || 0)} 次注入</span></div></header>
       <h3>${e(title)}</h3>${body ? `<p class="lh-signal-observation">${e(body)}</p>` : ""}
       ${!unavailable ? renderApplicability(item.applicability) : ""}
-      ${item.source_kind === "shared_pack" ? `<p class="lh-signal-import-origin">分享包 · ${e(item.source_title || "导入规则")}</p>` : ""}
+      ${item.source_kind === "legacy_expression" ? `<p class="lh-signal-import-origin">旧版学习成果</p>` : ""}${item.source_kind === "shared_pack" ? `<p class="lh-signal-import-origin">分享包 · ${e(item.source_title || "导入规则")}</p>` : ""}
       ${feedback}
       ${unavailable ? `<p class="lh-signal-unavailable">依据已失效，暂不可恢复</p>` : renderEvidence(item)}
       <footer class="lh-signal-card-foot"><div><span>${item.last_injected_at ? `最近注入 ${e(formatTime(item.last_injected_at))}` : "尚未注入"}</span>

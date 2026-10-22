@@ -439,7 +439,20 @@ class ConversationFlow:
         self._update(batch_id, state="delivering")
         parts = self.runtime.read_all("SELECT * FROM conversation_parts WHERE batch_id = ? ORDER BY sequence", (batch_id,))
         captured = json.loads(batch["contributions_json"]).get("reply_settings")
-        reply_settings = captured.get("settings", {}) if isinstance(captured, dict) else {}
+        reply_settings = dict(captured.get("settings", {})) if isinstance(captured, dict) else {}
+        if reply_settings and context.scope.kind is ScopeKind.PRIVATE:
+            state_owner = getattr(self.messages, "role_state_context", None)
+            if state_owner is not None:
+                try:
+                    simulation = state_owner.service.read(context, at=now, injection=True)
+                    from companion_v2.role_work.state import humanized
+                    values = simulation.get("values") if isinstance(simulation.get("values"), dict) else {}
+                    if isinstance(values.get("energy"), int):
+                        reply_settings.setdefault("role_energy", values["energy"])
+                    if humanized.is_sleepy(simulation):
+                        reply_settings.setdefault("role_sleepy", True)
+                except Exception:
+                    pass
         previous_at = None
         previous_text = ""
         for part in parts:
@@ -472,7 +485,7 @@ class ConversationFlow:
                 due_at = task.spec.not_before
             else:
                 policy = ConversationPolicy(**json.loads(row["policy_json"]))
-                gap = (part_gap_seconds(reply_settings, previous_text,
+                gap = (part_gap_seconds(reply_settings, part["text"] or previous_text,
                                         f"{batch_id}:{part['part_id']}")
                        if previous_at and reply_settings else policy.part_gap_seconds)
                 due_at = max(now, previous_at + timedelta(seconds=gap)) if previous_at else now

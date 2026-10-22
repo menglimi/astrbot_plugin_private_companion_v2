@@ -46,11 +46,11 @@ from companion_v2.relationships.profile_drafts import (build_relationship_profil
     parse_relationship_profile_draft)
 
 from .management_identity import dashboard_operator
-from .legacy_config import read_v1_host_configuration
+from .legacy_config import read_v1_host_configuration, v1_setting
 from .persona_catalog import persona_choices
 
 
-PREFIX = "/astrbot_plugin_private_companion_v2/persona"
+PREFIX = "/astrbot_plugin_private_companion/persona"
 
 # 与页面目录同一道门：能管理本安装的账号。人格原文属于安装级配置视图，
 # 不该因为某个会话窗口被分享给普通对象。
@@ -492,21 +492,26 @@ class PersonaWorkshopWebAPI:
             raise ValueError("invalid role-profile migration plan")
         return persona_id, plan_token, edit_token, dict(changes)
 
+    def _v1_configuration_root(self):
+        """Read V1 settings from the canonical AstrBot root even after V2 relocation."""
+        return getattr(self.controller, "default_data_root", None) or self.controller.data_root
+
     def _profile_migration_source(self, persona_id, persona):
         try:
-            legacy_config, _, config_fingerprint = read_v1_host_configuration(self.controller.data_root)
+            legacy_config, _, config_fingerprint = read_v1_host_configuration(
+                self._v1_configuration_root())
         except (OSError, ValueError, UnicodeError):
             raise TaskError("role_profile_migration_source_invalid",
                             "the V1 plugin settings could not be read safely")
 
         if legacy_config is not None:
-            role_prompt = legacy_config.get("schedule_persona_prompt", "")
-            image_hint = legacy_config.get("private_image_self_recognition_hint", "")
+            role_prompt = v1_setting(legacy_config, "life_schedule_config.schedule_persona_prompt", "")
+            image_hint = v1_setting(legacy_config, "message_debounce_config.private_image_self_recognition_hint", "")
             if role_prompt or image_hint:
-                if legacy_config.get("enable_multi_persona_mode"):
+                if v1_setting(legacy_config, "basic_config.enable_multi_persona_mode"):
                     raise TaskError("role_profile_migration_source_ambiguous",
                                     "select the V1 persona-specific role profile before importing")
-                source_persona_id = legacy_config.get("plugin_specific_persona_id")
+                source_persona_id = v1_setting(legacy_config, "basic_config.plugin_specific_persona_id")
                 if type(source_persona_id) is not str or not source_persona_id.strip():
                     raise TaskError("role_profile_migration_source_unbound",
                                     "the V1 role profile is not bound to a persona")

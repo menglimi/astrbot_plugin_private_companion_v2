@@ -9,6 +9,7 @@ from astrbot_host.native_extensions import NativeExtensionRegistry
 from astrbot_host.native_extensions.builtins import BundledNativeLease
 from astrbot_host.native_extensions.image_native.adapter import PLUGIN_ID
 from astrbot_host.native_extensions.image_native.backends import NativeTransportBackend
+from astrbot_host.native_extensions.image_native.comfyui_service import ComfyUIService
 from astrbot_host.native_extensions.image_native.extension import ImageExtensionAPI
 from astrbot_host.native_extensions.image_native.output_configuration import settings as image_settings
 from astrbot_host.native_extensions.image_native.types import ImageInvocation, NativeImageError, ReferenceImage
@@ -92,6 +93,77 @@ class NativeImageRoutingTests(unittest.TestCase):
                 "operation_routes": {"generate": ["online:missing"], "edit": []},
             })
 
+    def test_unadapted_platform_can_be_saved_but_cannot_claim_an_active_route(self):
+        endpoint = {**self.endpoint("primary", "image-v1"), "platform": "modelscope"}
+        current = self.api.output_configuration()
+        saved = self.api.save_output_configuration(current["revision"], {
+            "enabled": False, "backend": "online_api", "endpoints": [endpoint],
+        })
+        self.assertEqual(saved["settings"]["endpoints"][0]["platform"], "modelscope")
+        with self.assertRaises(NativeImageError) as error:
+            self.api.save_output_configuration(saved["revision"], {"enabled": True})
+        self.assertEqual(error.exception.code, "native_endpoint_unconfigured")
+
+    def test_online_endpoint_persists_quality_and_reference_image_limit(self):
+        current = self.api.output_configuration()
+        endpoint = self.endpoint("primary", "image-v1")
+        endpoint.update(quality="hd", max_reference_images=4)
+        saved = self.api.save_output_configuration(current["revision"], {
+            "enabled": True, "backend": "online_api", "endpoints": [endpoint],
+        })
+
+        projected = saved["settings"]["endpoints"][0]
+        self.assertEqual(projected["quality"], "hd")
+        self.assertEqual(projected["max_reference_images"], 4)
+        route = next(self.api.companion_v2_native().owner.backend._routes("edit"))
+        self.assertEqual(route.config["quality"], "hd")
+        self.assertEqual(route.config["max_reference_images"], 4)
+
+    def test_legacy_image_options_network_and_header_values_survive_save_and_read(self):
+        current = self.api.output_configuration()
+        endpoint = self.endpoint("primary", "image-v1")
+        endpoint.update(size_label="2K", custom_headers={"X-Region": "cn"})
+        saved = self.api.save_output_configuration(current["revision"], {
+            "enabled": True, "backend": "online_api", "endpoints": [endpoint],
+            "network": {"download_proxy": "http://127.0.0.1:7890", "use_environment_proxy": True},
+            "legacy_backend": "tool_call",
+            "legacy_options": {"tool_call": {"name": "generate_selfie", "prompt_param": "description"}},
+        })
+
+        reread = self.api.output_configuration()
+        self.assertEqual(reread["settings"]["legacy_backend"], "tool_call")
+        self.assertEqual(reread["settings"]["legacy_options"]["tool_call"]["name"], "generate_selfie")
+        self.assertEqual(reread["settings"]["network"]["download_proxy_set"], True)
+        self.assertTrue(reread["settings"]["network"]["use_environment_proxy"])
+        self.assertNotIn("download_proxy", reread["settings"]["network"])
+        self.assertEqual(reread["settings"]["endpoints"][0]["size_label"], "2K")
+        self.assertEqual(reread["settings"]["endpoints"][0]["custom_header_names"], ["X-Region"])
+        self.assertNotIn("custom_headers", reread["settings"]["endpoints"][0])
+
+    def test_online_image_download_uses_configured_proxy(self):
+        from astrbot_host.native_extensions.image_native.output_routing import OnlineImageBackend
+
+        backend = OnlineImageBackend(self.endpoint("primary", "image-v1"), {
+            "download_proxy": "http://127.0.0.1:7890", "use_environment_proxy": False,
+        })
+        self.assertEqual(backend._request_options("https://images.example.test/result.png"),
+                         {"proxy": "http://127.0.0.1:7890"})
+
+    def test_comfyui_http_timeout_uses_saved_configuration(self):
+        import asyncio
+
+        service = ComfyUIService({"base_url": "http://127.0.0.1:8188", "timeout_seconds": 73},
+                                 Path(self.temporary.name))
+
+        async def check():
+            session = await service._http()
+            try:
+                return session.timeout.total
+            finally:
+                await service.close()
+
+        self.assertEqual(asyncio.run(check()), 73)
+
     def test_sd_webui_uses_generate_and_edit_parameter_overrides(self):
         backend = NativeTransportBackend("sd_webui", {
             "base_url": "http://127.0.0.1:7860", "timeout_seconds": 60,
@@ -130,6 +202,19 @@ class NativeImageRoutingTests(unittest.TestCase):
         self.assertIsNone(self.registry.current_declaration("native:" + PLUGIN_ID + ":image.mask_edit"))
         self.assertEqual(self.registry.declaration_readiness("native:" + PLUGIN_ID + ":image.mask_edit"),
                          "unsupported")
+
+    def test_auto_platform_does_not_send_openai_requests_to_other_protocols(self):
+        from astrbot_host.native_extensions.image_native.output_routing import OnlineImageBackend, resolve_platform
+
+        for url, expected in (
+            ("https://dashscope.aliyuncs.com/api/v1", "bailian"),
+            ("https://api-inference.modelscope.cn/v1", "modelscope"),
+            ("https://generativelanguage.googleapis.com/v1beta", "gemini"),
+        ):
+            with self.subTest(url=url):
+                endpoint = {**self.endpoint("primary", "image-v1"), "platform": "auto", "base_url": url}
+                self.assertEqual(resolve_platform(endpoint), expected)
+                self.assertEqual(OnlineImageBackend(endpoint).operations, ())
 
     def test_sd_webui_enables_masked_edit_after_a_real_endpoint_is_configured(self):
         current = self.api.output_configuration()

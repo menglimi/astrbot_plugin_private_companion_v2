@@ -50,7 +50,7 @@ from .mihome_device_profiles import (
 )
 from .mihome_client import MiHomeAuthError, MiHomeClientError
 
-PLUGIN_NAME = "astrbot_plugin_private_companion_v2.reality_mihome"
+PLUGIN_NAME = "astrbot_plugin_private_companion.reality_mihome"
 
 # A parameterised device verb is only ever allowed on the property listed here,
 # and only after the device profile itself declares that property writable.

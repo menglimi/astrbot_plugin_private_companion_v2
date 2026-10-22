@@ -148,6 +148,22 @@ class LegacyMemoryMaterialsTests(MemoryFixture, unittest.TestCase):
         self.assertEqual((source_count, atom_count), (0, 0))
         self.assertEqual(result["profile"], "memory.legacy-materials.v1")
 
+    def test_archived_wal_database_stays_byte_exact_without_creating_sidecars(self):
+        self.source.execute("PRAGMA journal_mode=WAL")
+        self.add_memory("private-archive", "一条归档历史资料")
+        self.source.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        self.source.close()
+        def files():
+            return {path.name: (path.stat().st_size, hashlib.sha256(path.read_bytes()).hexdigest())
+                    for path in self.source_root.iterdir() if path.is_file()}
+        before = files()
+        self.assertNotIn("memory_companion.db-wal", before)
+        self.assertNotIn("memory_companion.db-shm", before)
+        self.assertEqual(len(self.legacy.inspect_snapshot(self.snapshot)["owners"]), 1)
+        self.assertEqual(self.import_materials(preview=True)["imported"]["memories"], 1)
+        self.assertEqual(self.import_materials()["imported"]["memories"], 1)
+        self.assertEqual(files(), before)
+
     def test_pending_rejected_withdrawn_policy_denied_and_unbound_records_are_excluded(self):
         self.source.executescript("""
             CREATE TABLE review_queue(id TEXT PRIMARY KEY, memory_id TEXT, status TEXT);
@@ -423,6 +439,38 @@ class LegacyMemoryMaterialsTests(MemoryFixture, unittest.TestCase):
             self.legacy.verify(self.context, [{"id": "stale-history-item"}])
         self.assertEqual(caught.exception.code, "legacy_memory_result_changed")
         self.assertFalse(path.exists())
+
+
+    def test_destination_scoped_import_preserves_other_role_and_upgrades_old_shared_projection(self):
+        self.add_memory('old-row', '旧历史蓝风铃')
+        self.import_materials()
+        other = self.alternate_context(bot_id=self.context.scope.bot_id, role_id='other-history', session_selector=True)
+        self.context = self.context_for(self.context.actor, self.context.scope)
+        other_binding = replace(self.binding, target_role_id=other.role_binding.role.subject_id)
+        self.legacy.import_snapshot(self.snapshot, source_fingerprint='a'*64,
+                                   bindings=(other_binding,), destination_scoped=True)
+        self.assertEqual(len(self.legacy.query(self.context).unwrap()['items']), 1)
+        self.assertEqual(len(self.legacy.query(other).unwrap()['items']), 1)
+        first = self.legacy.import_snapshot(self.snapshot, source_fingerprint='a'*64,
+                                            bindings=(self.binding,), destination_scoped=True)
+        repeated = self.legacy.import_snapshot(self.snapshot, source_fingerprint='a'*64,
+                                               bindings=(self.binding,), destination_scoped=True)
+        self.assertFalse(first['already_present'])
+        self.assertTrue(repeated['already_present'])
+        self.assertEqual(len(self.legacy.query(self.context).unwrap()['items']), 1)
+        self.assertEqual(len(self.legacy.query(other).unwrap()['items']), 1)
+
+    def test_natural_language_history_recall_ranks_keywords_and_keeps_cursor(self):
+        self.add_memory('one', '曾经一起看蓝风铃，留下往事')
+        self.add_memory('two', '旧日蓝风铃')
+        self.add_memory('unrelated', '明天吃什么')
+        self.import_materials()
+        first = self.legacy.query(self.context, query_intent='还记得蓝风铃吗', lexical=True, limit=1).unwrap()
+        second = self.legacy.query(self.context, query_intent='还记得蓝风铃吗', lexical=True,
+                                   limit=1, cursor=first['next_cursor']).unwrap()
+        self.assertEqual((len(first['items']), len(second['items'])), (1,1))
+        self.assertNotEqual(first['items'][0]['id'], second['items'][0]['id'])
+        self.assertTrue(all('蓝风铃' in page['items'][0]['text'] for page in (first,second)))
 
 
 if __name__ == "__main__":

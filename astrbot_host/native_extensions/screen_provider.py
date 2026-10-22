@@ -13,7 +13,7 @@ import sqlite3
 
 
 SCHEMA = "companion.native-provider.v1"
-PLUGIN_ID = "astrbot_plugin_private_companion_v2.screen"
+PLUGIN_ID = "astrbot_plugin_private_companion.screen"
 ACTION = "screen.capture"
 MAX_BYTES = 5 * 1024 * 1024
 

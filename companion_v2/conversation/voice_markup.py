@@ -3,10 +3,21 @@
 import re
 
 
+VOICE_TAG_NAME_PATTERN = r"(?:p[\s._-]*c{1,2}[\s._-]*tts|tts)"
+VOICE_PROTOCOL_LT = r"(?:<|&lt;|&#0*60;|&#x0*3c;)"
+VOICE_PROTOCOL_GT = r"(?:>|&gt;|&#0*62;|&#x0*3e;)"
+
+
+def canonical_voice_tag(name):
+    """Normalize common separator and doubled-letter slips in voice tags."""
+    normalized = re.sub(r"[\s._-]+", "", str(name).casefold())
+    return "pc_tts" if normalized in {"pctts", "pcctts"} else normalized
+
+
 _TAG_NAMES = ("whisper", "emphasis", "soft", "fast", "slow", "stress", "forceful",
               "french", "spanish", "german", "japanese", "chinese", "korean", "italian")
-_LT = r"(?:<|&lt;|&#0*60;|&#x0*3c;)"
-_GT = r"(?:>|&gt;|&#0*62;|&#x0*3e;)"
+_LT = VOICE_PROTOCOL_LT
+_GT = VOICE_PROTOCOL_GT
 _CONTROLS = re.compile(
     rf"{_LT}\s*(?P<close>/?)\s*(?P<tag>{'|'.join(_TAG_NAMES)})\s*{_GT}"
     r"|(?P<cue>(?<!\[)\[[^\[\]\r\n]+\](?!\]|\s*\())", re.I)

@@ -13,6 +13,8 @@ from types import SimpleNamespace
 
 # Keep AstrBot's import-time database under a disposable test root.
 from tests.astrbot_data_root import assert_sdk_database_isolated
+from astrbot.api.web import PluginRequest, bind_request_context
+from starlette.requests import Request
 
 from astrbot_host.legacy_api import LegacyMigrationWebAPI
 from astrbot_host.multi_controller import AstrBotMultiController
@@ -51,13 +53,29 @@ def _target_role_id(source_persona_id: str, target_id="first") -> str:
     return "migration-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
 
 
-def _role_context(base_context, role_id):
+def _role_context(base_context, role_id, *, runtime=None, at=None):
     if base_context.role_binding.role.subject_id == role_id:
         return base_context
     role = replace(base_context.role_binding.role, subject_id=role_id)
-    binding = replace(base_context.role_binding, role=role)
+    if runtime is None:
+        raise ValueError("mapped_role_requires_persistent_binding")
+    from companion_v2.identity_policy.personas import ConversationRoute, PersonaDirectory
+    from companion_v2.identity_policy.repository import PersistentIdentityDirectory
+    scope = replace(base_context.scope, conversation_id="migration-acceptance:" + role_id)
+    PersonaDirectory(runtime).register_route(ConversationRoute(scope, user=base_context.actor.subject),
+                                             observed_at=at)
+    identities = PersistentIdentityDirectory(runtime)
+    existing = identities.resolve_role(scope, observed_at=at)
+    if existing.is_success:
+        binding = existing.unwrap()
+        if binding.role != role:
+            raise RuntimeError("mapped_role_binding_changed")
+    else:
+        if existing.failure.code != "role_binding_missing":
+            raise RuntimeError("mapped_role_binding_invalid")
+        binding = identities.bind_role(scope=scope, role=role, expected_revision=0, observed_at=at)
     return TaskContext(base_context.actor, binding,
-        AudienceRef(base_context.scope, (base_context.actor.subject,)))
+        AudienceRef(scope, (base_context.actor.subject,)))
 
 
 def _require(outcome, label: str):
@@ -70,13 +88,46 @@ def _require(outcome, label: str):
 async def _apply(api, migration, root, session, *, source_group_id="", source_persona_id="",
                  import_reactions=False, import_group_network=False, confirm_member_ids=False,
                  import_journals=False, confirm_persona_mapping=False, import_worldbook=False,
-                 import_archive=False):
+                 import_archive=False, import_reference_images=False, import_wardrobe_items=False):
     plan = _require(api._data_plan(migration, root, session, source_group_id, source_persona_id),
                     "data_plan")
-    return _require(await api._data_apply(
-        migration, root, session, plan["plan_token"], source_group_id, source_persona_id,
-        import_reactions, import_group_network, confirm_member_ids, import_journals,
-        confirm_persona_mapping, import_worldbook, import_archive), "data_apply")
+    request = PluginRequest(Request({"type": "http", "method": "POST", "path": "/",
+        "headers": [], "query_string": b""}), username="acceptance-admin")
+    with bind_request_context(request):
+        return _require(await api._data_apply(
+            migration, root, session, plan["plan_token"], source_group_id, source_persona_id,
+            import_reactions, import_group_network, confirm_member_ids, import_journals,
+            confirm_persona_mapping, import_worldbook, import_archive,
+            import_reference_images=import_reference_images, import_wardrobe_items=import_wardrobe_items,
+            confirm_reference_persona_mapping=confirm_persona_mapping), "data_apply")
+
+
+def _verify_references(application, context, source_plan, root):
+    service = application.references
+    owner = service.owner(context)
+    assets = service.assets.list(owner)
+    by_hash = {asset.content_hash.sha256: asset for asset in assets}
+    expected = {item.sha256: item for item in source_plan.reference_images}
+    expected.update({item.image.sha256: item.image for item in source_plan.wardrobe_items
+                     if item.image is not None})
+    from companion_v2.legacy.data_migration import load_reference_image
+    for sha, item in expected.items():
+        asset = by_hash.get(sha)
+        if asset is None or service.assets.get_payload(owner, asset.asset_id) != load_reference_image(root, item):
+            raise RuntimeError("reference_payload_mismatch")
+        if not set(item.roles) <= set(service.assets.roles_of(owner, asset.asset_id)):
+            raise RuntimeError("reference_roles_mismatch")
+    items = {item.item_id: item for item in service.assets.list_items(owner)}
+    for item in source_plan.wardrobe_items:
+        saved = items.get(item.item_id)
+        if saved is None or (saved.name, saved.description, saved.tags) != (
+                item.name, item.description, tuple(sorted(item.tags))):
+            raise RuntimeError("wardrobe_content_mismatch")
+        if item.image is not None and saved.asset_id != by_hash[item.image.sha256].asset_id:
+            raise RuntimeError("wardrobe_reference_mismatch")
+    if len(assets) != len(expected) or len(items) != len(source_plan.wardrobe_items):
+        raise RuntimeError("reference_owner_isolation_mismatch")
+    return {"reference_payloads": len(expected), "wardrobe_items": len(items)}
 
 
 def _source_files(root, config_path, plans):
@@ -153,7 +204,8 @@ async def run(v1_root: Path, v1_config_path: Path, *, target_sources=None,
             "journal_derivative_records_created": 0, "worldbook_entries": 0,
             "worldbook_members": 0, "group_worldbook_entries": 0,
             "group_worldbook_members": 0, "private_duplicate_retries": 0,
-            "archive_files": 0, "archive_bytes": 0}
+            "archive_files": 0, "archive_bytes": 0, "reference_images_created": 0,
+            "wardrobe_items_created": 0}
         try:
             _require(await controller.initialize_profile(), "initialize")
             _require(await controller.start(), "start")
@@ -166,7 +218,8 @@ async def run(v1_root: Path, v1_config_path: Path, *, target_sources=None,
                 migration = bundle["migration"]
                 base_context = controller.session.authority.context(target_id, "role-a")
                 role_id = _target_role_id(source_persona_id, target_id)
-                private_context = _role_context(base_context, role_id)
+                private_context = _role_context(base_context, role_id,
+                    runtime=controller.runtime, at=clock.now())
                 private_session = SimpleNamespace(
                     profile=SimpleNamespace(target=private_context),
                     application=controller.session.application)
@@ -184,6 +237,8 @@ async def run(v1_root: Path, v1_config_path: Path, *, target_sources=None,
                         source_persona_id=source_persona_id, confirm_member_ids=True,
                         import_reactions=True, import_journals=bool(source_plan.journals),
                         confirm_persona_mapping=True, import_worldbook=True,
+                        import_reference_images=bool(source_plan.reference_images),
+                        import_wardrobe_items=bool(source_plan.wardrobe_items),
                         import_archive=(target_id not in archive_results
                                         and not skip_incomplete_archive))
                     if result["errors"]:
@@ -194,6 +249,9 @@ async def run(v1_root: Path, v1_config_path: Path, *, target_sources=None,
                         private_counts[field] += result[field]
                     private_counts["reaction_remaining"] = result["reaction_remaining"]
                     private_counts["journal_remaining"] = result["journal_remaining"]
+                    references = result["reference_images"] or {}
+                    totals["reference_images_created"] += references.get("reference_created", 0)
+                    totals["wardrobe_items_created"] += references.get("wardrobe_created", 0)
                     if result["archive"]:
                         archive_result = result["archive"]
                         if target_id not in archive_results:
@@ -201,10 +259,12 @@ async def run(v1_root: Path, v1_config_path: Path, *, target_sources=None,
                             totals["archive_files"] += archive_result["file_count"]
                             totals["archive_bytes"] += archive_result["total_bytes"]
                     private_worldbook = result["worldbook"]
-                    if not private_counts["reaction_remaining"] and not private_counts["journal_remaining"]:
+                    if (not private_counts["reaction_remaining"] and not private_counts["journal_remaining"]
+                            and not references.get("reference_remaining") and not references.get("wardrobe_remaining")):
                         break
-                    if attempt == 100 or not any(result[field] for field in (
-                            "reaction_created", "journal_created", "journal_derivatives_created")):
+                    if attempt == 100 or not (any(result[field] for field in (
+                            "reaction_created", "journal_created", "journal_derivatives_created"))
+                            or references.get("reference_created") or references.get("wardrobe_created")):
                         raise RuntimeError("private_import_batch_stalled")
 
                 totals["reaction_assets_created"] += private_counts["reaction_created"]
@@ -220,7 +280,9 @@ async def run(v1_root: Path, v1_config_path: Path, *, target_sources=None,
                 repeated_private = await _apply(api, migration, v1_root, private_session,
                     source_persona_id=source_persona_id, confirm_member_ids=True,
                     import_reactions=True, import_journals=bool(source_plan.journals),
-                    confirm_persona_mapping=True, import_worldbook=True)
+                    confirm_persona_mapping=True, import_worldbook=True,
+                    import_reference_images=bool(source_plan.reference_images),
+                    import_wardrobe_items=bool(source_plan.wardrobe_items))
                 if repeated_private["errors"]:
                     raise RuntimeError("private_retry_errors:" + ",".join(sorted(
                         {str(item.get("reason", "unknown")) for item in repeated_private["errors"]})))
@@ -228,6 +290,11 @@ async def run(v1_root: Path, v1_config_path: Path, *, target_sources=None,
                         "reaction_created", "journal_created", "journal_derivatives_created",
                         "reaction_remaining", "journal_remaining", "journal_derivatives_remaining")):
                     raise RuntimeError("private_retry_not_idempotent")
+                if any((repeated_private["reference_images"] or {}).get(field, 0) for field in (
+                        "reference_created", "reference_roles_added", "wardrobe_created",
+                        "reference_remaining", "wardrobe_remaining")):
+                    raise RuntimeError("reference_retry_not_idempotent")
+                _verify_references(private_session.application, private_context, source_plan, v1_root)
                 retry_worldbook = repeated_private.get("worldbook") or {}
                 retry_states = [retry_worldbook.get(field, "unchanged") for field in (
                     "base_state", "entries_state", "members_state", "group_state")]
@@ -332,6 +399,7 @@ async def run(v1_root: Path, v1_config_path: Path, *, target_sources=None,
 
             reopened_groups = []
             persisted_dream_fragments = 0
+            persisted_references = {"reference_payloads": 0, "wardrobe_items": 0}
             for mapping in role_mappings:
                 target_id = mapping["target_id"]
                 source_persona_id = mapping["source_persona_id"]
@@ -343,9 +411,13 @@ async def run(v1_root: Path, v1_config_path: Path, *, target_sources=None,
                 v1_root = bundle["root"]
                 migration = bundle["migration"]
                 reopened_base = _role_context(
-                    reopened.session.authority.context(target_id, "role-a"), role_id)
+                    reopened.session.authority.context(target_id, "role-a"), role_id,
+                    runtime=reopened.runtime, at=clock.now())
                 private_session = SimpleNamespace(profile=SimpleNamespace(target=reopened_base),
                     application=reopened.session.application)
+                verified = _verify_references(private_session.application, reopened_base, source_plan, v1_root)
+                for name, count in verified.items():
+                    persisted_references[name] += count
                 preview = _require(api._data_plan(migration, v1_root, private_session,
                     source_persona_id=source_persona_id), "reload_preview")
                 if (preview["reaction_assets"]["already_present"] != expected["reaction_assets"]["ready"]
@@ -464,6 +536,7 @@ async def run(v1_root: Path, v1_config_path: Path, *, target_sources=None,
                         "personas_verified": len(role_mappings),
                         "targets_verified": len(source_bundles),
                         "journal_fragments": persisted_dream_fragments,
+                        **persisted_references,
                         "groups": reopened_groups,
                     },
                     "model_calls": model_calls,

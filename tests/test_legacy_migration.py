@@ -260,6 +260,7 @@ class RealityConfigurationMigrationTests(LegacyMigrationTestCase):
             "camera.analysis_timeout_seconds": 30,
             "audio.default_playback_volume": 42,
             "timezone": "Asia/Shanghai",
+            "vision_provider_id": "legacy-provider-private",
         })
         self.assertTrue(any(item["field"] == "reality.camera.index"
                             and item["kind"] == "device_mapping_required"
@@ -286,6 +287,78 @@ class RealityConfigurationMigrationTests(LegacyMigrationTestCase):
 
         self.assertNotEqual(first.configuration_context_fingerprint,
                             second.configuration_context_fingerprint)
+
+
+class ImageCompanionConfigurationMigrationTests(LegacyMigrationTestCase):
+    @staticmethod
+    def image_configuration(*, route=True):
+        return {
+            "enabled": True,
+            "comfyui": {
+                "base_url": "http://127.0.0.1:8188",
+                "api_key": "private-image-key",
+                "workflows": [
+                    {"name": "text", "workflow": {"secret-node": {"inputs": {}}},
+                     "mapping": {"fields": {}, "output_node": "secret-node"}},
+                ],
+            },
+            "preparation": {
+                "chat_enabled": True,
+                "default_generate_route": "text-route" if route else "missing-route",
+                "routes": [{"route_id": "text-route", "backend": "comfyui",
+                            "operation": "generate", "workflow_id": "text"}],
+            },
+        }
+
+    def test_standalone_image_configuration_produces_one_redacted_intent(self):
+        planned = LegacyMigration(
+            v1_root=self.root, v1_image_configuration=self.image_configuration(),
+        ).plan()
+        self.assertTrue(planned.is_success, planned.failure)
+        plan = planned.unwrap()
+        image_intents = [item for item in plan.intents if item.target_kind == "image_output_config"]
+        self.assertEqual(len(image_intents), 1)
+        self.assertEqual(image_intents[0].source_id, "image.configuration")
+        self.assertEqual(image_intents[0].changes["operation_routes"],
+                         {"generate": ["comfyui"], "edit": []})
+        self.assertTrue(image_intents[0].changes["enabled"])
+        self.assertEqual(image_intents[0].changes["legacy_options"]["image_companion_selected_workflows"],
+                         {"generate": "text"})
+        document = json.dumps(plan.document(), ensure_ascii=False)
+        self.assertNotIn("private-image-key", document)
+        self.assertNotIn("secret-node", document)
+        self.assertIn("workflow_operations", document)
+
+    def test_private_preferences_and_standalone_routes_merge_without_duplicate_write(self):
+        planned = LegacyMigration(
+            v1_root=self.root,
+            v1_configuration={"photo_action_config": {
+                "photo_generation_backend": "sdgen",
+                "photo_generation_style": "anime",
+                "external_image_download_proxy": "http://127.0.0.1:7890",
+            }},
+            v1_image_configuration=self.image_configuration(),
+        ).plan()
+        self.assertTrue(planned.is_success, planned.failure)
+        intents = planned.unwrap().intents
+        image_intents = [item for item in intents if item.target_kind == "image_output_config"]
+        self.assertEqual(len(image_intents), 1)
+        self.assertTrue(image_intents[0].changes["enabled"])
+        self.assertEqual(image_intents[0].changes["network"]["download_proxy"],
+                         "http://127.0.0.1:7890")
+        self.assertIn("photo_action_config.external_image_download_proxy",
+                      image_intents[0].sources["network"])
+        self.assertTrue(any(item.scope == "conversation.image_output"
+                            and item.changes.get("style") == "anime" for item in intents))
+
+    def test_other_configured_backend_does_not_enable_an_unrouted_default(self):
+        raw = self.image_configuration(route=False)
+        raw["sd_webui"] = {"base_url": "http://127.0.0.1:7860"}
+        planned = LegacyMigration(v1_root=self.root, v1_image_configuration=raw).plan()
+        self.assertTrue(planned.is_success, planned.failure)
+        self.assertFalse(any(item.changes.get("enabled") is True
+                             for item in planned.unwrap().intents
+                             if item.target_kind == "image_output_config"))
 
 
 class ConversionTests(LegacyMigrationTestCase):
@@ -469,7 +542,12 @@ class HelperTests(LegacyMigrationTestCase):
                                               "v2.group-relationship-importer",
                                               "v2.reaction-asset-importer",
                                               "v2.memory-snapshot-archive",
-                                              "v2.reality-config-migrator"}))
+                                              "v2.reality-config-migrator",
+                                              "v2.person-private-memory-importer",
+                                              "v2.image-config-migrator",
+                                              "v2.content-config-migrator",
+                                              "v2.memory-config-migrator",
+                                              "v2.native-extension-config-migrator"}))
 
 
 if __name__ == "__main__":

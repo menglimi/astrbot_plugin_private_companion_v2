@@ -254,7 +254,7 @@ class TokenUsageTracker:
             {
                 "available": True,
                 "display_name": self.display_name,
-                "plugin_name": "astrbot_plugin_private_companion_v2." + self.source,
+                "plugin_name": "astrbot_plugin_private_companion." + self.source,
                 "counted_in_private_companion_budget": False,
                 "note": self.note,
             }

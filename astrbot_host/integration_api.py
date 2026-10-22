@@ -19,7 +19,7 @@ from .integration_registry import UnifiedCompanionExtensionAPI
 from .native_extensions.builtins import MANAGED_EXTENSIONS
 
 
-PREFIX = "/astrbot_plugin_private_companion_v2"
+PREFIX = "/astrbot_plugin_private_companion"
 
 
 class IntegrationWebAPI:
@@ -61,11 +61,9 @@ class IntegrationWebAPI:
                     ))
                 return {"status": "ok", "message": "", "data": UnifiedCompanionExtensionAPI(controller).manifest()}
         except TaskError as error:
-            return {
-                "status": "error",
-                "message": str(error),
-                "data": {"code": error.code},
-            }
+            from .web_api import outcome_response
+
+            return outcome_response(Outcome.failed(error.code, str(error)))
 
     async def lifecycle(self) -> dict[str, Any]:
         from .web_api import outcome_response

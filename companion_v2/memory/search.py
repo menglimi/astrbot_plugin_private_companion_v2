@@ -119,7 +119,8 @@ class SearchIndex:
         This separate connection closes before the owner's transaction commits.
         """
         with closing(self._open()) as db, db:
-            db.execute("ATTACH DATABASE ? AS reflection_owner", (database_path.as_uri() + "?mode=ro",))
+            from companion_v2.storage.sqlite_path import readonly_uri
+            db.execute("ATTACH DATABASE ? AS reflection_owner", (readonly_uri(database_path),))
             db.execute("BEGIN")
             yield db
 

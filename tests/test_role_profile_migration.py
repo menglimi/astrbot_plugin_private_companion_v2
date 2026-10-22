@@ -167,7 +167,7 @@ class RoleProfileMigrationAPITests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.temporary = TemporaryDirectory(prefix="companion-role-profile-migration-")
         self.addCleanup(self.temporary.cleanup)
-        self.data_root = Path(self.temporary.name) / "data" / "plugin_data" / "astrbot_plugin_private_companion_v2"
+        self.data_root = Path(self.temporary.name) / "data" / "plugin_data" / "companion-v2"
         self.data_root.mkdir(parents=True)
         self.v1_config_path = self.data_root.parent.parent / "config" / V1_HOST_CONFIG_NAME
         self.v1_config_path.parent.mkdir(parents=True)
@@ -250,6 +250,20 @@ class RoleProfileMigrationAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replay["status"], "ok", replay)
         self.assertTrue(replay["data"]["replayed"])
 
+    async def test_relocated_runtime_reads_v1_settings_from_canonical_root(self):
+        await self.initialize()
+        relocated = Path(self.temporary.name) / "relocated-v2"
+        relocated.mkdir(parents=True)
+        self.controller.data_root = relocated
+        self.controller.default_data_root = self.data_root
+
+        plan = (await self.migration_plan())["data"]
+
+        self.assertEqual(plan["source"]["kind"], "v1_world_knowledge")
+        self.assertEqual(plan["source"]["name"], "V1 世界知识 / 角色设定")
+        self.assertEqual(plan["changes"]["name"], "澄溪")
+        self.assertEqual(plan["changes"]["personality"], "安静认真。")
+
     async def test_existing_fields_are_preserved_and_target_changes_invalidate_the_plan(self):
         await self.initialize()
         target = role_profile_target_for(self.controller.session.profile.target)
@@ -271,6 +285,42 @@ class RoleProfileMigrationAPITests(unittest.IsolatedAsyncioTestCase):
 
         result = await self.post_route("/profile-migration-apply", body)
         self.assertEqual(result["data"]["code"], "configuration_revision_conflict")
+
+    async def test_grouped_v670_configuration_preserves_world_knowledge_source(self):
+        self.v1_config = {
+            "basic_config": {"enable_multi_persona_mode": False,
+                             "plugin_specific_persona_id": "original"},
+            "life_schedule_config": {"schedule_persona_prompt": self.V1_ROLE_PROFILE},
+            "message_debounce_config": {"private_image_self_recognition_hint": "角色图像线索"},
+            "schedule_persona_prompt": "姓名：过时平铺副本",
+        }
+        self.write_v1_config()
+        await self.initialize()
+        plan = (await self.migration_plan())["data"]
+        self.assertEqual(plan["source"]["kind"], "v1_world_knowledge")
+        self.assertEqual(plan["changes"]["name"], "澄溪")
+        self.assertEqual(plan["changes"]["image_identity_hint"], "角色图像线索")
+        response = await self.post_route("/profile-migration-apply", {
+            "persona_id": "original", "plan_token": plan["plan_token"],
+            "edit_token": plan["edit_token"], "changes": plan["changes"]})
+        self.assertEqual(response["status"], "ok", response)
+        self.v1_config["basic_config"]["plugin_specific_persona_id"] = "other"
+        self.write_v1_config()
+        mismatch = await self.migration_plan()
+        self.assertEqual(mismatch["data"]["code"], "role_profile_migration_source_persona_mismatch")
+
+    async def test_dotted_v670_exports_are_supported(self):
+        self.v1_config = {
+            "basic_config.enable_multi_persona_mode": False,
+            "basic_config.plugin_specific_persona_id": "original",
+            "life_schedule_config.schedule_persona_prompt": self.V1_ROLE_PROFILE,
+        }
+        self.write_v1_config()
+        await self.initialize()
+        result = await self.migration_plan()
+        self.assertEqual(result["status"], "ok", result)
+        self.assertEqual(result["data"]["source"]["kind"], "v1_world_knowledge")
+        self.assertEqual(result["data"]["changes"]["name"], "澄溪")
 
     async def test_source_change_after_preview_is_rejected(self):
         await self.initialize()

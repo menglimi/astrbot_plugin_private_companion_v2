@@ -69,9 +69,9 @@ class RuleTableTests(unittest.TestCase):
     def test_generated_table_covers_the_audited_registry_mappings(self):
         rules = configuration_rules()
 
-        self.assertEqual(len(rules), 347)
-        self.assertEqual(sum(item["confidence"] == "high" for item in rules), 282)
-        self.assertEqual(sum(item["confidence"] == "medium" for item in rules), 65)
+        self.assertEqual(len(rules), 367)
+        self.assertEqual(sum(item["confidence"] == "high" for item in rules), 300)
+        self.assertEqual(sum(item["confidence"] == "medium" for item in rules), 67)
         self.assertEqual(len({item["source"] for item in rules}), len(rules))
 
         expected = {row["v1_key"] for row in self._ledger_rows()
@@ -79,11 +79,19 @@ class RuleTableTests(unittest.TestCase):
                     and row["verified_verdict"] in {"already-in-v2", "renamed-equivalent"}
                     and row["verified_confidence"] in {"high", "medium"}}
         specialized = {
+            "basic_config.enable_environment_perception",
             "legacy_compat_config.segmented_proactive_image_strategy",
             "legacy_compat_config.segmented_proactive_voice_strategy",
             "legacy_compat_config.segmented_proactive_at_strategy",
+            "message_debounce_config.enable_message_debounce",
+            "message_debounce_config.enable_semantic_message_debounce",
+            "message_debounce_config.text_message_debounce_seconds",
+            "message_debounce_config.semantic_message_debounce_seconds",
+            "message_debounce_config.text_message_debounce_max_wait_seconds",
         }
-        self.assertEqual({item["source"] for item in rules}, expected - specialized
+        self.assertEqual({item["source"] for item in rules}, (expected | {f"humanized_state_config.advanced_cycle_{phase}_{suffix}"
+                             for phase in ("follicular", "pre_ovulation", "ovulation", "luteal")
+                             for suffix in ("days", "prompt", "mood", "energy")}) - specialized
                          - {"voice_action_config.tts_message_scope", "basic_config.owner_exclusive_proactive_limit"})
         self.assertEqual({item["source"] for item in configuration_exclusions()}, {
             "emotion_relationship_config.enable_smart_silence",
@@ -124,7 +132,14 @@ class RuleTableTests(unittest.TestCase):
         self.assertIn("V2 原生 Image 拓展", endpoints["summary"])
 
         headers = by_source["photo_action_config.external_image_api_custom_headers"]
-        self.assertEqual(headers["verdict"], "not-migrated-by-design")
+        self.assertEqual(headers["verdict"], "implemented-elsewhere")
+        self.assertEqual(headers["target"], "image.output.endpoints[].custom_headers")
+        self.assertEqual(by_source["photo_action_config.backup_external_image_api_custom_headers"]["target"],
+                         "image.output.endpoints[].custom_headers")
+        self.assertEqual(by_source["photo_action_config.external_image_download_proxy"]["target"],
+                         "image.output.network.download_proxy")
+        self.assertEqual(by_source["photo_action_config.external_image_download_use_environment_proxy"]["target"],
+                         "image.output.network.use_environment_proxy")
 
     def test_removed_relationship_proactive_limit_is_deliberately_not_migrated(self):
         source = "basic_config.owner_exclusive_proactive_limit"
@@ -143,6 +158,97 @@ class RuleTableTests(unittest.TestCase):
         self.assertEqual(by_source["experimental_motivation_config.enable_emotion_simulation"]["target"],
                          "role.state.mood_enabled")
         self.assertNotIn("emotion_relationship_config.enable_smart_silence", by_source)
+
+    def test_nested_legacy_paths_are_read_and_reported(self):
+        source = "basic_config.relationship_stage_provider_routes.close"
+        differences = unmapped_configuration_differences({
+            "basic_config": {"relationship_stage_provider_routes": {"close": "legacy-provider"}},
+        })
+        item = next(item for item in differences if item.source_key == source)
+        self.assertEqual(item.kind, "not_migrated")
+        self.assertEqual(item.field_id, source)
+
+    def test_recent_configuration_mappings_have_their_narrow_v2_targets(self):
+        registry_rules = {item["source"]: item for item in configuration_rules()}
+        self.assertEqual(registry_rules["basic_config.enable_holiday_perception"]["target"],
+                         "conversation.perception.holiday_enabled")
+        self.assertEqual(registry_rules["basic_config.holiday_country"]["target"],
+                         "conversation.perception.holiday_country")
+        semantic_rules = {item["source"]: item for item in semantic_configuration_rules()}
+        self.assertEqual(semantic_rules["group_slang_topic_config.enable_group_slang_web_search"]["target"],
+                         "semantic.slang_web_search_enabled")
+
+    def test_holiday_switch_and_region_are_applied_to_live_perception_fields(self):
+        from companion_v2.conversation.perception_settings import configuration_fields
+
+        fields = FieldRegistry(version="migration-perception", fields=configuration_fields())
+        rules = tuple(item for item in configuration_rules()
+                      if item["source"] in {
+                          "basic_config.enable_holiday_perception", "basic_config.holiday_country"})
+        result = convert_configuration({"basic_config": {
+            "enable_holiday_perception": False, "holiday_country": "WEEKEND_ONLY",
+        }}, registry=fields, rules=rules)
+
+        self.assertEqual(result.changes, {
+            "conversation.perception.holiday_enabled": False,
+            "conversation.perception.holiday_country": "WEEKEND_ONLY",
+        })
+
+    def test_environment_master_switch_preserves_v1_disabled_behavior(self):
+        from companion_v2.conversation.perception_settings import configuration_fields
+
+        fields = FieldRegistry(version="migration-perception-master", fields=configuration_fields())
+        result = convert_configuration({"basic_config": {
+            "enable_environment_perception": False,
+            "enable_platform_perception": True,
+            "enable_model_perception": True,
+        }}, registry=fields)
+
+        self.assertEqual({
+            target: result.changes[target]
+            for target in (
+                "conversation.perception.calendar_enabled",
+                "conversation.perception.platform_enabled",
+                "conversation.perception.model_route_enabled",
+                "conversation.perception.configured_modalities_enabled",
+            )
+        }, {
+            "conversation.perception.calendar_enabled": False,
+            "conversation.perception.platform_enabled": False,
+            "conversation.perception.model_route_enabled": False,
+            "conversation.perception.configured_modalities_enabled": False,
+        })
+        self.assertEqual(
+            {item.kind for item in result.differences if item.source_key ==
+             "basic_config.enable_environment_perception"},
+            {"inactive_source"},
+        )
+
+    def test_environment_master_switch_keeps_v2_child_preferences_when_enabled(self):
+        from companion_v2.conversation.perception_settings import configuration_fields
+
+        fields = FieldRegistry(version="migration-perception-master-enabled", fields=configuration_fields())
+        result = convert_configuration({"basic_config": {
+            "enable_environment_perception": True,
+            "enable_platform_perception": False,
+            "enable_model_perception": False,
+        }}, registry=fields)
+
+        self.assertEqual(result.changes["conversation.perception.platform_enabled"], False)
+        self.assertEqual(result.changes["conversation.perception.model_route_enabled"], False)
+        self.assertNotIn("conversation.perception.calendar_enabled", result.changes)
+        self.assertEqual(result.changes["conversation.perception.configured_modalities_enabled"], False)
+
+    def test_model_perception_switch_covers_the_split_modalities_field(self):
+        from companion_v2.conversation.perception_settings import configuration_fields
+
+        fields = FieldRegistry(version="migration-model-perception", fields=configuration_fields())
+        result = convert_configuration({"basic_config": {
+            "enable_model_perception": False,
+        }}, registry=fields)
+
+        self.assertEqual(result.changes["conversation.perception.model_route_enabled"], False)
+        self.assertEqual(result.changes["conversation.perception.configured_modalities_enabled"], False)
 
     def test_audit_differences_explain_unmapped_values_without_exposing_them(self):
         config = {"forward_message_config": {"forward_message_image_vision_timeout_seconds": 37},
@@ -213,7 +319,7 @@ class RuleTableTests(unittest.TestCase):
         rules = plugin_configuration_rules()
         schema = json.loads((Path(__file__).resolve().parents[1] / "_conf_schema.json").read_text(encoding="utf-8"))
 
-        self.assertEqual(len(rules), 45)
+        self.assertEqual(len(rules), 48)
         for rule in rules:
             section, _, name = rule["target"].partition(".")
             self.assertIn(name, schema[section]["items"], rule["target"])
@@ -240,7 +346,7 @@ class RuleTableTests(unittest.TestCase):
         from companion_v2.storage.semantic import DEFAULTS, INTEGER_LIMITS, PROBABILITY_FIELDS, SETTING_OPTIONS
 
         rules = semantic_configuration_rules()
-        self.assertEqual(len(rules), 15)
+        self.assertEqual(len(rules), 18)
         expected = {row["v1_key"] for row in self._ledger_rows()
                     if row["resolved_kind"] == "semantic-config"}
         self.assertEqual({item["source"] for item in rules}, expected)
@@ -262,7 +368,7 @@ class RuleTableTests(unittest.TestCase):
                     if row["resolved_kind"] == "plugin-config"
                     and row["verified_verdict"] in {"already-in-v2", "renamed-equivalent"}
                     and row["verified_confidence"] in {"high", "medium"}}
-        actual = {item["source"] for item in plugin_configuration_rules()}
+        actual = {item["source"] for item in plugin_configuration_rules()} - {"model_assignment_config."+name for name in ("enable_llm_streaming", "model_replacement_rules", "enable_sensitive_model_replacement", "SENSITIVE_REPLACEMENT_PROVIDER_ID")}
         account_configuration = {
             "basic_config.bot_scope_mode",
             "basic_config.bot_scope_ids",
@@ -275,7 +381,6 @@ class RuleTableTests(unittest.TestCase):
             "legacy_compat_config.target_group_ids",
         }
         manual_review = {
-            "message_debounce_config.enable_message_debounce",
             "model_fallback_overrides",
             "model_token_limit_overrides",
             "task_prompt_overrides",
@@ -298,6 +403,173 @@ class RuleTableTests(unittest.TestCase):
         }
 
         self.assertTrue(handled.issubset(eligible))
+
+
+class BehaviorConfigurationMigrationTests(unittest.TestCase):
+    def test_migrated_diary_enables_its_runtime_without_enabling_auto_sleep(self):
+        result = self.convert({"schedule_detail_config": {"enable_daily_diary": True},
+                               "legacy_compat_config": {"timezone": ""}})
+        self.assertTrue(result.changes["role.life.diary_enabled"])
+        self.assertTrue(result.changes["role.life.enabled"])
+        self.assertNotIn("role.life.sleep_enabled", result.changes)
+        self.assertNotIn("role.life.timezone", result.changes)
+        disabled = self.convert({"schedule_detail_config": {"enable_daily_diary": False}})
+        self.assertFalse(disabled.changes["role.life.enabled"])
+
+    def test_image_operation_policy_does_not_erase_memory_capabilities(self):
+        for operations in ([], ["image.generate"]):
+            result = convert_plugin_configuration({"operation_access": {"public_operations": operations}})
+            self.assertNotIn("multi_host.capabilities", result.changes)
+            self.assertTrue(any(item.source_key == "operation_access.public_operations"
+                                and item.kind == "manual_mapping" for item in result.differences))
+
+    def convert(self, config):
+        from companion_v2.expression.configuration import configuration_fields as expression_fields
+        from companion_v2.proactive.configuration import configuration_fields as contact_fields
+        from companion_v2.role_work.state.configuration import configuration_fields as state_fields
+        from companion_v2.role_work.life.configuration import configuration_fields as life_fields
+        from companion_v2.conversation.media.quota import configuration_fields as quota_fields
+        from companion_v2.conversation.reply_settings import configuration_fields as reply_fields
+        from companion_v2.conversation.segmentation import SegmentationPolicy
+
+        fields = FieldRegistry(version="migration.behavior", fields=(
+            *expression_fields(), *contact_fields(), *state_fields(), *life_fields(), *quota_fields(),
+            *reply_fields(SegmentationPolicy(enabled=False), True, 1.5),
+            FieldDefinition("model.proactive.judge.provider", "model.proactive.judge", "model_gateway",
+                            ValueKind.TEXT, "default")))
+        return convert_configuration(config, registry=fields)
+
+    def test_quiet_hours_preserve_the_complete_overnight_range(self):
+        result = self.convert({"basic_config": {"quiet_hours": "4:00-08:30"}})
+        self.assertEqual({key: value for key, value in result.changes.items()
+                          if key.startswith("proactive.contact.quiet_")}, {
+            "proactive.contact.quiet_enabled": True,
+            "proactive.contact.quiet_start": "04:00",
+            "proactive.contact.quiet_end": "08:30"})
+
+    def test_invalid_quiet_range_never_writes_a_partial_schedule(self):
+        result = self.convert({"basic_config": {"quiet_hours": "23:00-25:00"}})
+        self.assertFalse(any(key.startswith("proactive.contact.quiet_") for key in result.changes))
+        self.assertIn("invalid_value", {item.kind for item in result.differences})
+        disabled = self.convert({"basic_config": {"quiet_hours": ""}})
+        self.assertIs(disabled.changes["proactive.contact.quiet_enabled"], False)
+
+    def test_expression_settings_use_their_corresponding_live_fields(self):
+        result = self.convert({"memory_habit_config": {
+            "expression_learning_mode": "aggressive",
+            "expression_group_learning_daily_batch_limit": 6,
+            "expression_group_learning_min_new_messages": 20}})
+        self.assertEqual(result.changes, {
+            "expression.learning.learning_mode": "aggressive",
+            "expression.learning.group_daily_batch_limit": 6,
+            "expression.learning.group_new_messages": 20})
+
+    def test_selected_group_learning_is_never_expanded_to_all_groups(self):
+        for mode, enabled in (("selected", False), ("disabled", False), ("all", True)):
+            with self.subTest(mode=mode):
+                result = self.convert({"memory_habit_config": {
+                    "expression_group_learning_source_mode": mode}})
+                self.assertIs(result.changes["expression.learning.group_learning_enabled"], enabled)
+        disabled = self.convert({"memory_habit_config": {
+            "enable_expression_learning": False, "expression_group_learning_source_mode": "all"}})
+        self.assertIs(disabled.changes["expression.learning.group_learning_enabled"], False)
+
+    def test_distinct_old_limits_never_overwrite_the_contact_send_limit(self):
+        result = self.convert({"basic_config": {"default_proactive_daily_limit": 0},
+            "proactive_reach_config": {"max_daily_messages": 8},
+            "proactive_generation_config": {"proactive_persona_judge_max_daily": 200},
+            "recall_config": {"recall_message_cache_max_items": 300},
+            "memory_habit_config": {"meal_care_max_daily": 2}})
+        self.assertEqual(result.changes["proactive.contact.max_contacts_24h"], 8)
+        self.assertNotIn("conversation.recall.transcribe_max_items", result.changes)
+        self.assertNotIn("proactive.contact.enable_llm_proactive_persona_judge", result.changes)
+
+    def test_share_priority_and_creative_fraction_do_not_conflict_with_general_probability(self):
+        result = self.convert({"daily_creative_config": {
+            "proactive_share_probability": 25, "creative_share_probability": 0.28},
+            "proactive_reach_config": {"proactive_share_priority": 48}})
+        self.assertEqual(result.changes["proactive.contact.proactive_share_probability"], 25)
+        fraction = self.convert({"daily_creative_config": {"creative_share_probability": 0.28}})
+        self.assertEqual(fraction.changes["proactive.contact.proactive_share_probability"], 28)
+
+    def test_natural_cycle_and_explicit_intensity_remain_independent(self):
+        for enabled, expected in ((True, 3), (False, 0)):
+            with self.subTest(enabled=enabled):
+                result = self.convert({"humanized_state_config": {
+                    "advanced_cycle_start_offset": 0, "inject_passive_states": enabled,
+                    "humanized_state_intensity": 3}})
+                self.assertEqual(result.changes["role.state.cycle_initialization"], "natural")
+                self.assertEqual(result.changes["role.state.humanized_state_intensity"], expected)
+
+    def test_supported_components_keep_their_relative_order(self):
+        result = self.convert({"legacy_compat_config": {"segmented_proactive_component_order":
+            ["voice", "other", "image", "reaction", "text", "voice", "at"]}})
+        self.assertEqual(json.loads(result.changes["conversation.presentation.component_order"]),
+                         ["voice", "image", "text", "at"])
+        invalid = self.convert({"legacy_compat_config": {
+            "segmented_proactive_component_order": ["voice", "unknown"]}})
+        self.assertNotIn("conversation.presentation.component_order", invalid.changes)
+
+    def test_duplicate_split_words_remain_valid_for_the_actual_segmenter(self):
+        from companion_v2.conversation.segmentation import SegmentationPolicy
+
+        result = convert_plugin_configuration({"legacy_compat_config": {
+            "segmented_proactive_split_words": ["~", "，", "~", "，", "。"]}})
+        words = result.changes["segmentation.split_words"]
+        SegmentationPolicy(split_words=words)
+        self.assertEqual(json.loads(words), ["~", "，", "。"])
+
+    def test_empty_compatibility_actions_do_not_disable_explicit_current_switches(self):
+        result = self.convert({
+            "screen_action_config": {"enable_screen_glance_action": True},
+            "poke_action_config": {"enable_poke_action": True},
+            "voice_action_config": {"enable_voice_action": True},
+            "legacy_compat_config": {"enabled_proactive_actions": "", "allow_screen_peek_action": "",
+                                     "allow_poke_action": "", "allow_voice_action": ""}})
+        for name in ("screen_glance", "poke_action", "voice_action"):
+            self.assertIs(result.changes["proactive.contact." + name + "_enabled"], True)
+
+    def test_style_channels_preserve_nonempty_text_instead_of_colliding(self):
+        result = self.convert({"basic_config": {"default_style": "轻声", "reply_style_prompt": "自然接话",
+            "persona_conversation_voice_prompt": "偶尔停顿", "persona_planning_voice_prompt": "留些空闲",
+            "persona_creative_voice_prompt": "用角色的感受书写"},
+            "life_schedule_config": {"daily_plan_prompt": ""},
+            "schedule_detail_config": {"daily_diary_creativity": "balanced", "daily_diary_custom_direction": ""}})
+        self.assertEqual(result.changes["role.state.planning_prompt"], "留些空闲")
+        self.assertEqual(result.changes["role.life.diary_style_prompt"], "用角色的感受书写")
+        for text in ("轻声", "自然接话", "偶尔停顿"):
+            self.assertIn(text, result.changes["conversation.presentation.style_prompt"])
+        self.assertIn("自然接话", result.changes["proactive.contact.style_prompt"])
+        self.assertNotIn("conflict", {item.kind for item in result.differences})
+
+    def test_disabled_review_does_not_override_the_active_persona_judge_or_its_model(self):
+        result = self.convert({"proactive_generation_config": {
+            "enable_llm_proactive_persona_judge": True, "PROACTIVE_PERSONA_JUDGE_PROVIDER_ID": "judge"},
+            "emotion_relationship_config": {"enable_proactive_message_review": False},
+            "model_assignment_config": {"RESPONSE_REVIEW_PROVIDER_ID": "review", "SMART_SILENCE_PROVIDER_ID": "silence"}})
+        self.assertIs(result.changes["proactive.contact.enable_llm_proactive_persona_judge"], True)
+        self.assertEqual(result.changes["model.proactive.judge.provider"], "judge")
+        self.assertNotIn("conflict", {item.kind for item in result.differences})
+
+    def test_image_limits_keep_the_old_unlimited_sentinel_and_effective_limit(self):
+        for global_limit, user_limit, expected in ((-1, 1, 1), (-1, 0, -1), (0, 1, 0), (3, 1, 1)):
+            with self.subTest(global_limit=global_limit, user_limit=user_limit):
+                result = self.convert({"photo_action_config": {
+                    "photo_generation_proactive_max_daily": global_limit, "photo_action_max_daily": user_limit}})
+                self.assertEqual(result.changes["conversation.media_quota.proactive_max_daily"], expected)
+
+    def test_image_history_capacity_uses_the_supported_bound_instead_of_falling_back_to_default(self):
+        result = self.convert({"message_debounce_config": {"context_image_caption_max_items": 12}})
+        self.assertEqual(result.changes["conversation.presentation.context_image_caption_max_items"], 8)
+        self.assertIn("partial_mapping", {item.kind for item in result.differences})
+
+    def test_development_memory_budget_does_not_override_the_formal_context_budget(self):
+        fields = registry("memory.context_items", ValueKind.INTEGER, 3, minimum=0, maximum=16)
+        result = convert_configuration({"external_memory_config": {
+            "enable_new_framework_dev_e2e": True, "new_framework_dev_e2e_max_memory_items": 3,
+            "memory_companion_context_top_k": 5}}, registry=fields)
+        self.assertEqual(result.changes["memory.context_items"], 5)
+        self.assertNotIn("conflict", {item.kind for item in result.differences})
 
 
 class AccountConfigurationMigrationTests(unittest.TestCase):
@@ -472,6 +744,28 @@ class AccountConfigurationMigrationTests(unittest.TestCase):
         ])
         self.assertEqual(result.changes["target.persona_id"], "persona-b")
         self.assertEqual(result.changes["target.role_id"], "role-100-b")
+
+    def test_single_private_target_preselects_only_one_unambiguous_persona_mapping(self):
+        accounts = self.accounts()[:1]
+        result = convert_account_configuration({
+            "basic_config": {"bot_scope_mode": "all", "target_user_ids": ["200"],
+                             "enable_multi_persona_mode": True,
+                             "multi_persona_ids": ["persona-b"]},
+        }, accounts=accounts)
+
+        self.assertEqual(result.changes["target.persona_id"], "persona-b")
+        self.assertEqual(result.changes["target.role_id"], "role-100-b")
+
+    def test_ambiguous_multi_persona_mapping_does_not_preselect_a_single_target(self):
+        result = convert_account_configuration({
+            "basic_config": {"bot_scope_mode": "all", "target_user_ids": ["200"],
+                             "enable_multi_persona_mode": True,
+                             "multi_persona_ids": ["persona-a", "persona-b"]},
+        }, accounts=self.accounts()[:1])
+
+        self.assertIn("multi_host.personas", result.changes)
+        self.assertNotIn("target.persona_id", result.changes)
+        self.assertNotIn("target.role_id", result.changes)
 
     def test_authoritative_no_persona_binding_keeps_the_default_role(self):
         accounts = self.accounts()[:1]
@@ -771,6 +1065,11 @@ class WindowedSegmentationMigrationTests(unittest.TestCase):
         self.assertEqual(result.sources["weather.provider"], ("weather_config.weather_source",))
         self.assertEqual(plugin_configuration_defaults()["weather.provider"], "auto")
 
+    def test_defaults_include_host_fields_without_automatic_legacy_rules(self):
+        defaults = plugin_configuration_defaults()
+        self.assertEqual(defaults["runtime.quiet_seconds"], 0)
+        self.assertEqual(defaults["runtime.maximum_wait_seconds"], 0)
+
     def test_v1_global_full_probability_preserves_automatic_voice_when_auto_switch_is_off(self):
         source = {"voice_action_config": {"tts_frequency_control_mode": "global", "tts_trigger_probability": 100,
                   "tts_private_trigger_probability": -1, "tts_group_trigger_probability": -1},
@@ -787,8 +1086,10 @@ class WindowedSegmentationMigrationTests(unittest.TestCase):
         source = {"voice_action_config": {"tts_frequency_control_mode": "global", "tts_trigger_probability": 100,
                   "tts_private_trigger_probability": -1, "tts_group_trigger_probability": 20},
                   "auto_voice_config": {"auto_voice_enabled": False}}
-        self.assertEqual(convert_plugin_configuration(source).changes["voice_reply.trigger_mode"], "request")
+        self.assertEqual(convert_plugin_configuration(source).changes["voice_reply.trigger_mode"], "always")
         self.assertEqual(convert_plugin_configuration(source, window_kind="private").changes["voice_reply.trigger_mode"], "always")
+        self.assertEqual(convert_plugin_configuration(source, window_kind="group").changes["voice_reply.trigger_mode"], "always")
+        source["voice_action_config"]["tts_group_trigger_probability"] = 0
         self.assertEqual(convert_plugin_configuration(source, window_kind="group").changes["voice_reply.trigger_mode"], "request")
 
     def test_weather_source_aliases_are_normalized_and_unsupported_sources_are_explained(self):
@@ -825,16 +1126,71 @@ class WindowedSegmentationMigrationTests(unittest.TestCase):
     def test_plugin_configuration_accepts_reviewed_legacy_number_formats(self):
         rules = {item["source"]: item for item in plugin_configuration_rules()}
         result = convert_plugin_configuration({
-            "forward_message_config": {"forward_message_max_messages": 48},
-            "legacy_compat_config": {"maintenance_token_soft_limit": "640000"},
+            "forward_message_config": {"forward_message_max_messages": 300,
+                                        "forward_message_parse_nested": False},
         }, rules=(rules["forward_message_config.forward_message_max_messages"],
-                 rules["legacy_compat_config.maintenance_token_soft_limit"]))
+                 rules["forward_message_config.forward_message_parse_nested"]))
 
         self.assertEqual(result.changes, {
-            "runtime.forward_max_nodes": 48,
-            "runtime.daily_token_soft_limit": 640000,
+            "runtime.forward_max_nodes": 300,
+            "runtime.forward_parse_nested": False,
         })
-        self.assertEqual(result.confidence["runtime.forward_max_nodes"], "medium")
+        self.assertEqual(result.confidence["runtime.forward_max_nodes"], "high")
+        self.assertEqual(result.confidence["runtime.forward_parse_nested"], "high")
+
+        for invalid in (0, 301):
+            overflow = convert_plugin_configuration({
+                "forward_message_config": {"forward_message_max_messages": invalid},
+            }, rules=(rules["forward_message_config.forward_message_max_messages"],))
+            self.assertNotIn("runtime.forward_max_nodes", overflow.changes)
+            self.assertIn("invalid_value", {item.kind for item in overflow.differences})
+
+    def test_poke_model_probability_complements_v1_preset_probability_and_enables_lane(self):
+        result = convert_plugin_configuration({
+            "reactive_poke_config": {
+                "reactive_poke_normal_reply_probability": 0.25,
+                "reactive_poke_back_times": 3,
+            },
+        })
+        self.assertEqual(result.changes["poke.model_reply_probability"], 0.75)
+        self.assertTrue(result.changes["poke.model_reply_enabled"])
+        self.assertEqual(result.changes["poke.back_times"], 3)
+
+    def test_poke_back_times_outside_v2_ceiling_is_reported(self):
+        result = convert_plugin_configuration({
+            "reactive_poke_config": {"reactive_poke_back_times": 10},
+        })
+        self.assertNotIn("poke.back_times", result.changes)
+        self.assertIn("invalid_value", {item.kind for item in result.differences})
+
+    def test_all_preset_reply_probability_keeps_model_lane_disabled(self):
+        result = convert_plugin_configuration({
+            "reactive_poke_config": {"reactive_poke_normal_reply_probability": 1.0},
+        })
+        self.assertEqual(result.changes["poke.model_reply_probability"], 0)
+        self.assertFalse(result.changes["poke.model_reply_enabled"])
+
+    def test_core_user_voice_mention_fields_keep_their_narrow_scope(self):
+        result = convert_plugin_configuration({
+            "auto_voice_config": {
+                "main_user_voice_probability": 60,
+                "main_user_mention_voice_probability": 85,
+                "main_user_mention_voice_keywords": "摸摸\n抱抱",
+                "main_user_mention_voice_prompt": "声音轻一点。",
+            },
+        })
+        self.assertNotIn("voice_reply.primary_mention_probability", convert_plugin_configuration({
+            "auto_voice_config": {"main_user_voice_probability": 60},
+        }).changes)
+        self.assertEqual(result.changes["voice_reply.primary_mention_probability"], 0.85)
+        self.assertEqual(result.changes["voice_reply.primary_mention_keywords"], "摸摸\n抱抱")
+
+    def test_legacy_core_user_voice_inherit_sentinel_is_not_written_as_negative_probability(self):
+        result = convert_plugin_configuration({
+            "auto_voice_config": {"main_user_mention_voice_probability": -1},
+        })
+        self.assertNotIn("voice_reply.primary_mention_probability", result.changes)
+        self.assertIn("invalid_value", {item.kind for item in result.differences})
 
     def test_plugin_mapping_conflicts_and_invalid_enum_values_are_reported(self):
         result = convert_plugin_configuration({
@@ -856,7 +1212,7 @@ class WindowedSegmentationMigrationTests(unittest.TestCase):
         self.assertEqual(result.changes, {})
         self.assertEqual({item.kind for item in result.differences}, {"conflict", "invalid_value"})
 
-    def test_semantic_settings_convert_units_and_keep_conflicting_provider_aliases_out(self):
+    def test_semantic_settings_preserve_the_global_provider_without_promoting_the_reaction_provider(self):
         result = convert_semantic_configuration({
             "model_assignment_config": {"EMBEDDING_PROVIDER_ID": "embed-a"},
             "experimental_motivation_config": {
@@ -870,14 +1226,16 @@ class WindowedSegmentationMigrationTests(unittest.TestCase):
         })
 
         self.assertEqual(result.changes, {
+            "semantic.embedding_provider": "embed-a",
             "semantic.reactions_trigger_probability": 0.65,
             "semantic.reactions_cooldown_seconds": 240,
             "semantic.timeout_seconds": 5,
             "semantic.learning_interval_seconds": 1200,
             "semantic.slang_learning": False,
         })
-        self.assertEqual([item.kind for item in result.differences], ["conflict"])
-        self.assertIn("EMBEDDING_PROVIDER_ID", result.differences[0].summary)
+        self.assertEqual([item.kind for item in result.differences], ["partial_mapping"])
+        self.assertEqual(result.differences[0].source_key,
+                         "experimental_motivation_config.REACTION_EXPRESSION_EMBEDDING_PROVIDER_ID")
 
     def test_semantic_mapping_rejects_values_that_v2_cannot_represent(self):
         result = convert_semantic_configuration({
@@ -998,6 +1356,29 @@ class SkillGrowthScheduleMigrationTests(unittest.TestCase):
         )
 
         self.assertEqual(result.changes, {})
+
+
+class ModelPolicyMigrationTests(unittest.TestCase):
+    def test_routes_refusal_timeouts_streaming_and_cycle_preferences_reach_registered_fields(self):
+        from companion_v2.model_gateway.routing import configuration_fields
+        from companion_v2.model_gateway.models import ModelTaskProfile
+        from companion_v2.execution.models import Lane
+        profile=ModelTaskProfile('calendar.plan',Lane.FOREGROUND,'normal','Reply','',100)
+        fields=FieldRegistry(version='migration-model',fields=configuration_fields((profile,)))
+        source={'model_assignment_config':{'enable_llm_streaming':True,
+            'model_replacement_rules':[{'name':'travel','keywords':['旅行'],'provider_id':'secondary'}],
+            'model_replacement_scope':'conversation','enable_sensitive_model_replacement':True,
+            'SENSITIVE_REPLACEMENT_PROVIDER_ID':'secondary','sensitive_replacement_keywords':['旧拒答词']},
+            'model_timeout_overrides':{'calendar.plan':90}}
+        migrated=convert_configuration(source,registry=fields)
+        self.assertEqual(migrated.changes['model.calendar.plan.timeout_seconds'],90)
+        self.assertEqual(convert_plugin_configuration(source).changes['model.fallback_provider_id'],'secondary')
+        self.assertIn('旅行',convert_plugin_configuration(source).changes['model.replacement_rules'])
+        self.assertTrue(convert_plugin_configuration(source).changes['model.streaming'])
+        field='role.state.cycle_follicular_days'
+        state=convert_configuration({'humanized_state_config':{'advanced_cycle_follicular_days':9}},
+            registry=registry(field,ValueKind.INTEGER,7,minimum=1,maximum=90))
+        self.assertEqual(state.changes[field],9)
 
 
 if __name__ == "__main__":

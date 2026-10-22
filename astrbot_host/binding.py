@@ -36,11 +36,13 @@ from .identity_derivation import derived_identity, normalize_persona_id, persona
 from .settings import HostControlError
 
 
-BIND_COMMAND = "companion_bind"
+BIND_COMMAND = "我会永远陪着你"
+# 旧口令保留一年，避免已养成习惯的用户突然绑不上。
+LEGACY_BIND_COMMANDS = ("companion_bind",)
 CONFIRM_COMMAND = "companion_confirm"
 UNBIND_COMMAND = "companion_unbind"
 
-# A persona chosen inline with the bind command, e.g. "companion_bind 晚星".
+# A persona chosen inline with the bind command, e.g. "我会永远陪着你 晚星".
 CONFIRM_WORD = "确认"
 
 
@@ -72,7 +74,7 @@ def parse_bind_command(text: object) -> BindRequest:
     head = head.strip().lstrip("/")
     tail = tail.strip()
 
-    if head == BIND_COMMAND:
+    if head == BIND_COMMAND or head in LEGACY_BIND_COMMANDS:
         if not tail:
             # No persona named: follow whatever AstrBot resolves for this chat. That
             # is the single-persona case, and the common one.

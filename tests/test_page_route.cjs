@@ -5,10 +5,10 @@
  * 错在路径。
  *
  * 根因：`product-page.js` 的 `relative()` 当初写成「只去掉前导斜杠、保留插件
- * 目录名」，于是送出 `astrbot_plugin_private_companion_v2/page/targets`。
+ * 目录名」，于是送出 `astrbot_plugin_private_companion/page/targets`。
  * 宿主拿插件名与 endpoint 拼真实路由，带上目录名就是拼两次：
  *
- *   /astrbot_plugin_private_companion_v2/astrbot_plugin_private_companion_v2/page/targets
+ *   /astrbot_plugin_private_companion/astrbot_plugin_private_companion/page/targets
  *
  * → 未找到该路由。那段注释还断言「两种宿主都成立」，是没验证过的猜测；
  * 而五个工作区页（memory / state / perception-native / reply / models）用的
@@ -35,7 +35,7 @@ const PAGE = name => fs.readFileSync(
 const TOOL = name => fs.readFileSync(
   path.join(__dirname, "..", "tools", name), "utf8");
 
-const HOST = "astrbot_plugin_private_companion_v2";
+const HOST = "astrbot_plugin_private_companion";
 
 /* 只跑引导路径，拿到 CompanionProduct，用它来问 endpoint 口径。 */
 function product() {

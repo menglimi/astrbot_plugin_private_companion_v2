@@ -21,7 +21,7 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
 const drains = async (times = 6) => { for (let index = 0; index < times; index += 1) await flush(); };
 const TOKEN = a => a.repeat(64);
 const plain = value => JSON.parse(JSON.stringify(value));
-const PREFIX = '/astrbot_plugin_private_companion_v2/';
+const PREFIX = '/astrbot_plugin_private_companion/';
 
 const quota = {
   private_owner_max_daily: -1, private_friend_max_daily: -1, group_max_daily: -1, proactive_max_daily: -1,
@@ -420,8 +420,10 @@ test('the settings search catalogue exposes field metadata without reading confi
   const {window} = harness(['proactive.contact', 'knowledge']);
   const entries = plain(window.CompanionConfigEditors.searchEntries());
   const contact = entries.filter(item => item.group === 'proactive.contact');
-  assert.equal(contact.length, 160);
-  assert.equal(new Set(contact.map(item => item.field)).size, 160);
+  assert.equal(contact.length, 174);
+  assert.equal(new Set(contact.map(item => item.field)).size, 174);
+  assert.ok(contact.some(item => item.field === 'morning_chain_enabled'
+    && item.sectionTitle === '起床与晨间确认'));
   assert.ok(contact.some(item => item.field === 'balance_awareness_enabled'
     && item.label === '允许因余额变化联系' && item.sectionTitle === '余额感知'));
   assert.ok(entries.some(item => item.group === 'knowledge' && item.section === 'members'
@@ -1275,7 +1277,12 @@ test('the life audit blocks a malformed clock or timezone before any request', a
   instance.state.draft.sleep_variation_minutes = 121;
   await instance.save(false);
   assert.equal(posts(), before, '超过 120 分钟的浮动不该发请求');
-  assert.match(instance.state.notice, /数值类型与范围/);
+  /* 提示要说清是哪一项、允许什么。此前这里断言的是那句通用文案
+     「请核对数值类型与范围。」——它出现在卡片顶部，而按保存的人通常在底部，
+     等于没提示；现在改成字段级提示并跳到该字段，文案里带上标签与区间。 */
+  assert.match(instance.state.notice, /自然浮动上限/);
+  assert.match(instance.state.notice, /0 到 120/);
+  assert.match(instance.state.notice, /改动还在/);
   /* 合法的组合应当放行。 */
   instance.state.draft.sleep_variation_minutes = 120;
   await instance.save(false);
@@ -1540,14 +1547,14 @@ test('a group participation refusal is translated instead of shown raw', async (
   assert.match(markup, /打断语只能是一行/);
 });
 
-/* ==== 主动联系偏好（proactive.contact）：160 项、四层、23 段 ====
+/* ==== 主动联系偏好（proactive.contact）：174 项、四层、24 段 ====
  *
- * 这一组此前四个触点全缺（编辑器 / SECTIONS / spec / 挂载点），158 项里 92 项
+ * 这一组此前四个触点全缺（编辑器 / SECTIONS / spec / 挂载点），174 项里 92 项
  * 在任何页面上都点不到。字段名与类型按注册表抄成独立的一份：页面与它逐项对齐
  * 才算「没有字段被丢掉」，而页面与**注册表**的对齐由
  * tools/audit_page_config_coverage.py 的 MODULES 表保证。
  *
- * 数量本身就是断言：42 boolean / 54 integer / 46 text / 17 weight / 3 probability。
+ * 数量本身就是断言：47 boolean / 58 integer / 48 text / 17 weight / 4 probability。
  */
 const CONTACT_KINDS = {
   boolean: [
@@ -1558,11 +1565,13 @@ const CONTACT_KINDS = {
     "environment.enabled", "external_event_self_link_enabled", "followup.enabled", "greeting.enabled",
     "insomnia_require_sleep_state", "invitation.enabled", "life.enabled", "meal.enabled",
     "meal_checkin_enabled", "news.enabled", "news_daily_hot_read_enabled", "news_share_enabled",
+    "morning_chain_enabled", "morning_nudge_enabled", "morning_role_greeting_enabled",
     "official_weather_alert_enabled", "play.enabled", "poke_action_enabled",
     "proactive_hour_activity_enabled", "quiet_enabled", "reminder.enabled", "repair.enabled",
+    "routine_learning_enabled",
     "screen.enabled", "screen_glance_enabled", "screen_glance_followup_enabled",
     "screen_glance_goodnight_enabled", "voice_action_enabled", "weather_change_enabled",
-    "weather_checkin_enabled", "web_exploration_enabled",
+    "wake_require_device_evidence", "weather_checkin_enabled", "web_exploration_enabled",
   ],
   integer: [
     "appointment_lag_minutes", "appointment_lead_minutes", "appointment_pre_silence_minutes",
@@ -1573,7 +1582,8 @@ const CONTACT_KINDS = {
     "dedup_weather_window_minutes", "event_max_age_seconds", "external_event_self_link_cooldown_hours",
     "generation_history_limit", "greeting_idle_minutes", "history_max_chars", "idle_seconds",
     "important_date_lookahead_days", "insomnia_night_daily_limit", "interval_seconds",
-    "max_contacts_24h", "meal_care_followup_minutes", "news_check_interval_minutes",
+    "max_contacts_24h", "meal_care_followup_minutes", "morning_nudge_delay_minutes",
+    "morning_nudge_max_attempts", "news_check_interval_minutes",
     "news_hot_result_count", "official_alert_poll_minutes", "poke_action_cooldown_minutes",
     "poke_action_daily_limit", "proactive_burst_gap_max_seconds", "proactive_burst_gap_min_seconds",
     "proactive_burst_max_messages", "proactive_closing_contacts_threshold",
@@ -1582,7 +1592,9 @@ const CONTACT_KINDS = {
     "proactive_persona_judge_threshold", "proactive_share_probability", "screen_glance_cooldown_minutes",
     "screen_glance_daily_limit", "screen_glance_followup_after_minutes",
     "screen_glance_followup_cooldown_minutes", "screen_glance_goodnight_delay_minutes",
-    "unanswered_pause_after", "unanswered_slowdown_start", "voice_action_cooldown_minutes",
+    "routine_window_days", "unanswered_pause_after", "unanswered_slowdown_start",
+    "wake_contact_max_daily", "wake_contact_min_confidence", "wake_contact_window_minutes",
+    "voice_action_cooldown_minutes",
     "voice_action_max_chars", "weather_sample_minutes", "web_exploration_min_interval_hours",
     "web_exploration_result_count",
   ],
@@ -1597,7 +1609,7 @@ const CONTACT_KINDS = {
     "proactive_hour_activity_curve", "proactive_intensity_preset",
     "proactive_persona_judge_exempt_purposes", "quiet_end", "quiet_start", "quiet_timezone",
     "reminder.pause_until", "repair.pause_until", "screen.pause_until", "style_prompt",
-    "weather_checkin_time", "web_exploration_interests",
+    "wake_morning_end", "wake_morning_start", "weather_checkin_time", "web_exploration_interests",
     "expression_prompt", "news_sharing_prompt", "length_prompt", "news_length_prompt",
   ],
   weight: [
@@ -1606,7 +1618,7 @@ const CONTACT_KINDS = {
     "life.weight", "meal.weight", "news.weight", "play.weight", "reminder.weight", "repair.weight",
     "screen.weight", "unanswered_max_interval_multiplier",
   ],
-  probability: ["dedup_min_overlap_ratio", "silence_feedback_penalty", "silence_min_confidence"],
+  probability: ["dedup_min_overlap_ratio", "morning_wake_confidence_floor", "silence_feedback_penalty", "silence_min_confidence"],
 };
 /* 文本字段的默认值照注册表抄：页面审计按这些值判断时刻、窗口、曲线与清单的形状。 */
 const CONTACT_DEFAULTS = {
@@ -1615,6 +1627,9 @@ const CONTACT_DEFAULTS = {
   date_checkin_time: '09:00', insomnia_night_start: '23:00', insomnia_night_end: '06:00',
   greeting_morning_window: '07:45-10:20', greeting_noon_window: '12:05-13:35',
   greeting_evening_window: '20:10-21:20',
+  morning_nudge_delay_minutes: 25, morning_nudge_max_attempts: 1, routine_window_days: 60,
+  wake_contact_window_minutes: 90, wake_contact_min_confidence: 65, wake_contact_max_daily: 1,
+  wake_morning_start: '05:00', wake_morning_end: '11:30', morning_wake_confidence_floor: 0.25,
   important_dates: '[]', dedup_policies: 'semantic,content_fingerprint,life_event,event_revision',
   contact_followup_after_minutes: 45, contact_followup_cooldown_minutes: 180,
   news_source_kind: 'host', news_hot_sources: 'weibo,hackernews', official_alert_min_severity: '',
@@ -1625,6 +1640,10 @@ const CONTACT_DEFAULTS = {
 const CONTACT_BOUNDS = {
   contact_followup_after_minutes: [10, 1440],
   contact_followup_cooldown_minutes: [30, 2880],
+  morning_nudge_delay_minutes: [10, 90], morning_nudge_max_attempts: [0, 2],
+  routine_window_days: [14, 180], wake_contact_window_minutes: [15, 240],
+  wake_contact_min_confidence: [40, 100], wake_contact_max_daily: [0, 3],
+  morning_wake_confidence_floor: [0, 1],
 };
 const CONTACT_SETTINGS = {};
 const CONTACT_FIELDS = {};
@@ -1648,7 +1667,7 @@ NEW_KINDS['proactive.contact'] = {
     [name, CONTACT_LAYERS.filter(layer => layer !== 'relationship')])),
 };
 const CONTACT_SECTIONS = ['master', 'rhythm', 'freshness', 'intensity', 'quiet', 'dedup',
-  'judgement', 'bond', 'daily', 'followup', 'share', 'greeting', 'meal', 'date', 'weather', 'news', 'web',
+  'judgement', 'bond', 'daily', 'followup', 'share', 'greeting', 'morning', 'meal', 'date', 'weather', 'news', 'web',
   'selflink', 'balance', 'screen', 'action', 'appointment', 'context', 'prompts'];
 
 async function contactLoaded(changes = {}, token = TOKEN('a')) {
@@ -1732,15 +1751,15 @@ test('a legacy pending revision conflict restores its draft without replaying th
   await drains();
 });
 
-test('the contact section renders all 160 fields exactly once', async () => {
+test('the contact section renders all 174 fields exactly once', async () => {
   const harnessed = await contactLoaded();
   const painted = harnessed.painted['proactive.contact'];
   assert.ok(painted, '主动联系偏好必须画进自己的挂载点');
   const container = harnessed.editors.state.instances[0].state.container;
   const rendered = plain(container.groups.flatMap(group => group.fields));
   const expected = plain(Object.keys(CONTACT_FIELDS));
-  assert.equal(rendered.length, 160, '160 项一个都不能少');
-  assert.equal(new Set(rendered).size, 160, '同一个字段不能出现在两段里');
+  assert.equal(rendered.length, 174, '174 项一个都不能少');
+  assert.equal(new Set(rendered).size, 174, '同一个字段不能出现在两段里');
   assert.deepEqual(rendered.slice().sort(), expected.slice().sort());
   assert.deepEqual(plain(container.order).slice().sort(), expected.slice().sort());
   /* 24 段全部画出来，段落 id 是测试能定位依赖说明的锚点。 */

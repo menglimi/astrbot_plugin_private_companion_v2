@@ -164,9 +164,9 @@ class LiveNativeProviderTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(registry.issues, ())
             self.assertEqual(len(registry.declarations()), 37)
             self.assertIsNotNone(registry.current_declaration(
-                "native:astrbot_plugin_private_companion_v2.live:live.events.recent"))
+                "native:astrbot_plugin_private_companion.live:live.events.recent"))
             self.assertIsNotNone(registry.current_declaration(
-                "native:astrbot_plugin_private_companion_v2.game:game.tictactoe.move"))
+                "native:astrbot_plugin_private_companion.game:game.tictactoe.move"))
 
     async def test_gomoku_and_tictactoe_are_separate_durable_scoped_games(self):
         plugin = SimpleNamespace(native_v2_tictactoe_enabled=True,
@@ -196,7 +196,7 @@ class LiveNativeProviderTests(unittest.IsolatedAsyncioTestCase):
             plugin.native_v2_tictactoe_enabled = False
             self.assertEqual(provider.manifest(), manifest)
             self.assertIsNotNone(registry.current_declaration(
-                "native:astrbot_plugin_private_companion_v2.game:game.tictactoe.snapshot"))
+                "native:astrbot_plugin_private_companion.game:game.tictactoe.snapshot"))
             with self.assertRaisesRegex(GAME.NativeGameError, "game_tictactoe_disabled"):
                 await provider.execute(game_request(provider, GAME.READ, {}, "disabled-read"),
                                        before_dispatch=lambda: True)

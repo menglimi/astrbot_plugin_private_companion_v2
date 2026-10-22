@@ -34,7 +34,7 @@ from companion_v2.together.novel_library import NovelLibrary
 from .server import TogetherRoomServer
 from .token_usage import TokenUsageTracker
 from .tunnel import CloudflareQuickTunnel
-PLUGIN_NAME = 'astrbot_plugin_private_companion_v2.together'
+PLUGIN_NAME = 'astrbot_plugin_private_companion.together'
 PLUGIN_VERSION = '2.0.0'
 PAGE_API_PREFIX = f'/{PLUGIN_NAME}/page'
 DEFAULT_TTS_BROWSER_LANGUAGE = 'zh-CN'

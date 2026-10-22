@@ -176,7 +176,7 @@ class SinglePageTests(PageRequests, unittest.IsolatedAsyncioTestCase):
             connection.execute("INSERT INTO runtime_metadata(key, value) VALUES (?, ?)",
                                (metadata_key(owner), json.dumps(document)))
         routes = {path: handler for path, handler, _, _ in self.native.registered_web_apis}
-        directory = routes["/astrbot_plugin_private_companion_v2/acquaintance"]
+        directory = routes["/astrbot_plugin_private_companion/acquaintance"]
         with patch("astrbot_host.acquaintance_api.request", NS(username="admin", query={})), \
                 patch.object(PersonAcquaintanceDirectory, "directory",
                              return_value={"persons": [], "counts": {"total": 0}}):
@@ -190,7 +190,7 @@ class SinglePageTests(PageRequests, unittest.IsolatedAsyncioTestCase):
     async def test_native_group_session_is_listed_without_importing_v2_permissions(self):
         (await self.controller.initialize_profile()).unwrap()
         routes = {path: handler for path, handler, _, _ in self.native.registered_web_apis}
-        directory = routes["/astrbot_plugin_private_companion_v2/acquaintance"]
+        directory = routes["/astrbot_plugin_private_companion/acquaintance"]
         topology = self.controller.session_topology
         self.native.platform.client._wsr_api_clients = {"100": object()}
         umo = "qq-main:GroupMessage:450"
@@ -225,7 +225,7 @@ class SinglePageTests(PageRequests, unittest.IsolatedAsyncioTestCase):
     async def test_native_group_directory_failure_is_reported_with_its_cause(self):
         (await self.controller.initialize_profile()).unwrap()
         routes = {path: handler for path, handler, _, _ in self.native.registered_web_apis}
-        directory = routes["/astrbot_plugin_private_companion_v2/acquaintance"]
+        directory = routes["/astrbot_plugin_private_companion/acquaintance"]
         topology = self.controller.session_topology
         with patch("astrbot_host.acquaintance_api.request", NS(username="admin", query={})), \
                 patch.object(PersonAcquaintanceDirectory, "directory",
@@ -382,7 +382,7 @@ class SinglePageTests(PageRequests, unittest.IsolatedAsyncioTestCase):
         for asset in ("room-loading-tea-coffee.gif", "room-loading-mug.gif"):
             self.assertRegex(
                 html,
-                rf'src="/api/plugin/page/content/astrbot_plugin_private_companion_v2/[^" ]+/assets/{asset}\?'
+                rf'src="/api/plugin/page/content/astrbot_plugin_private_companion/[^" ]+/assets/{asset}\?'
             )
             self.assertNotIn(f'src="assets/{asset}', html)
         host_page = await service.resolve_plugin_page_file(plugin, "陪伴小屋", "workspaces/host/index.html")
@@ -471,12 +471,17 @@ class MultiPageTests(PageRequests, MultiFixture, unittest.IsolatedAsyncioTestCas
         self.assertTrue(all(path in routes and path + "/configure" in routes for path in screen_paths))
         group = next(target for target in targets if target["scope_kind"] == "group")
         self.assertTrue(all(role["memory_api"] is None for role in group["roles"]))
-        self.assertTrue(all(role["model_api"] is None for role in group["roles"]))
+        group_model_paths = [role["model_api"] for role in group["roles"]]
+        self.assertTrue(all(path and path in routes and path + "/configure" in routes
+                            for path in group_model_paths))
         self.assertTrue(all(role["perception_native_api"] is None for role in group["roles"]))
         self.assertTrue(all(role["persona_api"] is None for role in group["roles"]))
         self.assertTrue(all(role["screen_access_api"] is None for role in group["roles"]))
         # 群目标没有「角色设置」这回事，所以迁移地址同样是 None，
         # 而不是一个读不出东西的地址。
         self.assertTrue(all(role["legacy_api"] is None for role in group["roles"]))
+        migration_paths = [role["legacy_group_data_api"] for role in group["roles"]]
+        self.assertTrue(all(path + "/plan" in routes and path + "/apply" in routes
+                            for path in migration_paths))
         await self.controller.terminate()
         self.assertEqual(self.native.registered_web_apis, [])

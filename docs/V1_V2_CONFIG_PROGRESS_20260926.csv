@@ -44,9 +44,9 @@
 感知,A2,交互源,感知,message_debounce_config,enable_smart_message_debounce,bool,启用智能文本收口,感知,,部分接入,待逐项核对,,
 感知,A2,交互源,感知,message_debounce_config,forward_message_debounce_seconds,float,转发补话等待秒数,感知,,部分接入,待逐项核对,,
 感知,A2,交互源,感知,forward_message_config,forward_message_max_chars,int,合并消息注入字数上限,感知,,部分接入,待逐项核对,,
-感知,A2,交互源,感知,forward_message_config,forward_message_max_messages,int,合并消息最多读取条数,感知,,部分接入,待逐项核对,,
+感知,A2,交互源,感知,forward_message_config,forward_message_max_messages,int,合并消息最多读取条数,感知,,部分接入,已接入并验证,runtime.forward_max_nodes；MAX_NODES=300 / DEFAULT_MAX_NODES=32；1–300 校验、迁移及管理页贯通,在 6.7.0 → 7.0.0 隔离升级中核对配置写入与重启回读。
 感知,A2,交互源,感知,forward_message_config,forward_message_mode,string,合并消息适配方式,感知,,部分接入,待逐项核对,,
-感知,A2,交互源,感知,forward_message_config,forward_message_parse_nested,bool,展开嵌套合并消息,感知,,部分接入,待逐项核对,,
+感知,A2,交互源,感知,forward_message_config,forward_message_parse_nested,bool,展开嵌套合并消息,感知,,部分接入,已接入并验证,runtime.forward_parse_nested；默认开启保持旧行为；关闭时保留占位并跳过嵌套遍历,在 6.7.0 → 7.0.0 隔离升级中核对配置写入与重启回读。
 感知,A2,交互源,感知,group_high_intensity_config,group_high_intensity_cooldown_seconds,int,高强度收口持续秒数,感知,,部分接入,待逐项核对,,
 感知,A2,交互源,感知,group_high_intensity_config,group_high_intensity_max_merge_messages,int,高强度最大合并消息数,感知,,部分接入,待逐项核对,,
 感知,A2,交互源,感知,group_high_intensity_config,group_high_intensity_merge_scope,string,高强度合并范围,感知,,部分接入,待逐项核对,,

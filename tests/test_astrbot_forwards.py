@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 
 from astrbot_host.media import load_native_image
 from companion_v2.adapters.astrbot.forwards import read_private_forwards
-from companion_v2.conversation.forwards.models import MAX_NODES, MAX_DEPTH
+from companion_v2.conversation.forwards.models import MAX_NODES, MAX_DEPTH, ForwardIntakePolicy
 from tests.animation_support import animation_bytes
 from tests.forward_support import FakeForward, ForwardFixture, node_raw, outer_raw
 from tests.native_adapter_support import FakeReverseApi
@@ -18,6 +18,30 @@ from tests.test_conversation_quotes import FakeReply
 
 
 class AstrBotForwardTests(ForwardFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_legacy_node_limit_is_preserved_through_capture_and_saved_descriptors(self):
+        self.bridge.forward_intake = ForwardIntakePolicy(max_nodes=300)
+        self.forward_raw = {"messages": [node_raw(f"第 {index} 条") for index in range(300)]}
+        captured = await self.capture(self.forward_event())
+        self.assertEqual(len(captured.forwards[0].nodes), 300)
+        self.assertEqual(captured.forwards[0].nodes[-1].path, (299,))
+        host = await self.quiet_host()
+        batch = host.receive(captured).unwrap()
+        event = self.original(host.application, batch)
+        self.assertEqual(len(event.forwards[0].nodes), 300)
+        self.assertEqual(event.forwards[0].nodes[-1].path, (299,))
+
+    async def test_disabling_nested_parsing_retains_outer_content_without_child_media(self):
+        self.bridge.forward_intake = ForwardIntakePolicy(parse_nested=False)
+        loader = AsyncMock(side_effect=AssertionError("disabled children must not download media"))
+        self.bridge.forward_loader = partial(read_private_forwards, reverse_api_type=FakeReverseApi,
+                                             image_loader=loader)
+        self.forward_raw = {"messages": [node_raw("外层", nested=[node_raw("内部", images=(image_bytes(),))])]}
+        captured = await self.capture(self.forward_event())
+        self.assertEqual(len(captured.forwards[0].nodes), 1)
+        self.assertIn("嵌套转发未展开", captured.forwards[0].nodes[0].text)
+        self.assertNotIn("内部", captured.forwards[0].nodes[0].text)
+        loader.assert_not_awaited()
+
     async def test_only_pinned_forward_read_and_no_inline_content_or_node_identity_trust(self):
         self.forward_raw = {"messages": [node_raw(sender="200"), node_raw(sender="100", name="我是当前人格", at=None)]}
         captured = await self.capture(self.forward_event())

@@ -97,6 +97,31 @@ class BackgroundHistoryTests(ContactScheduleFixture, unittest.IsolatedAsyncioTes
         self.assertEqual(len(self.sent), 1)
         self.assertEqual(app.runtime.read_one("SELECT state FROM model_calls ORDER BY rowid DESC LIMIT 1", ())[0], "discarded")
 
+    async def test_shared_history_is_validated_once_per_snapshot_and_rechecked_on_the_next_read(self):
+        app = await self.enabled()
+        self.settings(app, {"dedup_enabled": False}).unwrap()
+        source, _ = await self.contact_with_evidence(app)
+        self.advance(app, 1)
+        second = (await self.contact(app, self.opportunity("derived"))).unwrap().task
+        await self.delivery_state(app, second.task_id, "delivered")
+        history, context = app.background_history, self.contact_context()
+
+        with patch.object(history, "_validated_history_record", wraps=history._validated_history_record) as validate:
+            snapshot = history.capture(context, self.clock.now())
+            identifiers = [call.args[0]["delivery_id"] for call in validate.call_args_list]
+            self.assertEqual(len(snapshot["references"]), 2)
+            self.assertEqual(len(identifiers), len(set(identifiers)))
+            validate.reset_mock()
+            self.assertEqual(len(history.read(snapshot, context, self.clock.now())), 2)
+            identifiers = [call.args[0]["delivery_id"] for call in validate.call_args_list]
+            self.assertEqual(len(identifiers), 2)
+            self.assertEqual(len(identifiers), len(set(identifiers)))
+            validate.reset_mock()
+            app.proactive.sources.revoke(source, expected_governance_revision=1, observed_at=self.clock.now()).unwrap()
+            with self.assertRaises(TaskError):
+                history.read(snapshot, context, self.clock.now())
+            self.assertGreater(validate.call_count, 0)
+
     async def test_history_withdrawal_at_foreground_sender_boundary_blocks_effect(self):
         host = await self.start(self.host(policy=ConversationPolicy(0, 0, 180, 0)))
         app = host.application

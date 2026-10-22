@@ -9,7 +9,7 @@ from companion_v2.games.native.access import NativeGameAccess
 
 from .management_identity import dashboard_operator
 
-PREFIX = "/astrbot_plugin_private_companion_v2/game-access"
+PREFIX = "/astrbot_plugin_private_companion/game-access"
 
 
 class GameAccessWebAPI:

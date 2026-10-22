@@ -11,7 +11,7 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
 /* refresh/save 里有多层 await，一次 flush 只推进一层微任务。 */
 const drains = async (times = 8) => { for (let index = 0; index < times; index += 1) await flush(); };
 const TOKEN = 'a'.repeat(64);
-const PREFIX = '/astrbot_plugin_private_companion_v2/';
+const PREFIX = '/astrbot_plugin_private_companion/';
 const plain = value => JSON.parse(JSON.stringify(value));
 const DEFAULTS = {private_learning_enabled: true};
 const FIELDS = {private_learning_enabled: {
@@ -141,7 +141,10 @@ test('a value with the wrong field type never dispatches', async () => {
   live.state.draft.private_learning_enabled = 'false';
   await live.save(false);
   assert.equal(harnessed.requests.length, 1);
-  assert.match(live.state.notice, /范围/);
+  /* 类型填错要说清「这一项只能是开或关」，不是「请核对数值类型与范围」——
+     后者对一个开关毫无意义。 */
+  assert.match(live.state.notice, /只能是开或关/);
+  assert.match(live.state.notice, /改动还在/);
 });
 
 test('an unconfirmed save is kept for retry and no second operation is minted', async () => {

@@ -1,13 +1,13 @@
 {
   "schema": "companion.native-capability-baseline.v1",
-  "package_version": "2.2.0",
+  "package_version": "7.0.0",
   "artifact_hashes": {
-    "content": "ead01e8303b847db0fab6619508b12ad5d7c99d464aec6d5f8a49db63c365440",
-    "game": "2edf3e690d37f75d2880ef1802adab74b985782b6e1f1f03a01b0ba7fd44aeef",
-    "image": "78b58d55f148bfd29a5903e9e8601870758d77b7e3f0f255752e0b1666a56f3d",
-    "live": "7a2b22f6c38adb716bccdd7273cee42d76d93b43792ed6618b0433f762135708",
-    "reality": "afaba8b41934722afc79b4f0b62549ec19de48aa8cdfe9b67dabacec5a453f8c",
-    "screen": "8e74388dd1e6d880ccecebbc206ecf0371300296c8725a14d038ca37c7cfcb6e",
-    "together": "f8602a0395d11945ae465e299288afd674a64842884e94d52aa374b750424875"
+    "content": "948762eff63f2cf8aec3ab1d072692431c0768ae425c8d0883d70e4bdc9985b6",
+    "game": "a56f6626ef7af7a3e9c2b9058faee1943eb7c010ebf4e44483bfee265ae07c08",
+    "image": "94bd799f2e5e5fe495c8e65393b9949de1e360e687ec183c9e5f07567fb56f78",
+    "live": "223ff54b48dab26232027e4763c2a6999a944e254e48f0cb215d2ce235238c92",
+    "reality": "d4a10cc4b6f2adc06307f52c06568295989f35521faf03070d22f72bc98f4cd1",
+    "screen": "eddbc468ea704d134aaca7eff4a0479bf86d246938dfe12ab4ba484485c2841f",
+    "together": "cf93e90cb8b2a3b3a3a97e6f119b841bd949526bde7c1ad88dbb6ee52aadec5d"
   }
 }

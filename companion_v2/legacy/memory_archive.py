@@ -13,6 +13,7 @@ import stat
 import tempfile
 
 from .archive import build_v1_archive_plan, copy_v1_archive, verify_v1_archive
+from .sqlite_snapshot import open_readonly_sqlite_snapshot
 
 
 REQUIRED_TABLES = frozenset(("memories", "timeline"))
@@ -130,9 +131,7 @@ def _database_signatures(path: Path):
 
 
 def _connect_readonly(path: Path):
-    connection = sqlite3.connect(path.resolve(strict=True).as_uri() + "?mode=ro", uri=True, timeout=5)
-    connection.execute("PRAGMA query_only=ON")
-    return connection
+    return open_readonly_sqlite_snapshot(path, timeout=5)
 
 
 def _inventory(connection, *, required_tables=REQUIRED_TABLES):

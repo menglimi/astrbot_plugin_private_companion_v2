@@ -8,7 +8,7 @@ async function run({browser, outputDir, bridgePath, replyOnly=false, identityOnl
   const root=path.resolve(__dirname,'../pages/陪伴小屋');
   await fs.mkdir(outputDir,{recursive:true});
   const sdk=await fs.readFile(bridgePath,'utf8');
-  const HOST='astrbot_plugin_private_companion_v2';
+  const HOST='astrbot_plugin_private_companion';
   const qa={calls:[],posts:[],mode:'direct',catalogMode:'multi',initialized:true,deny:false,late:null,growthState:'proposed',semanticRevision:1,semanticReactions:true};
   const internalIdentity={installation_id:'synthetic-installation-internal',operator_id:'dashboard:qa-internal'};
   const replyDefaults={enabled:false,llm_controlled:true,rules_enabled:false,rule_mode:'sentences',threshold:120,min_segment_chars:12,max_segments:4,prompt:'',streaming:false,part_gap_ms:0,image_position:'after_text',
@@ -299,15 +299,20 @@ async function run({browser, outputDir, bridgePath, replyOnly=false, identityOnl
     }
     const nav=await shell().locator('#shellNav .shell-nav-group').evaluateAll(groups=>groups.map(group=>({
       title:group.querySelector('.shell-nav-title')?.textContent||'',
-      links:[...group.querySelectorAll('.shell-nav-link')].map(link=>({label:link.querySelector('span').textContent,section:link.dataset.shellSection})),
+      links:[...group.querySelectorAll('.shell-nav-link')].map(link=>({label:link.querySelector('span').textContent,
+        section:link.dataset.shellSection||link.dataset.shellView})),
     })));
     assert.deepEqual(nav.map(group=>[group.title,...group.links.map(link=>link.label)]),[
-      ['','关系与权限','主动与联系','事实与经历','学习与反思','模型与连接','治理与维护'],
-      ['能力配置','感知','决策','行动','产出','表达','自我'],
+      ['生活','状态与日程','日记与生活'],
+      ['专题配置','关系网','主动与联系','事实与经历','学习与反思','模型与连接','治理与维护'],
+      ['能力配置','感知','理解','决策','行动','产出','表达','自我'],
       ['设置','开始使用','外观与设置','账号与会话','资料与维护'],
     ]);
-    assert.equal(new Set(nav.flatMap(group=>group.links).map(link=>link.section)).size,16);
-    checks.push('all 16 native sections remain reachable in the current sidebar');
+    /* 每个分组都必须有标题：第一组曾经是 untitled，六项入口悬在左栏顶部
+       没有任何分组名，而下面两组有——同一列里一半有标题一半没有。 */
+    assert.deepEqual(nav.filter(group=>!group.title).map(group=>group.links[0]?.label),[]);
+    assert.equal(new Set(nav.flatMap(group=>group.links).map(link=>link.section)).size,19);
+    checks.push('all 17 native sections plus the two life views remain reachable in the current sidebar');
     assert.match(await shell().locator('.home-state-board').getAttribute('aria-label'),/71 \/ 100/);
     assert.doesNotMatch(await shell().locator('body').innerText(),/草木之间|9 月 23 日|望舒/);
     assert.equal(qa.posts.length,0);await layout();await capture('product-home-desktop');

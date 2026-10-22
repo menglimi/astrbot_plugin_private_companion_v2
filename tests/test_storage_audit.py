@@ -351,7 +351,7 @@ class DiscoveryTests(unittest.TestCase):
     def test_plugin_data_root_picks_the_most_recently_written_profile(self) -> None:
         """给它插件数据目录时，选主库最近被写的那个 profile，并列出其余。"""
         with tempfile.TemporaryDirectory(prefix="companion-v2-audit-") as temporary:
-            plugin_data = pathlib.Path(temporary) / "plugin_data" / "astrbot_plugin_private_companion_v2"
+            plugin_data = pathlib.Path(temporary) / "plugin_data" / "astrbot_plugin_private_companion"
             older = plugin_data / "profiles" / "older-profile" / "runtime"
             newer = plugin_data / "profiles" / "newer-profile" / "runtime"
             for runtime in (older, newer):

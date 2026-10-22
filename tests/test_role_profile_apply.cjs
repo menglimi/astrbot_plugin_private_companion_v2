@@ -5,8 +5,8 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const source = fs.readFileSync(path.resolve(__dirname, "../pages/陪伴小屋/role-profile-draft.js"), "utf8");
-const testSource = source.replace("return {markup, open: openDialog};",
-  "return {markup, open: openDialog, recoverPendingApply, restorePendingApply, storePendingApply, get state() { return state; }};");
+const testSource = source.replace("return {markup, open: openDialog, isDirty};",
+  "return {markup, open: openDialog, isDirty, recoverPendingApply, restorePendingApply, storePendingApply, get state() { return state; }};");
 assert.notEqual(testSource, source, "test seam must match the private module return");
 
 function harness(sessionStore, outcomes) {

@@ -72,8 +72,8 @@ function harness({runtimeWeatherState="available",mihomeEnabled=true,balanceEnab
     other_injections:otherInjections,
     camera:{state:"available",status:"success",answer_available:true,purpose:"看看我现在在做什么",
       captured_at:"2026-10-01T09:57:00Z",observation:{summary:"桌面上有打开的笔记本电脑。",confidence:0.9}}};
-  const product = {scopeKey:() => "role-1", role:() => ({model_api:"/astrbot_plugin_private_companion_v2/model",
-      perception_native_api:"/astrbot_plugin_private_companion_v2/perception-native"}),
+  const product = {scopeKey:() => "role-1", role:() => ({model_api:"/astrbot_plugin_private_companion/model",
+      perception_native_api:"/astrbot_plugin_private_companion/perception-native"}),
     provider:id => id === "screen" ? {integration_state:"connected",runtime_ready:true,reason:"屏幕扩展运行正常"}
       : {integration_state:"missing",reason:"未安装"},
     statusLabel:value => value, data:{state:{state:{values:{},settings:{}}}},
@@ -133,11 +133,11 @@ test("overview shows the requested context, live routes, authorized devices and 
   await new Promise(resolve => setImmediate(resolve));
 
   assert.deepEqual(page.requested.sort(), [
-    "/astrbot_plugin_private_companion_v2/model",
-    "/astrbot_plugin_private_companion_v2/model/balance",
-    "/astrbot_plugin_private_companion_v2/model/image",
-    "/astrbot_plugin_private_companion_v2/model/voice",
-    "/astrbot_plugin_private_companion_v2/perception-native/runtime",
+    "/astrbot_plugin_private_companion/model",
+    "/astrbot_plugin_private_companion/model/balance",
+    "/astrbot_plugin_private_companion/model/image",
+    "/astrbot_plugin_private_companion/model/voice",
+    "/astrbot_plugin_private_companion/perception-native/runtime",
   ]);
   assert.match(page.root.innerHTML, /用户配置区域/);
   assert.match(page.root.innerHTML, /晴 · 22°C/);
@@ -252,7 +252,7 @@ test("configured balance is read through the model balance route and failed read
   await new Promise(resolve=>setImmediate(resolve));
   assert.match(page.root.innerHTML,/perception-feature is-balance is-ready/);
   assert.match(page.root.innerHTML,/perception-balance-unit">额度<\/span> 123\.45/);
-  assert.ok(page.requested.includes("/astrbot_plugin_private_companion_v2/model/balance"));
+  assert.ok(page.requested.includes("/astrbot_plugin_private_companion/model/balance"));
   assert.equal(page.bridgeRequests.some(([method,route])=>method==="POST"&&route==="host-options/balance/test"),false,
     "打开仪表盘复用 Token 页的模型余额接口");
   page.page.select("config-balance:perception-detail-balance-source");
@@ -267,7 +267,7 @@ test("configured balance is read through the model balance route and failed read
   await query();
   assert.match(page.root.innerHTML,/最近一次查询/);
   assert.match(page.root.innerHTML,/perception-balance-unit">额度<\/span> 123\.45/);
-  page.failRequest("/astrbot_plugin_private_companion_v2/model/balance");
+  page.failRequest("/astrbot_plugin_private_companion/model/balance");
   await query();
   assert.match(page.root.innerHTML,/读取超时/);
   assert.doesNotMatch(page.root.innerHTML,/123\.45/);
@@ -555,9 +555,9 @@ test("failed reads clear stale results, name the failed settings and recover on 
   const page = harness();
   page.page.mount(page.root);
   await new Promise(resolve => setImmediate(resolve));
-  page.failRequest("/astrbot_plugin_private_companion_v2/perception-native/runtime");
-  page.failRequest("/astrbot_plugin_private_companion_v2/model/voice");
-  page.failRequest("/astrbot_plugin_private_companion_v2/model/image");
+  page.failRequest("/astrbot_plugin_private_companion/perception-native/runtime");
+  page.failRequest("/astrbot_plugin_private_companion/model/voice");
+  page.failRequest("/astrbot_plugin_private_companion/model/image");
   page.emit({...page.snapshot, ready:false, loading:false, error:"读取超时", environment:{}, news:{}});
   page.root.handlers.click({target:{closest(selector) {return selector === "[data-context-refresh]" ? {} : null;}}});
   await new Promise(resolve => setImmediate(resolve));

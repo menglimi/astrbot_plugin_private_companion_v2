@@ -28,7 +28,7 @@
  */
 "use strict";
 window.CompanionContactPage = (() => {
-  const HOST = "astrbot_plugin_private_companion_v2";
+  const HOST = "astrbot_plugin_private_companion";
   const PREFIX = "/" + HOST + "/";
   const STORE = "companion-contact-page-v1:";
   const HISTORY_PENDING = "__companion_contact_pending_v1";
@@ -904,7 +904,7 @@ window.CompanionContactPage = (() => {
   }
 
   /* ---- 渲染 ------------------------------------------------------------ */
-  const VIEWS = [["dial","节律盘",ICON.dial],["tests","消息测试",ICON.test],
+  const VIEWS = [["dial","节律盘",ICON.dial],["morning","晨间唤醒",ICON.bell],["tests","消息测试",ICON.test],
                  ["purposes","契机矩阵",ICON.seed],
                  ["gates","开口闸门",ICON.gate],["budgets","额度与去重",ICON.quota],
                  ["sources","外部触发源",ICON.source],["materials","主动检视",ICON.seed]];
@@ -1033,6 +1033,30 @@ window.CompanionContactPage = (() => {
       ], "is-ring-greet")}
     </div>`;
   }
+  function morningView() {
+    return `<div class="ct-rest">
+      ${fieldBlock("晨间流程", [
+        toggle("morning_chain_enabled", "启用晨间流程", "关闭后不会生成角色醒来问候或清醒确认提醒。"),
+        timeRow("wake_morning_start", "开始", "wake_morning_end", "结束", "使用全局免打扰时区；窗口外不补发过期消息。"),
+      ], "is-wide")}
+      ${fieldBlock("角色作息", [
+        toggle("morning_role_greeting_enabled", "角色醒来后先问候", "只判断角色自身醒来，不推断用户已经醒。"),
+        toggle("routine_learning_enabled", "学习角色的起床习惯", "根据近期有效样本调整角色的预测起床窗口。"),
+        numberRow("routine_window_days", "学习窗口", "天", 14, 180, "只使用最近这段时间的作息记录。"),
+        decimalRow("morning_wake_confidence_floor", "预测可信度下限", 0, 1, 0.05,
+          "预测把握低于此值时不生成晨间问候。"),
+      ])}
+      ${fieldBlock("清醒确认", [
+        toggle("morning_nudge_enabled", "允许轻声确认", "仅在清醒证据充分、窗口有效且没有新输入时提醒。"),
+        numberRow("morning_nudge_delay_minutes", "确认前等待", "分钟", 10, 90, "给对方自然开口的时间。"),
+        numberRow("morning_nudge_max_attempts", "每次起床最多提醒", "次", 0, 2, "0 表示不提醒；默认最多一次。"),
+        numberRow("wake_contact_window_minutes", "清醒后有效窗口", "分钟", 15, 240, "超时后不再翻旧账。"),
+        numberRow("wake_contact_min_confidence", "清醒迹象可信度", "%", 40, 100, "低于此值只保留诊断，不触发联系。"),
+        numberRow("wake_contact_max_daily", "每日确认上限", "次", 0, 3, "按免打扰时区的本地日期计数。"),
+        toggle("wake_require_device_evidence", "要求设备侧证据", "开启后只接受授权设备提供的清醒迹象。"),
+      ], "is-wide")}
+    </div>`;
+  }
   function fmtDuration(seconds) {
     if (!Number.isFinite(seconds)) return "—";
     if (seconds < 60) return seconds + " 秒";
@@ -1074,6 +1098,14 @@ window.CompanionContactPage = (() => {
       <span class="ct-field-label">${e(label)}<small>${e(min)}–${e(max)}</small></span>
       <span class="ct-input-unit"><input type="number" data-field="${e(name)}" value="${e(current ?? "")}"
         min="${min}" max="${max}" step="1" inputmode="numeric"><i>${e(unit)}</i></span>
+      ${help ? `<small class="ct-field-help">${e(help)}</small>` : ""}</label>`;
+  }
+  function decimalRow(name, label, min, max, step, help) {
+    const current = value(name);
+    return `<label class="ct-field ct-field-number${dirty(name) ? " is-dirty" : ""}">
+      <span class="ct-field-label">${e(label)}<small>${e(min)}–${e(max)}</small></span>
+      <input type="number" data-field="${e(name)}" value="${e(current ?? "")}"
+        min="${min}" max="${max}" step="${step}" inputmode="decimal">
       ${help ? `<small class="ct-field-help">${e(help)}</small>` : ""}</label>`;
   }
   /* 强度档位是一个**控件**，不是下拉：五档的差别是「更快 / 更多」，而这句话
@@ -1697,8 +1729,8 @@ window.CompanionContactPage = (() => {
         srcToggle("screen_glance_followup_enabled", "未回应后跟进", ""),
         srcNumber("screen_glance_followup_after_minutes", "多久后跟进", "分钟", 10, 240, ""),
         srcNumber("screen_glance_followup_cooldown_minutes", "跟进冷却", "分钟", 30, 1440, ""),
-        srcToggle("voice_action_enabled", "允许发语音", ""),
-        srcNumber("voice_action_max_chars", "语音字数上限", "字", 6, 80, ""),
+        srcToggle("voice_action_enabled", "允许发语音", "沿用回复设置中的语音语言与对应 TTS，正文完整保留，语音另条发送。"),
+        srcNumber("voice_action_max_chars", "语音参考长度", "字", 6, 80, "供模型组织完整短句参考，优先保证语意完整，不按字数截断。"),
         srcNumber("voice_action_cooldown_minutes", "语音冷却", "分钟", 0, 1440, ""),
         srcToggle("poke_action_enabled", "允许戳一戳", ""),
         srcNumber("poke_action_daily_limit", "每日上限", "次", 0, 20, ""),
@@ -1711,7 +1743,7 @@ window.CompanionContactPage = (() => {
         srcToggle("enable_llm_proactive_persona_judge", "开口前先自评", "多一次模型调用，按阈值决定这条要不要发。"),
         srcNumber("proactive_persona_judge_threshold", "自评阈值", "", 0, 100, ""),
         srcNumber("proactive_persona_judge_cache_minutes", "自评缓存", "分钟", 0, 720, ""),
-        srcNumber("generation_history_limit", "近期对话轮数", "轮", 0, 8, "同一轮中的分段消息会合并计数。"),
+        srcNumber("generation_history_limit", "近期对话轮数", "轮", 0, 64, "同一轮中的分段消息会合并计数，并受上下文字数预算约束。"),
         srcNumber("history_max_chars", "历史字数上限", "字", 0, 8192, ""),
       ]},
       {id:"balance", icon:ICON.purse, title:"余额与其它", hint:"余额只影响说不说、说不说金额；两个阈值是绝对值与百分比双保险。", wide:true, body:[
@@ -1959,7 +1991,7 @@ window.CompanionContactPage = (() => {
     if (data.view === "tests") return testsView();
     if (data.view === "materials") return materialsView();
     if (!settingsAvailable()) return emptyMarkup();
-    return {"dial":dialView, "purposes":purposesView, "gates":gatesView,
+    return {"dial":dialView, "morning":morningView, "purposes":purposesView, "gates":gatesView,
       "budgets":budgetsView, "sources":sourcesView}[data.view]();
   }
   /* 换页。方向按轨道上的先后：往后（往下）点，新的一屏从右边进来；

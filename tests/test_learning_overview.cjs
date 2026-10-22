@@ -5,7 +5,7 @@ const fs=require("node:fs");
 const path=require("node:path");
 const vm=require("node:vm");
 
-const HOST="astrbot_plugin_private_companion_v2";
+const HOST="astrbot_plugin_private_companion";
 const source=fs.readFileSync(path.join(__dirname,"..","pages","陪伴小屋","learning-overview.js"),"utf8");
 
 test("总览汇总全局学习队列、成长阶段和全局策略",async()=>{

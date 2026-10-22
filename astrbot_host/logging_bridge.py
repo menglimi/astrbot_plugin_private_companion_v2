@@ -6,7 +6,7 @@ import logging
 from astrbot.core.log import LogManager
 
 
-PLUGIN_NAME = "astrbot_plugin_private_companion_v2"
+PLUGIN_NAME = "astrbot_plugin_private_companion"
 _STATE = "_private_companion_v2_log_bridge"
 
 

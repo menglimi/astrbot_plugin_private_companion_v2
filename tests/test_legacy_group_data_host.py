@@ -13,15 +13,13 @@ from starlette.requests import Request
 
 from astrbot_host.legacy_group_data_api import LegacyGroupDataWebAPI
 from astrbot_host.legacy_api import LegacyMigrationWebAPI
+from astrbot_host.multi_api import PREFIX as HOST_PREFIX
 from companion_v2.execution.models import TaskError, digest
 from companion_v2.foundation.refs import ScopeKind, ScopeRef
 from companion_v2.knowledge.catalog import KnowledgeCatalog, SourceBinding
 from companion_v2.knowledge.retrieval import KnowledgeQuery, KnowledgeRetriever
 from companion_v2.relationships.group_network import GroupRelationshipStore
 from tests.group_host_support import GroupFixture
-
-
-PREFIX = "/astrbot_plugin_private_companion_v2"
 
 
 class LegacyGroupDataHostTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
@@ -32,7 +30,7 @@ class LegacyGroupDataHostTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
                        for path, handler, methods, _ in self.native.registered_web_apis}
 
     def _path(self, target="group-a", role="role-a"):
-        return (PREFIX + "/host/targets/" + target + "/roles/" + digest(role)
+        return (HOST_PREFIX + "/targets/" + target + "/roles/" + digest(role)
                 + "/legacy-group-data")
 
     async def request(self, suffix="/plan", *, target="group-a", role="role-a", username="admin",
@@ -72,7 +70,8 @@ class LegacyGroupDataHostTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         return root
 
     async def plan(self, root, *, target="group-a", role="role-a"):
-        query = urlencode({"v1_root": str(root), "source_persona_id": "", "source_group_id": "789"})
+        # Match the setup page: empty primary-persona values are not sent.
+        query = urlencode({"v1_root": str(root), "source_group_id": "789"})
         response = await self.request("/plan", target=target, role=role, query=query)
         self.assertEqual(response["status"], "ok", response)
         return response["data"]
@@ -92,6 +91,23 @@ class LegacyGroupDataHostTests(GroupFixture, unittest.IsolatedAsyncioTestCase):
         return SourceBinding(self.controller.runtime.installation_id, role_id="role-a", persona_id="role-a",
             native_scope_ids=("300",), scope_kind=ScopeKind.GROUP,
             scope_route=(platform, bot, account))
+
+    async def test_primary_persona_preview_accepts_omitted_id_but_apply_requires_it(self):
+        root = self.source_root()
+        await self.start_host()
+        plan = await self.plan(root)
+        explicit = await self.request("/plan", query=urlencode({
+            "v1_root": str(root), "source_persona_id": "", "source_group_id": "789"}))
+        self.assertEqual(explicit["status"], "ok", explicit)
+        self.assertEqual(plan["source_persona_id"], "")
+        self.assertEqual(plan["plan_token"], explicit["data"]["plan_token"])
+        missing = await self.request("/apply", data={
+            "plan_token": plan["plan_token"], "source_group_id": "789",
+            "import_group_network": True, "import_group_worldbook": True,
+            "confirm_member_ids": True, "confirm_group_mapping": True,
+            "v1_root": str(root)})
+        self.assertEqual(missing["status"], "error", missing)
+        self.assertEqual(missing["data"]["code"], "legacy_request_invalid")
 
     async def test_mapping_import_is_explicit_and_isolated_across_same_id_platform_groups(self):
         root = self.source_root()

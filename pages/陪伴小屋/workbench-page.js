@@ -12,8 +12,11 @@
    - 草稿：sessionStorage 按 installation + operator + 当前对象/角色 + group 隔离，切页不丢。 */
 "use strict";
 window.CompanionWorkbench = (() => {
-  const PREFIX = "/astrbot_plugin_private_companion_v2/";
+  const PREFIX = "/astrbot_plugin_private_companion/";
   const STORE = "companion-workbench.v1:";
+  /* 跳转到出错字段时跟随系统的减少动态偏好：平滑滚动对前庭敏感的用户不友好。 */
+  const REDUCED = () => window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches === true
+    || ["low", "off"].includes(document.documentElement.dataset.motion || "");
 
   /* 生效范围的四档用**自解释的长句**：四个词单独摆出来（安装/角色/关系/窗口）
      是"按实现分的类"，读的人还得先学会这套分类；写成一句话就不用解释了。
@@ -31,6 +34,12 @@ window.CompanionWorkbench = (() => {
   const KIND = {
     boolean: "bool", integer: "int", text: "text", probability: "float", weight: "float",
   };
+
+  /* 活着的工作台实例。宿主要判断「离开这一页会不会丢掉没保存的改动」，
+     而实例是由各页面各自 create 出来的，内核是唯一知道它们的地方。 */
+  const LIVE = new Set();
+  const registerInstance = api => LIVE.add(api);
+  const forgetInstance = api => LIVE.delete(api);
 
   /* 取值为枚举的文本字段：注册表里它们仍是 TEXT（约束在各自领域的
      ``review_settings`` 一类校验器里），所以选项由页面声明、后端校验。
@@ -780,11 +789,16 @@ window.CompanionWorkbench = (() => {
     const inheritClass = inherited ? " is-inherited" : "";
     const visible = !item.visibleWhen || Object.entries(item.visibleWhen)
       .every(([field, expected]) => state.draft?.[field] === expected);
+    /* 说明与错误各自有个 id：控件的 aria-describedby 在 paint() 之后统一挂
+       （见 wireFieldDescriptions）。只写 aria-invalid 不告诉读屏「为什么无效」。 */
+    const helpId = `${state.instanceId}-help-${name}`;
+    const errorId = `${state.instanceId}-error-${name}`;
     return `<div class="wb-field${dirty}${inheritClass}${layerEditable ? "" : " is-layer-locked"}" data-wb-row="${e(name)}"${visible ? "" : " hidden"}>`
       + (container.presentation === "journal" ? "" : railMarkup(state, name, item, state.status?.provenance, container))
       + `<div class="wb-field-main"><span class="wb-label">${label}</span>`
-      + (item.help && container.presentation !== "journal" ? `<p class="wb-help">${e(item.help)}</p>` : "")
-      + `<div class="wb-control">${controlMarkup(item, value, locked, state)}</div></div>`
+      + (item.help && container.presentation !== "journal" ? `<p class="wb-help" id="${e(helpId)}">${e(item.help)}</p>` : "")
+      + `<div class="wb-control">${controlMarkup(item, value, locked, state)}</div>`
+      + `<p class="wb-field-error" id="${e(errorId)}" data-wb-field-error></p></div>`
       + `<div class="wb-field-side">${chip}${reset}</div></div>`;
   }
 
@@ -902,7 +916,7 @@ window.CompanionWorkbench = (() => {
       + `<div class="wb-actions">`
       + `<button type="button" class="wb-save${s.busy ? " is-busy" : ""}${s.savedState || ""}"`
       + ` data-wb-action="save"${s.locked() ? " disabled" : ""}>`
-      + `<span class="wb-save-label">${e(s.busy ? "保存中" : "保存")}</span>`
+      + `<span class="wb-save-label">${e(s.busy ? "保存中…" : "保存")}</span>`
       + `<svg class="wb-ring" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="7"></circle></svg>`
       + `<svg class="wb-check" viewBox="0 0 19 19" aria-hidden="true"><path d="M4 10l4 4 7-9"></path></svg>`
       + `</button>`
@@ -1152,6 +1166,83 @@ window.CompanionWorkbench = (() => {
       } finally { clearTimeout(timer); }
     }
 
+    /* 说明与错误接到控件上。屏幕阅读器停在某个输入框时，
+       现在能一起读出「这一项是什么、为什么无效」。
+       放在 paint 之后统一做，是因为控件由七八个分支生成（数字 / 文本 / 多行 /
+       枚举 / 开关 / 日期 / 词条），逐分支插属性迟早漏一个。 */    function wireFieldDescriptions(root) {
+      for (const row of root.querySelectorAll(".wb-field")) {
+        const control = row.querySelector("[data-wb-field]")
+          || row.querySelector(".wb-control :is(input,textarea,select,button)");
+        if (!control) continue;
+        const ids = [row.querySelector(".wb-help[id]"), row.querySelector("[data-wb-field-error][id]")]
+          .filter(Boolean).map(node => node.id);
+        if (ids.length) control.setAttribute("aria-describedby", ids.join(" "));
+        /* 重绘会抹掉输入时写上的 aria-invalid，这里按当前草稿重新判定。 */
+        const name = row.dataset.wbRow;
+        const item = state.container?.fields[name];
+        if (item && row.classList.contains("is-invalid")) control.setAttribute("aria-invalid", "true");
+      }
+    }
+
+    function fieldRow(name) {
+      const rows = mountPoint()?.querySelectorAll?.("[data-wb-row]") || [];
+      return [...rows].find(row => row.dataset.wbRow === name) || null;
+    }
+
+    /* 把「不合法」翻译成人话。原来所有情况共用一句「请核对数值类型与范围。」：
+       超字数的字段是文本、跟数值范围无关，开关填错类型也跟范围无关，
+       用户照那句话核对不出来。按字段类型分情形说，并带上标签与具体边界。 */
+    function explainInvalid(item, value) {
+      const label = item?.label || item?.name || "这一项";
+      const count = Array.from(String(value ?? "")).length;
+      if (item?.maximumChars != null && count > item.maximumChars) {
+        return `${label}已超过 ${item.maximumChars} 字上限（当前 ${count} 字）。`;
+      }
+      if (item?.kind === "bool") {
+        return `${label}只能是开或关。`;
+      }
+      if (item?.kind === "int" || item?.kind === "float") {
+        if (typeof value !== "number" || !Number.isFinite(value)) {
+          return `${label}要填数字（当前填的不是数字）。`;
+        }
+        if (item?.hasBounds) {
+          return `${label}要填 ${toDisplay(item, item.minimum)} 到 ${toDisplay(item, item.maximum)} 之间的数。`;
+        }
+        return `${label}要填数字${item?.decimals ? `，最多 ${item.decimals} 位小数` : "，不能带小数"}。`;
+      }
+      if (item?.hasBounds) {
+        return `${label}的取值要在 ${toDisplay(item, item.minimum)} 到 ${toDisplay(item, item.maximum)} 之间。`;
+      }
+      if (typeof value !== "string") {
+        return `${label}要填文本（当前填的不是文本）。`;
+      }
+      return `${label}的取值不合法，请核对。`;
+    }
+
+    function markInvalid(name, message, {jump = false} = {}) {
+      const row = fieldRow(name);
+      if (!row) return;
+      row.classList.add("is-invalid");
+      const slot = row.querySelector("[data-wb-field-error]");
+      if (slot) slot.textContent = message;
+      const control = row.querySelector("[data-wb-field]");
+      control?.setAttribute?.("aria-invalid", "true");
+      if (!jump) return;
+      /* 保存按钮在表单底部，出错的字段可能在顶部：不跳过去的话，
+         用户按完保存看到的只是「什么都没发生」。 */
+      row.scrollIntoView?.({block: "center", behavior: REDUCED() ? "auto" : "smooth"});
+      control?.focus?.({preventScroll: true});
+    }
+
+    function clearInvalid(name) {
+      const row = fieldRow(name);
+      if (!row || !row.classList.contains("is-invalid")) return;
+      row.classList.remove("is-invalid");
+      const slot = row.querySelector("[data-wb-field-error]");
+      if (slot) slot.textContent = "";
+      row.querySelector("[data-wb-field]")?.setAttribute?.("aria-invalid", "false");
+    }
+
     function paint() {
       const root = mountPoint();
       if (!root) return;
@@ -1178,6 +1269,7 @@ window.CompanionWorkbench = (() => {
         setTimeout(() => rails.forEach(node => node.classList.remove("is-drawing")), 900);
       }
       window.lucide?.createIcons({nodes: root.querySelectorAll("[data-lucide]")});
+      wireFieldDescriptions(root);
       /* 台词气泡的 textarea 按内容自动长高；重绘后统一量一次。 */
       growQuotes(root);
     }
@@ -1227,6 +1319,18 @@ window.CompanionWorkbench = (() => {
     }
 
     function onSectionKeydown(event) {
+      /* Ctrl/Command+S 保存当前分区。
+       * 表单有二十多个字段时，键盘用户改完一项要一路 Tab 到按钮；
+       * 而浏览器自己的「保存网页」对话框会在这个习惯动作里弹出来。
+       * 并进同一个 keydown 监听器，而不是再挂一个：同一个根元素上挂两个
+       * keydown，宿主与测试里的监听器表都只能存住后一个（真实的浏览器不会，
+       * 但两种环境行为不一致本身就是隐患）。 */
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey
+          && String(event.key).toLowerCase() === "s") {
+        event.preventDefault();
+        if (!locked()) void save();
+        return;
+      }
       const wordInput = event.target.closest?.("[data-wb-word-input]");
       if (wordInput && event.key === "Enter" && !event.isComposing) {
         event.preventDefault();
@@ -1330,6 +1434,8 @@ window.CompanionWorkbench = (() => {
       root.removeEventListener("mouseover", onHover);
       root.removeEventListener("mouseout", onUnhover);
     }
+
+
 
     function onInput(event) {
       const el = event.target;
@@ -1446,6 +1552,20 @@ window.CompanionWorkbench = (() => {
       }
       const toggle = el.closest(".wb-switch")?.querySelector(".wb-switch-state");
       if (toggle) toggle.textContent = raw ? "已开启" : "已关闭";
+      /* 已经被标红的字段：改对了就立刻撤掉标记，改得还不合法就把提示换成
+         当前这句（例如字数从 340 降到 330，提示要跟着变），
+         没标红的字段不在输入过程中突然变红——边打字边报错很吵。 */
+      if (row?.classList.contains("is-invalid")) {
+        if (valid(item, raw)) clearInvalid(name);
+        else {
+          const message = explainInvalid(item, raw);
+          const slot = row.querySelector("[data-wb-field-error]");
+          if (slot) slot.textContent = message;
+          state.notice = `${message}改动还在，改好这一项就能保存。`;
+          const noticeNode = mountPoint()?.querySelector?.(".wb-notice span");
+          if (noticeNode) noticeNode.textContent = state.notice;
+        }
+      }
       const actions = mountPoint()?.querySelector(".wb-actions");
       if (actions) {
         const note = actions.querySelector(".wb-actions-note");
@@ -2073,12 +2193,15 @@ window.CompanionWorkbench = (() => {
           !valid(state.container.fields[name], value));
         if (bad) {
           const item = state.container.fields[bad[0]];
-          const count = Array.from(String(bad[1] ?? "")).length;
+          const message = explainInvalid(item, bad[1]);
           state.bad = true;
-          state.notice = item?.maximumChars != null && count > item.maximumChars
-            ? `${item.label || bad[0]}已超过 ${item.maximumChars} 字上限。`
-            : errors.invalid_configuration_value;
-          paint(); return;
+          /* 提示条画在卡片顶部，而按保存的人通常正停在底部：光写提示等于
+             「点了没反应」。所以重绘之后把第一条不合法的字段标出来、跳过去、
+             把光标放上去——用户下一步就在那一项上，不用自己找。 */
+          state.notice = `${message}改动还在，改好这一项就能保存。`;
+          paint();
+          markInvalid(bad[0], message, {jump: true});
+          return;
         }
         /* 组合约束（如「单批取样条数不能小于最低样本数」）不是单字段范围能表达的，
            由各分区自己声明。返回错误码即拦下，不发请求。 */
@@ -2224,6 +2347,9 @@ window.CompanionWorkbench = (() => {
     function stop() { clearTimeout(state.timer); state.timer = null; }
 
     function mount() {
+      /* 登记在上面的两个提前返回之前：宿主判断「有没有未保存改动」时，
+         一个正在显示「未连接」提示的实例不该被漏掉（它的草稿可能还在）。 */
+      registerInstance(handle);
       bind();
       window.addEventListener("companion:catalogs-updated", refreshCatalogs);
       if (!window.CompanionProduct?.hosted?.()) {
@@ -2252,6 +2378,7 @@ window.CompanionWorkbench = (() => {
     }
 
     function unmount() {
+      forgetInstance(handle);
       state.ticket++;
       stop();
       if (autoRecoveryTimer !== null) clearTimeout(autoRecoveryTimer);
@@ -2267,9 +2394,14 @@ window.CompanionWorkbench = (() => {
       resets_ = [];
     }
 
-    return {group, mount, attach, unmount, refresh, state, save, saveField, stop, start: schedule,
-      selectSection, setVisibleGroups};
+    /* 句柄不能叫 api：同一作用域里已有一个 async function api（桥调用）。 */
+    const handle = {group, title, mount, attach, unmount, refresh, state, save, saveField, stop,
+      start: schedule, selectSection, setVisibleGroups, dirty};
+    return handle;
   }
 
-  return {create, errors, LAYER_LABELS, contract, valid, toDisplay, fromDisplay, choiceText};
+  return {create, errors, LAYER_LABELS, contract, valid, toDisplay, fromDisplay, choiceText,
+    /* 有草稿没保存的实例清单（含分区标题，用于提示语）。 */
+    dirtyEditors: () => [...LIVE].filter(entry => { try { return entry.dirty(); } catch { return false; } })
+      .map(entry => ({group: entry.group, title: entry.title || entry.group}))};
 })();

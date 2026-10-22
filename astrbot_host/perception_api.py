@@ -15,8 +15,8 @@ from companion_v2.identity_policy.object_access import ObjectAccessPolicy
 from .management_identity import dashboard_operator
 
 
-PREFIX = "/astrbot_plugin_private_companion_v2/perception"
-PROVIDERS = {"reality": "astrbot_plugin_private_companion_v2.reality"}
+PREFIX = "/astrbot_plugin_private_companion/perception"
+PROVIDERS = {"reality": "astrbot_plugin_private_companion.reality"}
 
 
 class PerceptionWebAPI:
@@ -61,8 +61,11 @@ class PerceptionWebAPI:
 
     @staticmethod
     def _error(error):
-        return {"status": "error", "message": str(error),
-                "data": {"code": error.code if isinstance(error, TaskError) else "perception_request_invalid"}}
+        from companion_v2.foundation.outcome import Outcome
+        from .web_api import outcome_response
+
+        code = error.code if isinstance(error, TaskError) else "perception_request_invalid"
+        return outcome_response(Outcome.failed(code, str(error)))
 
     async def get(self):
         try:

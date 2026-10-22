@@ -41,6 +41,7 @@ LEGACY_ROLE_ID = "staging-role"
 
 _ACCOUNT = re.compile(r"[0-9]+")
 _SAFE = re.compile(r"[^0-9a-z]+")
+_ROLE_CHANNEL_SUFFIX = re.compile(r"\s*[-_]\s*(?:私聊|群聊)\s*$")
 
 
 def _account(value: object, field: str) -> str:
@@ -135,17 +136,13 @@ def role_display_name(role_id: object, persona_ids: object = ()) -> str:
     """
     role = str(role_id or "").strip()
     if role and not role.startswith(("role-", "staging-", "dashboard:", "onebot-user:")):
-        for suffix in ("-私聊", "-群聊", "_私聊", "_群聊"):
-            if role.endswith(suffix) and len(role) > len(suffix):
-                role = role[:-len(suffix)].strip()
-                break
+        role = _ROLE_CHANNEL_SUFFIX.sub("", role).strip()
         return role or "当前角色"
     values = persona_ids if isinstance(persona_ids, (list, tuple, set)) else ()
     labels = []
     for value in values:
         text = "默认人格" if value in (None, "", "[%None]") else str(value).strip()
-        if text.endswith(("-私聊", "-群聊", "_私聊", "_群聊")):
-            text = text[:-3]
+        text = _ROLE_CHANNEL_SUFFIX.sub("", text).strip()
         if text and text not in labels:
             labels.append(text)
     return "、".join(labels) or (role if role else "当前角色")

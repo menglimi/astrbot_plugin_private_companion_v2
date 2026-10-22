@@ -242,7 +242,7 @@ class NativeContentFlowTests(NativeContentFixture, HostFixture, unittest.Isolate
         reference = self.result_reference()
         await self.content_lease.aclose()
         self.assertIsNone(self.native_registry.current_declaration(
-            "native:astrbot_plugin_private_companion_v2.content:content.work.read"))
+            "native:astrbot_plugin_private_companion.content:content.work.read"))
         self.assertFalse(host.application.messages.sources.validate_reference(reference, observed_at=NOW).is_success)
         await self.native_registry.aclose()
         self.assertEqual(SourceRepository(self.open_runtime()).validate_reference(reference, observed_at=NOW).failure.code,

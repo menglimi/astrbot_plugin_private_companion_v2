@@ -10,9 +10,11 @@ from .configuration import GROUP as CONTACT_OWNER, PURPOSES
 from .balance_events import SOURCE_OWNER as BALANCE_OWNER
 from .calendar_events import SOURCE_OWNER as CALENDAR_OWNER
 from .events import SOURCE_OWNER as ACTIVITY_OWNER
+from .growth_events import SOURCE_OWNER as GROWTH_OWNER
 from .journal_events import JOURNAL_SOURCE_OWNER
 from .news_events import SOURCE_OWNER as NEWS_OWNER
 from .official_alert_events import SOURCE_OWNER as ALERT_OWNER
+from .reminiscence_events import SOURCE_OWNER as REMINISCENCE_OWNER
 from .screen_events import SOURCE_OWNER as SCREEN_OWNER
 from .weather_change_events import SOURCE_OWNER as WEATHER_CHANGE_OWNER
 from .weather_events import SOURCE_OWNER as WEATHER_OWNER
@@ -20,8 +22,10 @@ from .weather_events import SOURCE_OWNER as WEATHER_OWNER
 
 SOURCE_CATEGORIES = {
     ACTIVITY_OWNER: ("生活记录", "生活分享"),
+    GROWTH_OWNER: ("生活记录", "成长与突破"),
     JOURNAL_SOURCE_OWNER: ("生活记录", "生活分享"),
     CALENDAR_OWNER: ("约定", "约定与提醒"),
+    REMINISCENCE_OWNER: ("共同记忆", "旧忆回响"),
     WEATHER_OWNER: ("环境与状态", "环境与状态变化"),
     WEATHER_CHANGE_OWNER: ("环境与状态", "环境与状态变化"),
     ALERT_OWNER: ("环境与状态", "环境与状态变化"),
@@ -31,8 +35,10 @@ SOURCE_CATEGORIES = {
 }
 SOURCE_LABELS = {
     ACTIVITY_OWNER: "角色活动回执",
+    GROWTH_OWNER: "角色成长回执",
     JOURNAL_SOURCE_OWNER: "角色日记",
     CALENDAR_OWNER: "已接受约定",
+    REMINISCENCE_OWNER: "共同关系记忆",
     WEATHER_OWNER: "天气观测",
     WEATHER_CHANGE_OWNER: "天气变化",
     ALERT_OWNER: "官方气象预警",
@@ -42,10 +48,12 @@ SOURCE_LABELS = {
 }
 THOUGHT_ORIGINS = {
     "relationship_event": "关系话题",
+    "reminiscence_event": "旧忆回响",
     "followup_event": "旧话题接续",
     "burst_event": "近期对话",
     "greeting_event": "问候时机",
     "activity_event": "角色生活片段",
+    "growth_event": "角色成长进展",
     "journal_event": "角色日记",
     "calendar_event": "已接受的约定",
     "date_event": "日期节点",
@@ -93,9 +101,23 @@ def _record_projection(record, settings, at):
     if owner == ACTIVITY_OWNER:
         if at >= record.reference.issued_at + timedelta(seconds=settings.get("event_max_age_seconds", 3600)):
             return None
-        title = "完成阅读" if body.get("event") == "reading_completed" else "角色生活片段"
+        if body.get("event") == "reading_completed":
+            title = "完成阅读"
+        elif body.get("event") == "creative_artifact_completed":
+            title = "完成创作 · " + (_text(body.get("activity_title"), 96) or "随笔")
+        else:
+            title = "角色生活片段"
         detail = _text(body.get("excerpt") or body.get("meaning"))
         note = _text(body.get("subjective_reflection"), 240)
+        expires_at = record.reference.issued_at + timedelta(seconds=settings.get("event_max_age_seconds", 3600))
+    elif owner == GROWTH_OWNER:
+        if at >= record.reference.issued_at + timedelta(seconds=settings.get("event_max_age_seconds", 3600)):
+            return None
+        label = "达成目标" if body.get("event") == "goal_achieved" else (
+            "技能练习" if body.get("kind") == "skill" else "目标推进")
+        title = label + " · " + (_text(body.get("title"), 120) or "角色成长")
+        detail = _text(body.get("progress_note") or body.get("description") or body.get("meaning"))
+        note = ""
         expires_at = record.reference.issued_at + timedelta(seconds=settings.get("event_max_age_seconds", 3600))
     elif owner == JOURNAL_SOURCE_OWNER:
         if at >= record.reference.issued_at + timedelta(seconds=settings.get("event_max_age_seconds", 3600)):
@@ -105,10 +127,19 @@ def _record_projection(record, settings, at):
         note = "梦境记录属于角色的主观记忆。" if body.get("kind") == "dream" else ""
         expires_at = record.reference.issued_at + timedelta(seconds=settings.get("event_max_age_seconds", 3600))
     elif owner == CALENDAR_OWNER:
-        title = _text(body.get("title"), 160) or "已接受的约定"
+        if body.get("event") == "accepted_commitment_concluded":
+            title = "约定余温 · " + (_text(body.get("title"), 140) or "已结束约定")
+        elif body.get("event") == "role_plan_window_concluded":
+            title = "日程结束 · " + (_text(body.get("title"), 140) or "角色安排")
+        else:
+            title = _text(body.get("title"), 160) or "已接受的约定"
         detail = " · ".join(part for part in (_text(body.get("detail"), 220),
-            _text(body.get("local_start") or body.get("starts_at"), 64)) if part)
+            _text(body.get("local_end") or body.get("local_start") or body.get("starts_at"), 64)) if part)
         note = ""
+    elif owner == REMINISCENCE_OWNER:
+        title = "共同情绪片段" if body.get("kind") == "emotion_episode" else "共同关系记忆"
+        detail = _text(body.get("interpretation") or body.get("meaning"), 360)
+        note = "过往时间 " + _text(body.get("observed_at"), 64)
     elif owner == WEATHER_OWNER:
         title = "当前天气 · " + (_text(body.get("role_location"), 64) or "角色所在地")
         detail = _weather(body)

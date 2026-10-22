@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 from companion_v2.conversation.messages import event_from_document
 from companion_v2.conversation.date_context import FIXED_HOLIDAYS, project_local_date
-from companion_v2.execution.models import TaskError, digest, require
+from companion_v2.execution.models import TaskError, digest, require, stamp
 from companion_v2.identity_policy.private_domain import source_ref
 from companion_v2.memory.models import AtomRef
 from companion_v2.memory.pinned import visible_fact
@@ -17,6 +17,21 @@ from .weather_material import planning_weather_material
 
 
 MATERIAL_CHARS = 16384
+INTERVENTION_DIALOGUE_WINDOW = timedelta(minutes=3)
+
+
+def _intervention_dialogue(app, context, at):
+    """Read the same bounded, validated private dialogue used by Laya."""
+    from companion_v2.conversation.native_history import dialogue
+
+    return dialogue(app.messages, context, at,
+                    start=stamp(at - INTERVENTION_DIALOGUE_WINDOW), end=stamp(at),
+                    limit=16, max_chars=8000)
+
+
+def _dialogue_fingerprint(dialogue):
+    return digest([(item["observation_id"], item["content_hash"], item["speaker"])
+                   for item in dialogue]) if dialogue else None
 
 
 def planning_calendar_context(at, end, zone, annual_calendars=()):
@@ -56,6 +71,67 @@ def planning_calendar_context(at, end, zone, annual_calendars=()):
              "years": sorted(item.year for item in annual_calendars), "days": days, "partial": partial}}
 
 
+def _role_state_summary(app, context, at):
+    service = getattr(app, "role_state", None)
+    if service is None:
+        return None
+    try:
+        state = service.read(context, at=at)
+    except Exception:
+        return None
+    if not isinstance(state, dict) or state.get("state") in ("disabled", "unknown"):
+        return None
+    values = state.get("values") or {}
+    if not isinstance(values, dict):
+        return None
+    summary = {}
+    if isinstance(values.get("energy"), int):
+        summary["energy"] = values["energy"]
+    for key in ("sleep", "busy", "hunger", "health", "location"):
+        if isinstance(values.get(key), str) and values[key].strip():
+            summary[key] = values[key].strip()[:120]
+    mood_val = values.get("mood")
+    if isinstance(mood_val, str) and mood_val.strip():
+        summary["mood"] = mood_val.strip()[:120]
+    elif isinstance(mood_val, dict):
+        desc = mood_val.get("description")
+        if isinstance(desc, str) and desc.strip():
+            summary["mood"] = desc.strip()[:120]
+    conditions = [item.get("text", "").strip()[:120] for item in (values.get("conditions") or ())
+                  if isinstance(item, dict) and isinstance(item.get("text"), str) and item.get("text").strip()]
+    if conditions:
+        summary["conditions"] = conditions[:4]
+    if summary:
+        summary["basis"] = "role_simulation"
+        summary["updated_at"] = state.get("updated_at")
+        if state.get("updated_at"):
+            summary["age_minutes"] = max(0, round((at - datetime.fromisoformat(state["updated_at"])).total_seconds() / 60))
+    return summary or None
+
+
+def _recent_life_summary(app, context, at):
+    service = getattr(app, "role_state", None)
+    if service is None:
+        return None
+    try:
+        activities = service.activity_context(context)
+    except Exception:
+        return None
+    items = []
+    for item in (activities.get("items") or ())[:3]:
+        if not isinstance(item, dict) or item.get("sources"):
+            continue
+        entry = {"kind": item.get("kind") or "activity", "state": item.get("state")}
+        desc = item.get("description")
+        if isinstance(desc, str) and desc.strip():
+            entry["description"] = desc.strip()[:140]
+        for key in ("started_at", "updated_at", "due_at"):
+            if isinstance(item.get(key), str) and item[key]:
+                entry[key] = item[key]
+        items.append(entry)
+    return items or None
+
+
 def calendar_inventory(app, context, *, role_global=False):
     if not role_global:
         inventory = app.calendar.inventory(context, limit=100)
@@ -86,6 +162,9 @@ def capture(planner, context, instruction, mode, slot, occurrence=None, *, weath
                                                  configured_annual_calendars(settings["planning_annual_calendars"]))
     inventory, calendar_snapshot = calendar_inventory(app, context, role_global=role_global)
     sources, calendar, goals, memories, inputs = [], [], [], [], []
+    intervention_dialogue = (_intervention_dialogue(app, context, at)
+                             if mode == "intervention" else ())
+    intervention_dialogue_fingerprint = _dialogue_fingerprint(intervention_dialogue)
     goal_refs, calendar_refs, memory_refs, growth_refs, experience_refs = {}, {}, [], [], []
     coverage = {"calendar_partial": bool(inventory.get("partial", False)
                                            or inventory["next_cursor"] or inventory["skipped"])}
@@ -132,33 +211,42 @@ def capture(planner, context, instruction, mode, slot, occurrence=None, *, weath
             raise TaskError("planning_target_changed", "the selected role plan changed")
         include(original["sources"])
 
-    # Window material remains available for explicit conversation-scoped planning only.
-    rows = (() if role_global else app.runtime.read_all("""SELECT i.event_json FROM conversation_inputs i
-        JOIN conversation_batches b USING(batch_id) JOIN conversation_flows f USING(batch_id)
-        WHERE b.origin_key = ? AND i.withdrawn = 0 AND f.state = 'complete'
-        ORDER BY f.sequence DESC, i.position DESC LIMIT 2""", (context.key,)))
-    for row in reversed(rows):
-        event = event_from_document(json.loads(row["event_json"]), context)
-        try:
-            record = app.messages._read_source(event.source, context, event.capability, at)
-            offer(inputs, record.payload[:2048], (event.source,))
-            if len(record.payload) > 2048:
-                coverage["inputs_partial"] = True
-        except TaskError:
-            coverage["inputs_unavailable"] = True
+    # Ordinary planning keeps its small report window. Intervention planning uses
+    # the complete validated user/assistant dialogue below, so it never falls back
+    # to a keyword or user-only prefilter.
+    if mode != "intervention":
+        rows = (() if role_global else app.runtime.read_all("""SELECT i.event_json FROM conversation_inputs i
+            JOIN conversation_batches b USING(batch_id) JOIN conversation_flows f USING(batch_id)
+            WHERE b.origin_key = ? AND i.withdrawn = 0 AND f.state = 'complete'
+            ORDER BY f.sequence DESC, i.position DESC LIMIT 2""", (context.key,)))
+        for row in reversed(rows):
+            event = event_from_document(json.loads(row["event_json"]), context)
+            try:
+                record = app.messages._read_source(event.source, context, event.capability, at)
+                offer(inputs, record.payload[:2048], (event.source,))
+                if len(record.payload) > 2048:
+                    coverage["inputs_partial"] = True
+            except TaskError:
+                coverage["inputs_unavailable"] = True
 
-    from companion_v2.conversation.native_history import body, reference, rows as native_rows
-    current_native_rows = (() if role_global else
-        native_rows(app.runtime, context, end=at.isoformat(timespec="microseconds"), kind="input", limit=2))
-    for row in reversed(current_native_rows):
-        try:
-            item = body(app.messages, reference(row), context, at)
-            original = source_ref(json.loads(row["source_json"]))
-            offer(inputs, item["text"][:2048], (original,))
-            if len(item["text"]) > 2048:
-                coverage["inputs_partial"] = True
-        except TaskError:
-            coverage["inputs_unavailable"] = True
+        from companion_v2.conversation.native_history import body, reference, rows as native_rows
+        current_native_rows = (() if role_global else
+            native_rows(app.runtime, context, end=at.isoformat(timespec="microseconds"), kind="input", limit=2))
+        for row in reversed(current_native_rows):
+            try:
+                item = body(app.messages, reference(row), context, at)
+                original = source_ref(json.loads(row["source_json"]))
+                offer(inputs, item["text"][:2048], (original,))
+                if len(item["text"]) > 2048:
+                    coverage["inputs_partial"] = True
+            except TaskError:
+                coverage["inputs_unavailable"] = True
+    else:
+        dialogue_material = []
+        for item in intervention_dialogue:
+            if not offer(dialogue_material, item, ()):
+                coverage["intervention_dialogue_partial"] = True
+                break
 
     calendar_items = inventory["items"]
     if mode == "intervention":
@@ -240,16 +328,31 @@ def capture(planner, context, instruction, mode, slot, occurrence=None, *, weath
         "planning_preferences": settings["planning_prompt"], "calendar_context": calendar_context,
         "planning_scope": "role" if role_global else "conversation",
         "current_reports": inputs,
+        "intervention_dialogue": tuple(dialogue_material) if mode == "intervention" else (),
         "calendar": calendar, "confirmed_goals_and_skills": goals, "memories": memories,
         "coverage": coverage, "occurrence_to_refine": ({key: occurrence[key] for key in
             ("id", "revision", "sequence", "kind", "state", "title", "start", "end")} if occurrence else None)}
     if current_weather is not None:
         material["current_weather"] = current_weather
+    role_state = _role_state_summary(app, context, at)
+    if role_state is not None:
+        size = len(json.dumps(role_state, ensure_ascii=False, separators=(",", ":")))
+        if used_chars + size <= MATERIAL_CHARS:
+            material["role_state"] = role_state
+            used_chars += size
+    recent_life = _recent_life_summary(app, context, at)
+    if recent_life is not None:
+        size = len(json.dumps(recent_life, ensure_ascii=False, separators=(",", ":")))
+        if used_chars + size <= MATERIAL_CHARS:
+            material["recent_life"] = recent_life
+            used_chars += size
     return {"context": context, "instruction": instruction, "mode": mode, "slot": slot, "at": at, "end": end,
         "settings": settings, "sources": tuple(sources),
         "goal_refs": goal_refs, "calendar_refs": calendar_refs, "memory_refs": memory_refs, "growth_refs": growth_refs,
         "experience_refs": experience_refs, "existing": existing, "refresh_plans": refresh_plans,
         "occurrence": occurrence, "role_global": role_global, "material": material,
+        "intervention_dialogue": intervention_dialogue,
+        "intervention_dialogue_fingerprint": intervention_dialogue_fingerprint,
         "calendar_snapshot": calendar_snapshot}
 
 
@@ -269,6 +372,10 @@ def validate(planner, job, at, *, committed=False):
     if (job.get("intervention") and app.state_maintenance._input_epochs.get(context.key, 0)
             != job["input_epoch"]):
         raise TaskError("planning_inputs_changed", "new conversation input superseded this schedule intervention")
+    if job.get("intervention"):
+        dialogue = _intervention_dialogue(app, context, at)
+        if _dialogue_fingerprint(dialogue) != job.get("intervention_dialogue_fingerprint"):
+            raise TaskError("planning_inputs_changed", "the intervention dialogue changed")
     _, current_calendar_snapshot = calendar_inventory(app, context, role_global=job.get("role_global", False))
     if current_calendar_snapshot != job["calendar_snapshot"]:
         raise TaskError("planning_calendar_changed", "calendar changed while planning")

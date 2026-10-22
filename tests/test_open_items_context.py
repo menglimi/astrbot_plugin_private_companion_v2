@@ -210,6 +210,27 @@ class OpenItemsContextTests(OpenItemsFixture, unittest.IsolatedAsyncioTestCase):
         snapshot = self.messages.open_items_context.capture(self.context, self.clock.now())
         self.assertEqual(snapshot["references"], [])
 
+    async def test_recently_past_due_open_loop_is_marked_for_natural_post_event_care(self):
+        from companion_v2.agenda.models import Schedule
+        binding = self.identity.resolve_role(SCOPE, observed_at=self.clock.now()).unwrap()
+        target = AgendaTarget(SCOPE, binding.role, self.important.subject)
+        operation = OperationRef("create-due", "agenda", SCOPE, VersionRef("create-due", 1), "create-due")
+        due_time = self.clock.now() - timedelta(hours=2)
+        self.agenda.create_memo(
+            self.important, target=target, memo_id="due-item", title="下午面试", body="两点半产品岗面试",
+            operation=operation, expected_role_revision=binding.revision, observed_at=self.clock.now(),
+            purpose="open_loop", schedule=Schedule(due_time, "Asia/Shanghai"),
+        ).unwrap()
+        snapshot = self.messages.open_items_context.capture(self.context, self.clock.now())
+        payloads = [json.loads(item.payload) for item in self.messages.open_items_context.contributions(
+            snapshot, self.context, self.clock.now()) if item.purpose == "participant_open_item"]
+        self.assertEqual(len(payloads), 1)
+        self.assertTrue(payloads[0].get("just_past_due"))
+        # Replay later with advanced `at` preserves the exact sealed payload
+        later_payloads = [json.loads(item.payload) for item in self.messages.open_items_context.contributions(
+            snapshot, self.context, self.clock.now() + timedelta(days=3)) if item.purpose == "participant_open_item"]
+        self.assertEqual(payloads, later_payloads)
+
 
 class OpenItemsHostTests(HostFixture, unittest.IsolatedAsyncioTestCase):
     async def test_composition_root_injects_open_items_through_the_ordinary_host_reply(self):

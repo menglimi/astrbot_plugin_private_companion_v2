@@ -127,7 +127,7 @@ CATALOG = {
         "participant_id": "user-1", "platform_id": "aiocqhttp", "account_id": "bot-1",
         "label": "小满（私聊）",
         "roles": [{"role_id": "role-1",
-                   "memory_api": "/astrbot_plugin_private_companion_v2/memory"}],
+                   "memory_api": "/astrbot_plugin_private_companion/memory"}],
     }],
 }
 

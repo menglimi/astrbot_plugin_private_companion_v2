@@ -64,6 +64,36 @@ def _recent_group_bot_messages(application, context, event_id, at):
         return []
 
 
+def _role_state_summary(application, context):
+    """Read a brief, authorized role-state summary so Laya tone matches role energy/mood."""
+    if application is None or context is None:
+        return None
+    role_state = getattr(application, "role_state", None)
+    if role_state is None:
+        return None
+    try:
+        view = role_state.read(context)
+    except Exception:
+        return None
+    values = view.get("values") if isinstance(view, dict) else None
+    if not isinstance(values, dict):
+        return None
+    summary = {}
+    if isinstance(values.get("energy"), int):
+        summary["energy"] = values["energy"]
+    for key in ("sleep", "busy"):
+        if isinstance(values.get(key), str) and values[key].strip():
+            summary[key] = values[key].strip()[:80]
+    mood_val = values.get("mood")
+    if isinstance(mood_val, str) and mood_val.strip():
+        summary["mood"] = mood_val.strip()[:80]
+    elif isinstance(mood_val, dict):
+        desc = mood_val.get("description")
+        if isinstance(desc, str) and desc.strip():
+            summary["mood"] = desc.strip()[:80]
+    return summary or None
+
+
 def core_decision_facts(event, prepared, application, *, at):
     native, context = prepared.get("native_input"), prepared.get("context")
     scope = getattr(context, "scope", None)
@@ -100,6 +130,8 @@ def core_decision_facts(event, prepared, application, *, at):
     if prepared.get("channel") == "group":
         group_admission = prepared.get("group_admission") or {}
         facts["candidate_reason"] = group_admission.get("reason", "")
+        if isinstance(group_admission.get("continuation"), dict):
+            facts["group_continuation"] = dict(group_admission["continuation"])
         facts["group_participation_policy"] = dict(group_admission.get("participation_policy") or {})
         if isinstance(group_admission.get("question_reference"), dict):
             facts["question_reference"] = dict(group_admission["question_reference"])
@@ -131,6 +163,9 @@ def core_decision_facts(event, prepared, application, *, at):
     elif context is not None:
         facts["recent_private_messages"] = _recent_private_messages(
             application, context, prepared.get("event_id") or getattr(native, "event_id", None), at)
+    state_summary = _role_state_summary(application, context)
+    if state_summary:
+        facts["role_state_summary"] = state_summary
     return facts
 
 

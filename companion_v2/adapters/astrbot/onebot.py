@@ -251,7 +251,25 @@ class OneBotTextSender:
                 return receipt("unknown")
             return not_sent(reason)
         stage = "platform_send"
+        leading_voice_outcome = None
         try:
+            # QQ record messages cannot reliably carry text or images. A mixed
+            # request can return a message id while silently losing the text.
+            # The required content gets its own ACK; voice remains best effort.
+            optional_voice = None
+            if voice_included and any(item["type"] not in ("record", "reply") for item in message):
+                optional_voice = next(item for item in message if item["type"] == "record")
+                record_index = next(index for index, item in enumerate(message) if item["type"] == "record")
+                text_index = next((index for index, item in enumerate(message) if item["type"] == "text"), None)
+                before_text = (record_index < text_index if text_index is not None
+                               else next(item["type"] for item in message if item["type"] != "reply") == "record")
+                message = [item for item in message if item["type"] != "record"]
+                if before_text:
+                    leading_voice_outcome = await self._send_optional_voice(
+                        envelope, scope, context, action, target, optional_voice)
+                    stage = "final_dispatch_check"
+                    api = await self._final_dispatch_check(envelope, scope, context)
+                    stage = "platform_send"
             # Direct reverse-WS call: never use the host boolean result or its HTTP/account fallback.
             result = await api.call_action(action, self_id=scope.account_id,
                 **target, message=message)
@@ -260,12 +278,22 @@ class OneBotTextSender:
                 logger.warning("V2 OneBot proactive delivery rejected part=%s failure_code=%s elapsed_ms=%d",
                                getattr(envelope, "part_id", "unknown"), rejection,
                                round((perf_counter() - started) * 1000))
+                if leading_voice_outcome in ("delivered", "unknown") or poke_outcome in ("delivered", "unknown"):
+                    return receipt("unknown")
                 return receipt("not_sent", failure_code=rejection)
             # NapCat can return signed message IDs; account IDs remain positive.
             message_id = message_number(result["message_id"])
             if message_id in ("-1", "0"):
                 return receipt("unknown")
-            return receipt("delivered", "onebot-message:" + digest([scope.platform, scope.account_id])[:24] + ":" + message_id)
+            confirmed = receipt("delivered", "onebot-message:" + digest([scope.platform, scope.account_id])[:24] + ":" + message_id)
+            if optional_voice is not None and not before_text:
+                try:
+                    await self._send_optional_voice(envelope, scope, context, action, target, optional_voice)
+                except asyncio.CancelledError:
+                    # Required text is already confirmed. An interrupted optional
+                    # voice must not turn it into an unknown/replayable send.
+                    logger.info("V2 OneBot optional voice interrupted after confirmed text part=%s", envelope.part_id)
+            return confirmed
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -275,8 +303,13 @@ class OneBotTextSender:
                 logger.warning("V2 OneBot proactive delivery rejected part=%s failure_code=%s elapsed_ms=%d",
                                getattr(envelope, "part_id", "unknown"), rejection,
                                round((perf_counter() - started) * 1000))
+                if leading_voice_outcome in ("delivered", "unknown") or poke_outcome in ("delivered", "unknown"):
+                    return receipt("unknown")
                 return receipt("not_sent", failure_code=rejection)
             reason = error.code if isinstance(error, TaskError) else type(error).__name__
+            if (stage == "final_dispatch_check" and leading_voice_outcome not in ("delivered", "unknown")
+                    and poke_outcome not in ("delivered", "unknown")):
+                return not_sent(reason)
             logger.warning("V2 OneBot delivery result unknown part=%s stage=%s reason=%s elapsed_ms=%d",
                            getattr(envelope, "part_id", "unknown"), stage, reason,
                            round((perf_counter() - started) * 1000))
@@ -285,6 +318,32 @@ class OneBotTextSender:
             if (not voice_included and voice_plan is not None and envelope.voice is None
                     and self.voice_delivery is not None):
                 self.voice_delivery.release(voice_plan, envelope.part_id)
+
+    async def _send_optional_voice(self, envelope, scope, context, action, target, voice):
+        """One independent voice attempt; its outcome never proves text delivery."""
+        stage, status, message_id = "authorization", "not_sent", None
+        try:
+            api = await self._final_dispatch_check(envelope, scope, context)
+            stage, status = "platform_send", "unknown"
+            result = await api.call_action(action, self_id=scope.account_id, **target, message=[voice])
+            if _eventchecker_rejection(result) is not None:
+                status = "not_sent"
+            else:
+                message_id = message_number(result["message_id"])
+                if message_id not in ("-1", "0"):
+                    status = "delivered"
+        except asyncio.CancelledError:
+            logger.info("V2 OneBot optional voice interrupted part=%s stage=%s status=%s",
+                        envelope.part_id, stage, status)
+            raise
+        except Exception as error:
+            if _eventchecker_rejection(error) is not None:
+                status = "not_sent"
+            logger.warning("V2 OneBot optional voice unavailable part=%s stage=%s status=%s error_type=%s",
+                           envelope.part_id, stage, status, type(error).__name__)
+        logger.info("V2 OneBot optional voice receipt part=%s status=%s message_id=%s",
+                    envelope.part_id, status, message_id if status == "delivered" else "unconfirmed")
+        return status
 
     async def _poke(self, api, context, plan):
         """Open one message with the sealed native poke, without blocking the text.

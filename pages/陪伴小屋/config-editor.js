@@ -6,10 +6,10 @@
    保留 create(kinds, rootProvider) 签名，app.js 的 mountConfigEditor 无需改动。 */
 "use strict";
 window.CompanionConfigEditors = (() => {
-  const PREFIX = "/astrbot_plugin_private_companion_v2/";
+  const PREFIX = "/astrbot_plugin_private_companion/";
 
   /* 主动联系支持四层历史数据；公共入口只编辑全局默认，个人覆盖在私聊用户页。
-     160 个字段平铺成一张卡没法用，所以按「一条链一段」拆成 23 段：
+     174 个字段平铺成一张卡没法用，所以按「一条链一段」拆成 24 段：
      总闸 → 节奏与额度 → 强度与连发 → 免打扰 → 重复抑制 → 开口判定，
      然后是三类契机，最后是各契机自己的触发源（问候、三餐、纪念日、天气、资讯、
      网络探索、自关联、余额、屏幕、语音与戳戳、约定、生成上下文）。
@@ -87,6 +87,13 @@ window.CompanionConfigEditors = (() => {
               "greeting_evening_window", "greeting_idle_minutes", "allow_insomnia_night_message",
               "insomnia_night_start", "insomnia_night_end", "insomnia_night_daily_limit",
               "insomnia_require_sleep_state"]},
+    {id: "morning", title: "起床与晨间确认",
+     help: "按角色的历史作息预测起床窗口；先问候角色自己，再在有可靠清醒迹象且未收到新输入时最多提醒一次。",
+     fields: ["morning_chain_enabled", "morning_role_greeting_enabled", "morning_nudge_enabled",
+              "routine_learning_enabled", "wake_require_device_evidence", "wake_morning_start",
+              "wake_morning_end", "morning_nudge_delay_minutes", "morning_nudge_max_attempts",
+              "routine_window_days", "wake_contact_window_minutes", "wake_contact_min_confidence",
+              "wake_contact_max_daily", "morning_wake_confidence_floor"]},
     {id: "meal", title: "三餐问候",
      help: "关闭总闸后两个饭点都不再问候；跟进时长决定饭点之后多久内还可以接着关心一句。",
      fields: ["meal_checkin_enabled", "meal_lunch_time", "meal_dinner_time",
@@ -449,6 +456,25 @@ window.CompanionConfigEditors = (() => {
       order: ["transcribe_enabled", "transcribe_max_items", "transcribe_text_chars",
               "transcribe_window_minutes"],
     },
+    relay: {
+      title: "跨窗口递话",
+      note: "默认关闭。打开后：你可以让 bot 帮你向白名单里的私聊带话（默认先确认）；"
+        + "其他人只能让 bot 给你带话，发不到别处。",
+      labels: {
+        enabled: "允许在本窗口使用递话",
+        require_confirm: "你发起的递话需要先确认",
+        max_text_chars: "单次递话最长字数",
+        allowed_targets: "可递话的私聊目标",
+        core_target_id: "你的私聊目标（其他人只能递到这里）",
+      },
+      helps: {
+        enabled: "关闭时任何人都不能通过本窗口递话。",
+        require_confirm: "开启后，你发起的递话会先弹确认，确认后才真正发出。",
+        allowed_targets: "填私聊 id，多个用逗号分隔；留空表示你不能主动递话。",
+        core_target_id: "其他用户发起的递话只会送到这个私聊，不会发到别处。",
+      },
+      order: ["enabled", "require_confirm", "max_text_chars", "allowed_targets", "core_target_id"],
+    },
     screen: {
       title: "屏幕解读与日记素材",
       note: "决定截到的画面能否被解读、以及能否作为日记素材；两项都默认关闭。",
@@ -465,13 +491,34 @@ window.CompanionConfigEditors = (() => {
     },
     person: {
       title: "熟人卡",
-      note: "为已经认识的对象维护一张简要卡片，帮助角色记住相处背景。",
+      note: "为已经认识的对象维护一张简要卡片，并控制角色在私聊与群聊之间如何保留在场感。",
       labels: {
         acquaintance_enabled: "启用熟人卡",
         acquaintance_card_chars: "卡片最长字数",
+        cross_window_awareness_enabled: "启用跨窗口在场",
+        cross_window_private_group_hours: "群活动回看小时",
+        cross_window_max_items: "最多几条群摘要",
+        cross_window_attention_minutes: "转场提示分钟",
+        cross_window_attention_wait_seconds: "另一窗口最多等待秒",
+        cross_window_group_identity_enabled: "群内识别私聊关系",
+        cross_window_peer_minutes: "群互动回看分钟",
+        cross_window_peer_reply_minutes: "接话回看分钟",
       },
-      helps: {acquaintance_card_chars: "卡片过长会挤占上下文，建议只留关键内容。"},
-      order: ["acquaintance_enabled", "acquaintance_card_chars"],
+      helps: {
+        acquaintance_card_chars: "卡片过长会挤占上下文，建议只留关键内容。",
+        cross_window_awareness_enabled: "关闭后不记录也不注入跨窗口在场；关闭熟人卡会一并关闭。",
+        cross_window_private_group_hours: "只回看当前私聊对象本人近期的群发言摘要。",
+        cross_window_max_items: "越多越占上下文，建议保留 3–4 条。",
+        cross_window_attention_minutes: "本人最近一次活动在群聊且在此分钟内，才给“刚从群里过来”的提示；0 表示关闭。",
+        cross_window_attention_wait_seconds: "同一角色另一个窗口仍在生成时，最多等这么久；超时只给转场提示。",
+        cross_window_group_identity_enabled: "群聊中仅告诉角色“这个成员也和你私聊过”，不暴露私聊内容。",
+        cross_window_peer_minutes: "统计“群里还有几个人在说话”的短窗口。",
+        cross_window_peer_reply_minutes: "统计“有人接你之前的话”的回看窗口。",
+      },
+      order: ["acquaintance_enabled", "acquaintance_card_chars", "cross_window_awareness_enabled",
+        "cross_window_private_group_hours", "cross_window_max_items", "cross_window_attention_minutes",
+        "cross_window_attention_wait_seconds", "cross_window_group_identity_enabled",
+        "cross_window_peer_minutes", "cross_window_peer_reply_minutes"],
     },
     private_access: {
       title: "私聊用户权限",
@@ -946,22 +993,30 @@ window.CompanionConfigEditors = (() => {
     },
     "content.authoring": {
       title: "原生创作",
-      note: "按角色生效。有 Content 权限时，新作正文会直接保存进作品库；续写读取固定版本并保存候选稿。",
+      note: "按角色生效。有 Content 权限时，新作正文会直接保存进作品库；续写读取固定版本并保存候选稿，封面按下面的开关单独生成。",
       labels: {
         enabled: "启用原生创作",
         direction_prompt: "创作方向",
+        cover_enabled: "允许作品带封面",
+        max_covers_per_work: "同一版本最多保留的封面数",
       },
       helps: {
         enabled: "开启后，只有明确要求创作并留存作品时才会调用；关闭不会影响已经保存的 Content 作品。",
         direction_prompt: "写角色创作时长期遵循的题材、语气或表达偏好；会与每次具体要求一起提供。",
+        /* 说明按 content/content/cover_assets.py 的实际行为写：
+           关掉开关不是清空历史，而是不再接受新的封面关联；超限时新的那张不保存。 */
+        cover_enabled: "封面与它所属的作品版本绑定。关闭只会停止新的封面：已经存下的封面仍可查看，也不会被删除。",
+        max_covers_per_work: "同一篇作品的同一版本最多几张封面（1–8）。达到上限后新的封面不会保存，旧的照旧；作品换到新版本后，旧封面记为历史版本，不占这个名额。",
       },
       choices: {},
-      order: ["enabled", "direction_prompt"],
+      order: ["enabled", "direction_prompt", "cover_enabled", "max_covers_per_work"],
       sections: [
         {id: "availability", title: "创作能力", help: "只在私聊提供；是否能保存仍由 Content 当前授权决定。",
          fields: ["enabled"]},
         {id: "direction", title: "创作方向", help: "长期偏好作为提示词材料，不改变作品权限或保存方式。",
          fields: ["direction_prompt"]},
+        {id: "cover", title: "作品封面", help: "封面跟着作品版本走；生成图片仍要 Content 的生图授权。",
+         fields: ["cover_enabled", "max_covers_per_work"]},
       ],
     },
     wardrobe: {
@@ -1120,7 +1175,7 @@ window.CompanionConfigEditors = (() => {
          fields: ["group_context_max_age_hours"]},
       ],
     },
-    /* 主动联系全局默认，也是最长的一个分区（160 项 / 23 段）。
+    /* 主动联系全局默认，也是最长的一个分区（174 项 / 24 段）。
        它此前四个触点全缺，92 个字段在任何页面上都点不到；段落声明在这里，
        段落之外的字段会被内核悄悄附到最后一段，所以 order 由段落拼出来。 */
     "proactive.contact": {
@@ -1181,6 +1236,20 @@ window.CompanionConfigEditors = (() => {
         insomnia_night_end: "失眠时段结束",
         insomnia_night_daily_limit: "失眠夜每日最多开口（次）",
         insomnia_require_sleep_state: "只在睡不着的状态下开口",
+        morning_chain_enabled: "启用晨间起床链",
+        morning_role_greeting_enabled: "允许角色醒来后先问候",
+        morning_nudge_enabled: "允许清醒确认提醒",
+        routine_learning_enabled: "学习并使用起床习惯",
+        wake_require_device_evidence: "清醒确认需要设备证据",
+        wake_morning_start: "起床窗口开始",
+        wake_morning_end: "起床窗口结束",
+        morning_nudge_delay_minutes: "醒来后多久再提醒（分钟）",
+        morning_nudge_max_attempts: "每次起床最多提醒次数",
+        routine_window_days: "学习起床习惯的天数",
+        wake_contact_window_minutes: "醒来后允许联系的窗口（分钟）",
+        wake_contact_min_confidence: "清醒迹象最低可信度（%）",
+        wake_contact_max_daily: "每天最多清醒确认提醒（次）",
+        morning_wake_confidence_floor: "预测起床窗口的最低可信度",
         meal_checkin_enabled: "启用三餐问候",
         meal_lunch_time: "午餐问候时刻",
         meal_dinner_time: "晚餐问候时刻",
@@ -1301,6 +1370,20 @@ window.CompanionConfigEditors = (() => {
         insomnia_night_end: "深夜窗口按每日次数等分，每一份最多开口一次。",
         insomnia_night_daily_limit: "0 表示不在深夜开口。",
         insomnia_require_sleep_state: "开启后只有角色确实处于睡不着的状态（角色状态里的睡眠线索）才会开口。",
+        morning_chain_enabled: "晨间链关闭时，不会生成角色醒来问候或清醒确认提醒。",
+        morning_role_greeting_enabled: "角色醒来后可以先自然问候；这不是对用户已醒的判断。",
+        morning_nudge_enabled: "只有起床证据通过窗口、可信度、去重和新输入检查后，才允许发一次确认提醒。",
+        routine_learning_enabled: "从近期有效的起床记录学习窗口；关闭后仍可使用手动窗口，不再更新习惯。",
+        wake_require_device_evidence: "开启后清醒确认必须包含已授权设备来源的证据。",
+        wake_morning_start: "本地时间 HH:MM，起床预测与清醒确认只在该窗口开始后考虑。",
+        wake_morning_end: "本地时间 HH:MM，必须晚于开始；窗口结束后不会翻旧账。",
+        morning_nudge_delay_minutes: "检测到清醒后等待这段时间再确认，给对方自然开口的机会。",
+        morning_nudge_max_attempts: "每个起床事件最多提醒几次；0 表示不提醒。",
+        routine_window_days: "使用最近多少天的作息样本；样本不足时采用保守默认窗口。",
+        wake_contact_window_minutes: "清醒确认只在起床迹象出现后的这段时间内有效。",
+        wake_contact_min_confidence: "低于此值的清醒迹象只记录诊断，不触发主动联系。",
+        wake_contact_max_daily: "按本地日限制清醒确认提醒次数，避免反复打扰。",
+        morning_wake_confidence_floor: "低于此可信度的历史作息预测不会生成晨间候选。",
         meal_checkin_enabled: "关闭时两个饭点都不再问候。",
         meal_lunch_time: "按免打扰时区解释，24 小时制，形如 12:00。",
         meal_dinner_time: "按免打扰时区解释，24 小时制，形如 18:00。",
@@ -1359,7 +1442,7 @@ window.CompanionConfigEditors = (() => {
         appointment_pre_silence_minutes: "约定前的这段时间里不发别的主动消息，避免刚提醒完又被别的话题盖过；0 表示不静默。",
         contact_followup_after_minutes: "原主动消息确认送达后，至少等候多久才考虑接回；新消息到达或原话失效时不会触发。",
         contact_followup_cooldown_minutes: "两次接回旧话题之间的最短间隔；从最近一次接回记录计算。",
-        generation_history_limit: "按一轮对话计数，同一轮的分段会合并；最多参考 8 轮，0 表示不带入近期对话。",
+        generation_history_limit: "按一轮对话计数，同一轮的分段会合并；默认 8 轮，最多 64 轮，仍受上下文字数预算约束；0 表示不带入近期对话。",
         history_max_chars: "这些历史材料的总字数上限，防止挤占本轮上下文。",
         style_prompt: "用你自己的话补充主动开口的风格；留空使用默认。",
         expression_prompt: "主动联系的表达方式；保存后替换该段模板。",
@@ -1391,11 +1474,12 @@ window.CompanionConfigEditors = (() => {
         quiet_start: "time", quiet_end: "time", meal_lunch_time: "time", meal_dinner_time: "time",
         weather_checkin_time: "time", date_checkin_time: "time",
         insomnia_night_start: "time", insomnia_night_end: "time",
+        wake_morning_start: "time", wake_morning_end: "time",
       },
       audit: contactAudit,
       scopeNote: "全局默认设置",
       sections: CONTACT_SECTIONS,
-      /* order 由段落拼出来：手写一份 160 项的 order 只会与段落声明漂移，
+      /* order 由段落拼出来：手写一份 174 项的 order 只会与段落声明漂移，
          而漂移的表现是「字段没有控件」或「同一个字段出现两次」，都不报错。 */
       order: CONTACT_SECTIONS.flatMap(section => section.fields),
     },

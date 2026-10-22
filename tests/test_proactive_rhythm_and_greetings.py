@@ -288,3 +288,37 @@ class RhythmSchedulingTests(ContactScheduleFixture, unittest.IsolatedAsyncioTest
         self.assertFalse(held.share_allowed(context, preferences, "share-slot", purpose="life"))
         self.assertFalse(held.share_allowed(context, preferences, "share-slot", purpose="creation"))
         self.assertTrue(held.share_allowed(context, preferences, "reminder-slot", purpose="reminder"))
+
+    async def test_sleep_hold_defers_discretionary_contacts_while_exempting_events_and_awake_grace(self):
+        from companion_v2.role_work.life import configuration as life_configuration
+        from companion_v2.role_work.life import rest_gate
+        from companion_v2.role_work.life.configuration import LifeConfigurationOwner
+
+        host, _ = await self.scheduled()
+        app = host.application
+        context = self.contact_context()
+        owner = LifeConfigurationOwner(app.runtime)
+        target = life_configuration.target_for(context)
+        fields = life_configuration.configuration_fields()
+        snapshot = owner.read(target, fields)
+        owner.write(target, fields, changes={
+            life_configuration.GROUP + ".enable_rest_reply_simulation": True,
+            life_configuration.GROUP + ".rest_reply_active_windows": "",
+            life_configuration.GROUP + ".rest_reply_awake_grace_minutes": 30,
+        }, reset=(), expected_revision=snapshot.revision, observed_at=self.clock.now())
+        self.grant(context.actor, context.scope, "role.life.run")
+        self.grant(context.actor, context.scope, "role.life.read")
+        routine = app.life_runtime.bind(context, "原角色人格提示")
+        sleep = routine.start_sleep("rest-hold-test", 15)
+        now = self.clock.now()
+        wake_at = now + timedelta(minutes=15)
+
+        self.assertEqual(app.contact_schedule._sleep_hold(context, {}, now), wake_at)
+        self.assertIsNone(app.contact_schedule._sleep_hold(context, {"calendar_event": {"kind": "commitment"}}, now))
+        self.assertIsNone(app.contact_schedule._sleep_hold(
+            context, {"greeting_event": {"kind": "insomnia_night"}}, now))
+
+        settings = rest_gate.read_settings(app.runtime, context)
+        rest_gate.save(app.runtime, context, rest_gate.mark_awake(
+            rest_gate.document(app.runtime, context), now=now, settings=settings, sleep=sleep.activity_id))
+        self.assertIsNone(app.contact_schedule._sleep_hold(context, {}, now))

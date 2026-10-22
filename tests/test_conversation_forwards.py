@@ -307,15 +307,23 @@ class ConversationForwardTests(ForwardFixture, unittest.IsolatedAsyncioTestCase)
 
 
 class ForwardIntakePolicyTests(unittest.TestCase):
-    """Intake ceilings stay inside the structural constants that keep stored data readable."""
+    """New-input settings remain inside structural bounds; saved records stay readable."""
 
     def test_defaults_equal_the_structural_constants(self):
         policy = ForwardIntakePolicy()
         self.assertEqual((policy.max_forwards, policy.max_nodes, policy.max_depth),
-                         (MAX_FORWARDS, MAX_NODES, MAX_DEPTH))
+                         (MAX_FORWARDS, 32, MAX_DEPTH))
+        self.assertTrue(policy.parse_nested)
         self.assertEqual(policy.max_path_length, 2 * MAX_DEPTH - 1)
 
-    def test_operator_may_narrow_but_never_widen(self):
+    def test_node_limit_can_keep_the_v1_range_and_nested_expansion_is_configurable(self):
+        widened = ForwardIntakePolicy(max_nodes=300, parse_nested=False)
+        self.assertEqual(widened.max_nodes, 300)
+        self.assertFalse(widened.parse_nested)
+        with self.assertRaises(TaskError):
+            ForwardIntakePolicy(max_nodes=301)
+
+    def test_operator_may_narrow_other_structural_ceilings(self):
         narrowed = ForwardIntakePolicy(max_forwards=1, max_nodes=4, max_depth=2)
         self.assertEqual(narrowed.max_path_length, 3)
         for kwargs, ceiling in (({"max_forwards": MAX_FORWARDS + 1}, MAX_FORWARDS),
@@ -346,6 +354,12 @@ class ForwardIntakePolicyTests(unittest.TestCase):
         # operator setting can never invalidate an already persisted forward.
         descriptor = ForwardNodeDescriptor((0,), "0" * 64, "300", "记录中的昵称", 1700000000, "1" * 64, "2" * 64, 4)
         self.assertEqual(descriptor.path, (0,))
+
+    def test_nested_expansion_can_be_disabled_without_losing_the_parent_node(self):
+        tree = [node_raw("外层", nested=[node_raw("内部节点")])]
+        nodes = freeze_nodes(deepcopy(tree), "0" * 64, intake=ForwardIntakePolicy(parse_nested=False))
+        self.assertEqual(len(nodes), 1)
+        self.assertIn("嵌套转发未展开", nodes[0].text)
 
     def test_a_narrowed_depth_ceiling_stops_nested_expansion(self):
         # `freeze_nodes` reads an expanded nested forward from `data["content"]` as a list.

@@ -16,7 +16,7 @@ from .management_identity import dashboard_operator
 from .memory_linkage import read_external_memory_summary
 
 
-PREFIX = "/astrbot_plugin_private_companion_v2/memory"
+PREFIX = "/astrbot_plugin_private_companion/memory"
 
 
 class MemoryWebAPI:

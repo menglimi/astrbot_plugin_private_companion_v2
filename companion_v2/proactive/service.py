@@ -17,11 +17,11 @@ from companion_v2.capabilities.memory_push import (DEFAULT_MEMORY_PUSH, PUSH_PRO
 from companion_v2.configuration.models import ConfigurationError
 from companion_v2.conversation.messages import source_from_document
 from companion_v2.conversation.reply_preparation import observed_statements, trim_blank_edges
-from companion_v2.conversation.reply_settings import ReplySettings
+from companion_v2.conversation.reply_settings import ReplySettings, voice_policy
 from companion_v2.conversation.segmentation import SegmentationPolicy, part_gap_seconds
 from companion_v2.conversation.text_processing import (TEXT_DEFAULTS, strip_internal_expression_protocol,
                                                        text_policy)
-from companion_v2.conversation.voice_reply import strip_voice_markup
+from companion_v2.conversation.voice_reply import VoiceReplyPolicy, strip_voice_markup
 from companion_v2.delivery.media import image_manifest, manifest_hash
 from companion_v2.delivery.plan import DeliveryContent, PokePlan, VoicePlan
 from companion_v2.delivery.service import DeliveryRequest
@@ -35,6 +35,7 @@ from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import OperationRef, VersionRef, normalize_utc
 from companion_v2.model_gateway.models import ModelTaskProfile
 from companion_v2.relationships.private_access import REVOCABLE_ABSENCE_CODES
+from companion_v2.role_work.state import humanized
 from companion_v2.sources.repositories import SourceRepository
 from companion_v2.storage.models import OperationState
 from companion_v2.storage.repositories import OperationRepository
@@ -59,7 +60,8 @@ JUDGE_TIMEOUT_SECONDS = 90
 _SEGMENTATION_DEFAULTS = asdict(SegmentationPolicy())
 _SEGMENTATION_KEYS = frozenset(_SEGMENTATION_DEFAULTS)
 _SEGMENTATION_SETTINGS_KEYS = _SEGMENTATION_KEYS | frozenset((
-    "part_gap_ms", "part_gap_mode", "part_gap_min_ms", "part_gap_max_ms", "part_gap_log_base"))
+    "part_gap_ms", "part_gap_mode", "part_gap_min_ms", "part_gap_max_ms", "part_gap_log_base",
+    "state_pacing_factor", "role_energy", "role_sleepy"))
 logger = logging.getLogger(__name__)
 
 
@@ -91,15 +93,6 @@ def persona_judge_profile(provider, *, max_output_tokens=260):
         "按当前人格与世界观点评一条已写好的主动消息，只决定放行或拦下。", max_output_tokens=max_output_tokens)
 
 
-def single_line(text, limit):
-    """The spoken span of one sealed body: whitespace collapsed, then truncated.
-
-    V1 capped proactive speech with the same normalization, so a multi-line
-    contact never reads a newline or a task marker aloud.
-    """
-    return re.sub(r"\s+", " ", text or "").strip()[:limit]
-
-
 def _segmentation_policy(settings):
     values = settings if isinstance(settings, dict) else {}
     return SegmentationPolicy(**{key: values.get(key, default)
@@ -120,6 +113,7 @@ class ProactiveContacts:
         # contact exactly as it was, and a memory failure never withholds a
         # message the user may be waiting for.
         self.memory_context = None
+        self.role_state = self.life_context = None
         self.expression_context = self.expression_review = None
         self.persona_judge = PersonaJudge(self.runtime)
         self._pending, self._invocations = {}, set()
@@ -175,9 +169,9 @@ class ProactiveContacts:
             sources = tuple(record.reference for record in records)
             session_key = "memory-contact-" + digest(job.request_hash)
             # The opportunity's own possibility and the exact selected source
-            # bodies are this contact's "current text", so topical recall and the
-            # "does this contact ask about eating" habit question see the same
-            # input a reply would see. The key stays bounded because it is
+            # bodies are this contact's current evidence, so topical recall and
+            # the habit candidates see the same source material a reply would
+            # see. The key stays bounded because it is
             # derived from the task itself, never from model text.
             snapshot = self.memory_context.contact_capture(job.context, session_key, sources, job.deadline_at)
             return self.memory_context.contact_contributions(snapshot, job.context)
@@ -207,6 +201,73 @@ class ProactiveContacts:
         except Exception as error:
             logger.warning("V2 proactive expression rules unavailable: %s", type(error).__name__)
             return ()
+
+    def _role_state_summary(self, context, at):
+        if self.role_state is None:
+            return None
+        try:
+            state = self.role_state.read(context, at=at)
+        except Exception:
+            return None
+        if not isinstance(state, dict) or state.get("state") in ("disabled", "unknown"):
+            return None
+        values = state.get("values") or {}
+        if not isinstance(values, dict):
+            return None
+        summary = {}
+        if isinstance(values.get("energy"), int):
+            summary["energy"] = values["energy"]
+        for key in ("sleep", "busy", "hunger", "health", "location"):
+            if isinstance(values.get(key), str) and values[key].strip():
+                summary[key] = values[key].strip()[:120]
+        mood_val = values.get("mood")
+        if isinstance(mood_val, str) and mood_val.strip():
+            summary["mood"] = mood_val.strip()[:120]
+        elif isinstance(mood_val, dict):
+            desc = mood_val.get("description")
+            if isinstance(desc, str) and desc.strip():
+                summary["mood"] = desc.strip()[:120]
+            axes = mood_val.get("axes")
+            if isinstance(axes, dict) and axes:
+                summary["mood_axes"] = {k: round(float(v), 2) for k, v in axes.items()
+                                        if isinstance(v, (int, float))}
+        conditions = [item.get("text", "").strip()[:120] for item in (values.get("conditions") or ())
+                      if isinstance(item, dict) and isinstance(item.get("text"), str) and item.get("text").strip()]
+        if conditions:
+            summary["conditions"] = conditions[:4]
+        sleep = state.get("sleep_execution")
+        if isinstance(sleep, dict):
+            summary["sleep_execution"] = {key: sleep[key] for key in (
+                "state", "awake_minutes", "sleep_pressure", "sleep_debt_minutes") if key in sleep}
+        return summary or None
+
+    def _recent_life_summary(self, context, at):
+        if self.life_context is None:
+            return None
+        try:
+            candidates = self.life_context.candidates(context, at)
+        except Exception:
+            return None
+        items = []
+        for variants in candidates.variants[:3]:
+            if not variants:
+                continue
+            try:
+                data = json.loads(variants[0].payload)
+            except Exception:
+                continue
+            entry = {"kind": data.get("kind"), "basis": data.get("basis")}
+            for key in ("state", "description", "local_date", "summary", "afterglow"):
+                if isinstance(data.get(key), str) and data[key].strip():
+                    entry[key] = data[key].strip()[:160]
+            reading = data.get("reading")
+            if isinstance(reading, dict) and isinstance(reading.get("reflection"), str) and reading["reflection"].strip():
+                entry["reflection"] = reading["reflection"].strip()[:160]
+            if len(entry) > 2:
+                items.append(entry)
+            if len(items) >= 2:
+                break
+        return items or None
 
     def _reaction_available(self, context, contact_id, *, diagnostic=False):
         if self.semantics is None:
@@ -270,7 +331,7 @@ class ProactiveContacts:
         last = self._last_plan_at(context, "poke") if minutes > 0 else None
         return last is None or at >= last + timedelta(minutes=minutes)
 
-    def _expression_plans(self, context, preferences, body, decision, at):
+    def _expression_plans(self, context, preferences, body, decision, at, *, policy=None):
         """Decide what may leave, from model intent plus the relationship's own accounting.
 
         The model only says that a voice note or a poke would suit the moment.
@@ -282,9 +343,17 @@ class ProactiveContacts:
             return None, None
         voice = poke = None
         if decision.get("voice_intent") is True and self._voice_available(context, preferences, at):
-            speech = single_line(body, preferences.values["voice_action_max_chars"])
-            if speech:
-                voice = VoicePlan(speech)
+            policy = policy or VoiceReplyPolicy(position="after_text")
+            # Foreign speech must be authored in the same model call. Never
+            # silently route the Chinese display text to a foreign TTS voice.
+            speech = decision.get("voice_text", body if policy.language == "zh" else "")
+            speech = re.sub(r"\s+", " ",
+                strip_voice_markup(strip_internal_expression_protocol(speech))).strip()
+            if speech and len(speech) <= 2000:
+                voice = VoicePlan(speech, provider_id=policy.provider_for_language(),
+                    timeout_seconds=policy.timeout_seconds, position=policy.position)
+            else:
+                logger.info("V2 proactive voice omitted: speech unavailable or too long language=%s", policy.language)
         if decision.get("poke_intent") is True and self._poke_available(context, preferences, at):
             poke = PokePlan(count=1)
         return voice, poke
@@ -547,10 +616,20 @@ class ProactiveContacts:
                         diagnostic_source_backed=diagnostic_source_backed, diagnostic_origin=diagnostic_origin,
                         diagnostic_image_intent=diagnostic_image_intent)
                     presentation = ReplySettings(self.configuration).capture(context, at)["settings"]
+                    segmentation_settings = {key: presentation[key]
+                                             for key in _SEGMENTATION_SETTINGS_KEYS if key in presentation}
+                    if not administrator_test:
+                        state_summary = self._role_state_summary(context, at)
+                        if state_summary is not None:
+                            if "energy" in state_summary and "role_energy" not in segmentation_settings:
+                                segmentation_settings["role_energy"] = state_summary["energy"]
+                            if humanized.is_sleepy(state_summary):
+                                segmentation_settings.setdefault("role_sleepy", True)
+                    task_deadline = min(opportunity.expires_at, at + timedelta(days=7))
                     job = replace(job, presentation_settings={key: presentation[key] for key in TEXT_DEFAULTS},
-                                  segmentation_settings={key: presentation[key]
-                                      for key in _SEGMENTATION_SETTINGS_KEYS if key in presentation},
-                                  deadline_at=opportunity.expires_at)
+                                  voice_policy=voice_policy({**presentation, "voice_enabled": True}),
+                                  segmentation_settings=segmentation_settings,
+                                  deadline_at=task_deadline)
                     if not administrator_test:
                         job = replace(job, expression_style=self._capture_expression(context, at))
                     self._pending[task_id] = job
@@ -558,7 +637,7 @@ class ProactiveContacts:
                     self._invocations.add(invocation)
                     registered = True
                     require(self.tasks.submit(TaskSpec(task_id, context, CONTACT_KIND, request_hash, task_id,
-                        opportunity.opened_at, opportunity.expires_at)))
+                        opportunity.opened_at, task_deadline)))
             except BaseException:
                 if registered:
                     self._pending.pop(task_id, None)
@@ -594,7 +673,7 @@ class ProactiveContacts:
         job = self._pending.get(spec.task_id)
         if (job is None or spec.kind != CONTACT_KIND or job.request_hash != spec.request_ref
                 or job.context != spec.context or spec.not_before != job.intent.thought.opportunity.opened_at
-                or spec.deadline_at != job.intent.thought.opportunity.expires_at):
+                or spec.deadline_at != (job.deadline_at or job.intent.thought.opportunity.expires_at)):
             raise TaskError("contact_request_unavailable", "original contact inputs are no longer held")
         preferences = self._policy(job.context, job.intent.purpose, at, token=job.preference_token,
                                    contact_id="contact-" + digest(spec.task_id),
@@ -656,6 +735,13 @@ class ProactiveContacts:
                              for kind, items in (("dialogue", dialogue), ("background", history))
                              for group in history_round_groups(items))
                 kept = sorted(kept, key=lambda group: (group["latest_at"], group["kind"]), reverse=True)
+                # Reserve the latest real user exchange within the same bounded
+                # budget. A run of our own proactive sends must not crowd out the
+                # user's last answer and turn an answered subject into unknown.
+                anchor = next((group for group in kept if group["kind"] == "dialogue"
+                    and any(dialogue[index].get("role") == "user" for index in group["indices"])), None)
+                if anchor is not None:
+                    kept = [anchor, *(group for group in kept if group is not anchor)]
                 selected, used, rounds_used = {"dialogue": set(), "background": set()}, 0, 0
                 for group in kept:
                     if rounds_used >= preferences.values["generation_history_limit"]:
@@ -687,7 +773,11 @@ class ProactiveContacts:
                 memory=() if job.administrator_test else self._memory_materials(job, records),
                 expression=self._expression_materials(job, contact_id),
                 rhythm_snapshot=(None if job.administrator_test else
-                                 self.budget.rhythm_snapshot(job.context, preferences, at)))
+                                 self.budget.rhythm_snapshot(job.context, preferences, at)),
+                role_state=None if job.administrator_test else self._role_state_summary(job.context, at),
+                recent_life=(None if job.administrator_test
+                             or (source_origin and any(k in source_origin for k in ("activity_event", "journal_event")))
+                             else self._recent_life_summary(job.context, at)))
             extra_instruction = "\n".join(text for text in
                 (segmentation.instruction, presentation.instruction,
                  news_presentation_instruction(segmentation) if job.intent.purpose == "news"
@@ -821,7 +911,8 @@ class ProactiveContacts:
                 "sources": job.intent.thought.evidence.sources, "source_hashes": job.source_hashes,
                 "administrator_test": job.administrator_test,
                 "diagnostic_image": job.diagnostic_image_intent is not None,
-                "opened_at": job.intent.thought.opportunity.opened_at, "expires_at": job.intent.thought.opportunity.expires_at,
+                "opened_at": job.intent.thought.opportunity.opened_at,
+                "expires_at": job.deadline_at or job.intent.thought.opportunity.expires_at,
                 "thought_id": job.intent.thought.thought_id, "feasible_count": job.feasible_count,
                 "thought_summary": job.intent.thought.summary,
                 "weight_used": job.weight_used, "call_id": completion.call_id,
@@ -838,6 +929,7 @@ class ProactiveContacts:
                 "silence_reason": "below_confidence_threshold" if confidence_skip else None,
                 "presentation_settings": job.presentation_settings,
                 "segmentation_settings": job.segmentation_settings,
+                "voice_language": job.voice_policy.language if job.voice_policy is not None else "zh",
                 "expression_style": job.expression_style,
                 "presentation_reason": presentation_reason}
             if provenance is not None:
@@ -869,7 +961,8 @@ class ProactiveContacts:
                 if job.diagnostic_image_intent is not None and reaction is None:
                     raise TaskError("proactive_diagnostic_image_unavailable",
                                     "the authorized image changed or could not be sealed for delivery")
-                voice, poke = self._expression_plans(job.context, preferences, body, decision_data, self.tasks.now())
+                voice, poke = self._expression_plans(job.context, preferences, body, decision_data, self.tasks.now(),
+                                                     policy=job.voice_policy)
                 payload_hash = manifest_hash(body or "", (reaction["manifest"],) if reaction else ())
                 part_documents = []
                 if body is not None:
@@ -894,6 +987,12 @@ class ProactiveContacts:
                 connection.execute("INSERT INTO proactive_contacts VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (contact_id, run.task.task_id, job.context.key, encode(document), body or "", payload_hash,
                      operation.operation_id, stamp(self.tasks.now())))
+                if body is None and judge_task is None and isinstance(job.automatic_origin, dict):
+                    open_loop = job.automatic_origin.get("open_loop_event")
+                    if isinstance(open_loop, dict) and isinstance(open_loop.get("memo_id"), str):
+                        connection.execute("""UPDATE agenda_open_loop_activity
+                            SET followup_count = MAX(0, followup_count - 1)
+                            WHERE memo_id = ?""", (open_loop["memo_id"],))
                 require(self.operations.transition(operation.operation_id, expected_state=OperationState.ACCEPTED,
                     next_state=OperationState.COMPLETED, observed_at=self.tasks.now()))
                 if judge_task is not None:
@@ -952,7 +1051,7 @@ class ProactiveContacts:
             not_before, deadline, sequence=sequence, part_count=len(parts))
 
     @staticmethod
-    def _part_gap(data, previous_text, contact_id, sequence):
+    def _part_gap(data, part_text, contact_id, sequence):
         settings = data.get("segmentation_settings") or {}
         mode = settings.get("part_gap_mode", "fixed")
         if mode == "fixed":
@@ -961,13 +1060,13 @@ class ProactiveContacts:
                 raise TaskError("contact_draft_unavailable", "original contact spacing changed")
         elif mode in ("random", "log"):
             lower, upper = settings.get("part_gap_min_ms", 1500), settings.get("part_gap_max_ms", 3500)
-            base = settings.get("part_gap_log_base", 1.8)
+            base = settings.get("part_gap_log_base", 2.1)
             if (type(lower) is not int or type(upper) is not int or not 100 <= lower <= upper <= 60000
                     or type(base) not in (int, float) or not 1.1 <= base <= 5.0):
                 raise TaskError("contact_draft_unavailable", "original contact spacing changed")
         else:
             raise TaskError("contact_draft_unavailable", "original contact spacing mode changed")
-        return part_gap_seconds(settings, previous_text, f"{contact_id}:{sequence}")
+        return part_gap_seconds(settings, part_text, f"{contact_id}:{sequence}")
 
     def delivery_confirmed(self, delivery_id):
         """Queue one next part after a trusted receipt, or recover the same step after restart."""
@@ -1013,7 +1112,7 @@ class ProactiveContacts:
                         continue
                     if sequence == 0 or previous_at is None:
                         return False
-                    gap = self._part_gap(data, previous_text, original.source_ref, sequence)
+                    gap = self._part_gap(data, parts[sequence]["text"] or previous_text, original.source_ref, sequence)
                     due_at = max(self.tasks.now(), previous_at + timedelta(seconds=gap))
                     if due_at >= deadline:
                         return False
@@ -1121,7 +1220,8 @@ class ProactiveContacts:
         entry = {"context": context, "purpose": data["purpose"], "body": row["body"], "at": stamp(at),
                  "note": preferences.values["note"], "confidence": data.get("decision_confidence", 1.0),
                  "role_instruction": batch["role_instruction"], "observed_at": at,
-                 "cause_id": run.task.task_id}
+                 "cause_id": run.task.task_id,
+                 "role_state": self._role_state_summary(context, at)}
         completion = await self.gateway.generate(run, judge_request(entry))
         if completion.draft is None:
             raise ValueError("persona judgement requires a final decision")
@@ -1148,6 +1248,12 @@ class ProactiveContacts:
             run.begin_effect()
             connection.execute("UPDATE proactive_contacts SET record_json = ? WHERE contact_id = ?",
                                (encode(document), contact_id))
+            if not allowed and isinstance(origin, dict):
+                open_loop = origin.get("open_loop_event")
+                if isinstance(open_loop, dict) and isinstance(open_loop.get("memo_id"), str):
+                    connection.execute("""UPDATE agenda_open_loop_activity
+                        SET followup_count = MAX(0, followup_count - 1)
+                        WHERE memo_id = ?""", (open_loop["memo_id"],))
             if allowed:
                 require(self.delivery.queue(self._part_request(contact_id, context, document, 0,
                     datetime.fromisoformat(document["opened_at"]))))
@@ -1220,7 +1326,8 @@ class ProactiveContacts:
                                              (previous_request.delivery_id,))
             if previous is None or previous["state"] != "delivered":
                 raise TaskError("contact_previous_part_unconfirmed", "a previous contact part has no delivery confirmation")
-            gap = self._part_gap(data, parts[request.sequence - 1]["text"], row["contact_id"], request.sequence)
+            gap = self._part_gap(data, parts[request.sequence]["text"] or parts[request.sequence - 1]["text"],
+                                 row["contact_id"], request.sequence)
             earliest = datetime.fromisoformat(previous["delivered_at"]) + timedelta(seconds=gap)
             if request.not_before < earliest:
                 raise TaskError("contact_part_spacing_changed", "contact part spacing is earlier than its sealed policy")

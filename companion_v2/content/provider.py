@@ -20,7 +20,7 @@ from .models import Call, Chapter, ContentError, JsonObject, Origin, Receipt, Wo
 from .service import ContentService
 
 SCHEMA = "companion.native-provider.v1"
-PLUGIN_ID = "astrbot_plugin_private_companion_v2.content"
+PLUGIN_ID = "astrbot_plugin_private_companion.content"
 PROVIDER_ID = "content.native"
 _PREFIX = "content.work."
 _MUTATIONS = {"create", "save_candidate", "adopt", "retract"}
