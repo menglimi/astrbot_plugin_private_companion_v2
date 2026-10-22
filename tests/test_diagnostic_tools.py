@@ -5,7 +5,7 @@ from datetime import timedelta
 import json
 import unittest
 
-from companion_v2.conversation.diagnostic_tools import DiagnosticRoleSession
+from companion_v2.conversation.diagnostic_tools import DiagnosticRoleSession, diagnostic_query, proposal_document
 from companion_v2.conversation.foreground import ClaimKind, DraftClaim, EvidencePromptCompiler, ForegroundContextAssembler, ModelDraft, PromptMaterial
 from companion_v2.conversation.models import InboundConversationEvent
 from companion_v2.diagnostics.models import DiagnosticError
@@ -120,6 +120,42 @@ class DiagnosticToolTests(DiagnosticFixture):
         session.continue_role(model).unwrap()
         material = json.loads(model.requests[0].context.materials[-1].payload)
         self.assertEqual(material["repair_proposals"][0]["state"], "pending")
+        self.assertEqual(self.counts()[:3], (0, 0, 0))
+
+    def test_diagnostic_selectors_bind_to_role_or_current_window_and_reject_extra_scope(self):
+        session = self.session()
+        role_query = diagnostic_query(session.context,
+            {"check": "configuration", "group_id": "output"}, self.diagnostics, self.clock.now())
+        self.assertEqual(role_query.target.layer.value, "role")
+        self.assertIsNone(role_query.target.scope)
+        window_query = diagnostic_query(session.context,
+            {"check": "configuration", "group_id": "output", "configuration_target": "current_window"},
+            self.diagnostics, self.clock.now())
+        self.assertEqual(window_query.target.scope, session.context.scope)
+        with self.assertRaises(DiagnosticError):
+            diagnostic_query(session.context, {"check": "storage", "scope": "other"},
+                             self.diagnostics, self.clock.now())
+        operation = diagnostic_query(session.context, {"check": "operation", "operation_id": "exact-operation",
+            "window_minutes": 15}, self.diagnostics, self.clock.now())
+        self.assertEqual(operation.operation_scope, session.context.scope)
+        self.assertEqual(operation.window.end, self.clock.now())
+        self.assertEqual(operation.window.end - operation.window.start, timedelta(minutes=15))
+
+    def test_created_proposal_is_readable_but_never_exposes_its_confirmation_token(self):
+        session = self.session()
+        report = session.inspect(self.query).unwrap()
+        proposal = session.create_proposal(proposal_id="chat-review", report_id=report.report_id,
+            changes={"output.enabled": False}, rationale="检查显示当前消费者尚未采用，先关闭输出观察。").unwrap()
+        exposed = proposal_document(proposal)
+        self.assertEqual(exposed["state"], "pending")
+        self.assertIn("delta", exposed["review"])
+        self.assertNotIn("review_token", exposed)
+        session.read_proposal(proposal.proposal_id).unwrap()
+        model = RecordingDiagnosticModel()
+        session.continue_role(model).unwrap()
+        material = model.requests[0].context.materials[-1].payload
+        self.assertNotIn(proposal.review_token, material)
+        self.assertNotIn("review_token", material)
         self.assertEqual(self.counts()[:3], (0, 0, 0))
 
 

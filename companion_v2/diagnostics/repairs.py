@@ -186,6 +186,9 @@ class RepairProposalService:
                                       operation=operation, expected_edit_token=data["review"]["edit_token"],
                                       changes=data["changes"], observed_at=now))
                     data["receipt"] = {**asdict(receipt), "effect": "local_configuration_saved", "runtime_application": "not_attested_by_confirmation"}
+                else:
+                    data["receipt"] = {"proposal_id": proposal_id, "effect": "proposal_cancelled",
+                                       "finished_at": now.isoformat()}
                 data["finished_at"] = now.isoformat()
                 updated = connection.execute("UPDATE diagnostic_repair_proposals SET state = ?, revision = revision + 1, record_json = ? "
                                              "WHERE proposal_id = ? AND origin_key = ? AND revision = 1 AND state = 'pending'",

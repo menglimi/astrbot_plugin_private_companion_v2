@@ -1031,6 +1031,11 @@ class MultiHostSession:
         async with self._intake[target.target_id]:
             try:
                 self.application.require_running()
+                if isinstance(target, GroupTarget):
+                    from companion_v2.conversation.group_llm_block import GroupLLMBlock
+                    if GroupLLMBlock(self.application.runtime, now=self.now()).status_for_target(target) is not None:
+                        raise TaskError("group_llm_blocked",
+                                        "model replies are temporarily blocked in this group")
                 if not isinstance(prepared, Mapping):
                     raise TaskError("core_reply_context_invalid", "prepared core reply context is unavailable")
                 if prepared.get("target_id") != target.target_id:

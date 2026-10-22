@@ -23,4 +23,4 @@ Content、Image、Screen、Reality、Together、Game、Live 七项能力都是
 
 分发的 `config-snapshot.js` 只含通用默认值，不再保存本机旧版用户配置。独立静态预览可以展示明确标注的设计样例；正式宿主页面始终以真实 API 为准。预览中的暂停、移除、便签编辑和天气仅影响浏览器样例，不能修改插件配置。
 
-当前发布范围、入口和限制见 [V2.0 发行说明](../../docs/RELEASE_V2_0.md)。
+当前安装说明与配置范围见 [README](../../README.md)，版本变化见 [CHANGELOG](../../CHANGELOG.md)。

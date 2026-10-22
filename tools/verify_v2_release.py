@@ -14,12 +14,15 @@ import sys
 from tempfile import TemporaryDirectory
 import zipfile
 
+SOURCE_ROOT = Path(__file__).resolve().parents[1]
 if __package__:
-    from .build_v2_release import (CORE_ID, NATIVE_CAPABILITY_BASELINE, NATIVE_EXTENSION_FILES,
-        RELEASE_SCHEMA, VERSION, native_artifact_hashes, verify_native_baseline, verify_runtime_sources)
+    from .build_v2_release import (CORE_ID, PACKAGED_NATIVE_BASELINE, NATIVE_EXTENSION_FILES,
+        RELEASE_SCHEMA, SOURCE_ONLY_DIRS, VERSION, native_artifact_hashes,
+        verify_native_baseline, verify_runtime_sources)
 else:
-    from build_v2_release import (CORE_ID, NATIVE_CAPABILITY_BASELINE, NATIVE_EXTENSION_FILES,
-        RELEASE_SCHEMA, VERSION, native_artifact_hashes, verify_native_baseline, verify_runtime_sources)
+    from build_v2_release import (CORE_ID, PACKAGED_NATIVE_BASELINE, NATIVE_EXTENSION_FILES,
+        RELEASE_SCHEMA, SOURCE_ONLY_DIRS, VERSION, native_artifact_hashes,
+        verify_native_baseline, verify_runtime_sources)
 
 MIGRATION_ACCEPTANCE_MODULES = (
     "tests.test_storage_runtime",
@@ -62,8 +65,8 @@ MIGRATION_ACCEPTANCE_MODULES = (
 def _verify_v2_contracts(core: Path) -> dict[str, object]:
     """Check the release's executable migration and binding contracts.
 
-    These checks intentionally import only the extracted package.  A source-tree
-    test could pass while the builder omitted a fixture or a legacy module.
+    Runtime contracts come from the extracted package; the source-only fixture
+    is kept outside the installation archive.
     """
 
     sys.path.insert(0, str(core))
@@ -78,7 +81,7 @@ def _verify_v2_contracts(core: Path) -> dict[str, object]:
         if fields["delivery_mode"].default != "onebot_private":
             raise ValueError("StagingConfiguration delivery_mode default is not onebot_private")
 
-        fixture_path = core / "fixtures" / "astrbot_staging.example.json"
+        fixture_path = SOURCE_ROOT / "fixtures" / "astrbot_staging.example.json"
         fixture = StagingConfiguration.parse(fixture_path.read_text(encoding="utf-8"))
         if fixture.delivery_mode != "onebot_private":
             raise ValueError("legacy preview fixture did not normalize to onebot_private")
@@ -148,13 +151,17 @@ def _verify_v2_contracts(core: Path) -> dict[str, object]:
 def _host_check_environment(temporary_root: str, core: str) -> dict[str, str]:
     environment = os.environ.copy()
     environment["ASTRBOT_ROOT"] = temporary_root
+    environment["COMPANION_CANDIDATE_CORE"] = str(Path(core).resolve())
+    environment.update({key: temporary_root for key in ("TMP", "TEMP", "TMPDIR")})
 
     # AstrBot's bundled Python keeps the backend application beside its venv.
     app_path = Path(sys.prefix).resolve().parent / "app"
     if not (app_path / "astrbot").is_dir():
         raise ValueError("--host-check requires AstrBot's bundled Python with backend/app beside it")
     # Do not let a developer's PYTHONPATH satisfy missing candidate modules.
-    environment["PYTHONPATH"] = os.pathsep.join([str(Path(core).resolve()), str(app_path)])
+    if not (SOURCE_ROOT / "tests" / "__init__.py").is_file():
+        raise ValueError("--host-check requires the source test harness beside the verifier")
+    environment["PYTHONPATH"] = os.pathsep.join([str(Path(core).resolve()), str(SOURCE_ROOT), str(app_path)])
     environment["PYTHONUTF8"] = "1"
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     return environment
@@ -236,6 +243,9 @@ def verify(release, destination):
                 if (not name.startswith(prefix) or "\\" in name or not target.is_relative_to(destination)
                         or any(part in {"..", "data", ".git", "__pycache__", "node_modules", "protected_model"} for part in Path(name).parts)):
                     raise ValueError("invalid source-only archive path")
+                relative = Path(name[len(prefix):])
+                if relative.parts and relative.parts[0] in SOURCE_ONLY_DIRS:
+                    raise ValueError("development file included in install archive: " + name)
             if archive.testzip() is not None:
                 raise ValueError("invalid archive CRC")
             content = json.loads(archive.read(prefix + "RELEASE_FILES.json"))
@@ -257,7 +267,7 @@ def verify(release, destination):
                 relative_files[name] = payload
             runtime_contract = verify_runtime_sources(relative_files)
             verify_native_baseline(VERSION, native_artifact_hashes(relative_files),
-                                   json.loads(relative_files[NATIVE_CAPABILITY_BASELINE]))
+                                   json.loads(relative_files[PACKAGED_NATIVE_BASELINE]))
             if any(content.get(key) != value or package.get(key) != value for key, value in runtime_contract.items()):
                 raise ValueError("bundled native extension or unique registration contract mismatch")
             # Paths have been validated above; destination contains no user data.
@@ -287,9 +297,16 @@ def main():
     args = parser.parse_args()
     report = verify(args.release, args.extract_to)
     if args.host_check:
-        # These checks run only from the extracted candidate package and use local doubles.
-        with TemporaryDirectory(prefix="companion-v2-release-host-check-") as temporary:
+        # Runtime imports come from the extracted package; tests come from this source checkout.
+        with TemporaryDirectory(prefix="companion-release-host-check-", dir=args.release.resolve()) as temporary:
             environment = _host_check_environment(temporary, report["core"])
+            probe = json.loads(_run_host_process(report["core"], environment,
+                ["-c", "import importlib.util,json; print(json.dumps({name: importlib.util.find_spec(name).origin for name in ('companion_v2', 'astrbot_host', 'tests')}))"],
+                "candidate import path check", timeout=30).splitlines()[-1])
+            core_path = Path(report["core"]).resolve()
+            if (not all(Path(probe[name]).resolve().is_relative_to(core_path) for name in ("companion_v2", "astrbot_host"))
+                    or not Path(probe["tests"]).resolve().is_relative_to(SOURCE_ROOT)):
+                raise RuntimeError("host checks did not import the packaged runtime and source test harness")
             output = _run_host_process(report["core"], environment,
                 ["-m", "tests.multi_life_entry_process"],
                 "candidate host lifecycle check", timeout=90)

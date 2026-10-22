@@ -76,6 +76,7 @@ class DiagnosticRepairTests(DiagnosticFixture):
         self.repairs = RepairProposalService(DiagnosticService(self.configuration, now=self.clock.now))
         cancelled = self.finish(proposal, confirm=False).unwrap()
         self.assertEqual(cancelled.state, "cancelled")
+        self.assertEqual(json.loads(cancelled.receipt_json)["effect"], "proposal_cancelled")
         self.assertTrue(self.finish(proposal, confirm=False).unwrap().replayed)
         self.assertEqual(self.finish(proposal).failure.code, "repair_proposal_closed")
         self.assertEqual(self.counts()[:3], (0, 0, 0))

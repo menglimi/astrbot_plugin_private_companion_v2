@@ -42,7 +42,7 @@ class ActionDefinition:
 
 DEFAULT_ACTIONS = (
     *(ActionDefinition(f"memo.{action}", ("memo",)) for action in (
-        "read", "edit", "complete", "reopen", "pin", "unpin", "delete.commit", "reminder.set",
+        "read", "edit", "complete", "reopen", "pin", "unpin", "delete", "delete.commit", "reminder.set",
     )),
     ActionDefinition("memo.create", ("memo",), shareable=False),
     ActionDefinition("memo.list", ("memo",), shareable=False),

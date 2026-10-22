@@ -482,8 +482,8 @@ class RoleToolLoopTests(ToolLoopFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_diagnostic_snapshot_detects_consumer_state_change_after_restart(self):
         async def respond(envelope):
-            return requested(call("check", "diagnostics.inspect", query=DiagnosticQuery(
-                target=self.window, group_id="model.conversation.reply").document())) if not envelope.tool_history else answered("Configuration checked.")
+            return requested(call("check", "diagnostics.inspect", check="configuration",
+                group_id="model.conversation.reply", configuration_target="current_window")) if not envelope.tool_history else answered("Configuration checked.")
         self.responses["primary"] = respond
         batch = await self.generate()
         runtime = self.open_runtime()

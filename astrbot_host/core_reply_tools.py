@@ -167,8 +167,18 @@ class CoreReplyToolSession:
                 for spec in tools.catalog:
                     if spec.action == "source.read":
                         offered.append(_OfferedTool(spec, "source"))
-                    elif spec.action in ("diagnostics.explain", "diagnostics.inspect") and getattr(tools, "diagnostics", None) is not None:
+            if getattr(tools, "diagnostics", None) is not None:
+                for spec in tools.catalog:
+                    if spec.action.startswith("diagnostics."):
                         offered.append(_OfferedTool(spec, "diagnostics"))
+                command = self.state.get("functional_command")
+                intent = getattr(command, "intent", None)
+                if intent in ("diagnostics_confirm", "diagnostics_cancel"):
+                    from companion_v2.conversation.diagnostic_tools import diagnostic_control_specs
+                    action = "diagnostics.proposal.confirm" if intent == "diagnostics_confirm" else "diagnostics.proposal.cancel"
+                    spec = next(item for item in diagnostic_control_specs(getattr(command, "argument", ""))
+                                if item.action == action)
+                    offered.append(_OfferedTool(spec, "diagnostics"))
             if getattr(tools, "agenda", False):
                 policy = app.agenda.policy
                 for spec in tools.catalog:
@@ -507,6 +517,10 @@ def inject_core_reply_tools(event, req, *, application):
             from companion_v2.conversation.content.authoring_workflow import INSTRUCTION as AUTHORING_INSTRUCTION
             if AUTHORING_INSTRUCTION not in req.system_prompt:
                 req.system_prompt += "\n\n" + AUTHORING_INSTRUCTION
+        if any(item.owner == "diagnostics" for item in offered):
+            from companion_v2.conversation.diagnostic_tools import DIAGNOSTIC_INSTRUCTION
+            if DIAGNOSTIC_INSTRUCTION not in req.system_prompt:
+                req.system_prompt += "\n\n" + DIAGNOSTIC_INSTRUCTION
     elif getattr(req, "func_tool", None) is not None:
         req.func_tool = ToolSet(tools=existing)
     inject_core_image_prompt(session, req, offered, image_values)

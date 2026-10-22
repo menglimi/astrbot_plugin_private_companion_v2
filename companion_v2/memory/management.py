@@ -107,7 +107,7 @@ class MemoryManagement:
             item["view_token"] = self.token(context, ref)
             items.append(item)
         return {"items": items[:limit], "next_cursor": items[limit - 1]["atom_id"] if len(items) > limit else None,
-            "operator_id": self.operator.subject.subject_id, "subject_id": context.actor.subject.subject_id,
+            "operator_id": self.writer.caller(context), "subject_id": context.actor.subject.subject_id,
             "supported_visibility": ["private"], "physical_erasure": "not_supported"}
 
     @outcome
@@ -148,10 +148,17 @@ class MemoryManagement:
         }
 
     def _clear_token(self, context, rows):
+        # 聊天内自证（operator 为空）与管理页（operator 为管理员）必须对同一份
+        # 预览算出同一个确认令牌；caller 在两种身份下都由 writer 统一解析。
         return digest([
-            owner_key(context), self.operator, self.writer.access.access.revision,
+            owner_key(context), self.writer.caller(context), self.writer.access.access.revision,
             [(row["atom_id"], row["revision"], row["namespace"], row["state"]) for row in rows],
         ])
+
+    @staticmethod
+    def confirmation_code(token):
+        """Short code a chat-side confirmation must echo for this exact preview."""
+        return digest(["memory-clear-confirm.v1", token])[:6].upper()
 
     @outcome
     def preview_clear(self, context):
@@ -163,7 +170,7 @@ class MemoryManagement:
             (owner,),
         )
         return {"owner_id": owner, "subject_id": context.actor.subject.subject_id,
-                "operator_id": self.operator.subject.subject_id,
+                "operator_id": self.writer.caller(context),
                 "counts": {"active": sum(row["state"] == "active" for row in rows),
                            "already_inactive": sum(row["state"] != "active" for row in rows)},
                 "revision_token": self._clear_token(context, rows),

@@ -4,6 +4,7 @@ import asyncio
 from functools import partial
 import importlib
 import json
+import os
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
@@ -57,7 +58,7 @@ async def run():
     assert_sdk_database_isolated(db_helper)
     await db_helper.initialize()
     db_helper.inited = True
-    source = Path(__file__).resolve().parents[1]
+    source = Path(os.environ.get("COMPANION_CANDIDATE_CORE", Path(__file__).resolve().parents[1])).resolve()
     # AstrBot imports by the plugin directory but registers the public metadata
     # name. These intentionally differ during the v7 migration workspace.
     plugin_dir_name = source.name

@@ -89,6 +89,22 @@ class CoreMemoryTests(MemoryFixture, unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(secret, dump)
         self.assertNotIn("synthetic-secret", dump)
 
+    def test_chat_clear_needs_no_dashboard_operator_and_echoes_a_fresh_code(self):
+        self.remember()
+        context = self.context_for(self.important)
+        manager = MemoryManagement(self.service, None)
+        preview = manager.preview_clear(context).unwrap()
+        self.assertEqual(preview["counts"], {"active": 1, "already_inactive": 0})
+        self.assertEqual(preview["operator_id"], self.important.subject.subject_id)
+        code = MemoryManagement.confirmation_code(preview["revision_token"])
+        self.assertEqual(len(code), 6)
+        self.assertNotEqual(code, MemoryManagement.confirmation_code(preview["revision_token"] + "stale"))
+        cleared = manager.clear(context, expected_revision_token=preview["revision_token"],
+                                operation_key="chat-clear").unwrap()
+        self.assertEqual(cleared["forgotten_count"], 1)
+        self.assertEqual(cleared["physical_erasure"], "not_performed")
+        self.assertEqual(manager.list(context).unwrap()["operator_id"], self.important.subject.subject_id)
+
     def test_bulk_clear_scrubs_active_and_retracted_history_and_replay_is_safe(self):
         original = self.proposed()
         active = self.remember(original, "clear-active")

@@ -47,6 +47,6 @@ python -X utf8 tools/sync_framework_page.py --preview <静态预览目录>
 
 ## 验收与范围
 
-桌面、390px、320px、非模态布置、WebGL、键盘、目标隔离、鉴权失败、真实 SDK 消息桥与工作区操作均使用定向检查验证。详见 [V2.0 发行说明](../../docs/RELEASE_V2_0.md) 与 [整合验收](../../docs/INTEGRATION_ACCEPTANCE_V2_0.md)。
+桌面、390px、320px、非模态布置、WebGL、键盘、目标隔离、鉴权失败、真实 SDK 消息桥与工作区操作均使用定向检查验证。安装与配置范围见 [README](../../README.md)，版本变化见 [CHANGELOG](../../CHANGELOG.md)。
 
 [结构说明](STRUCTURE.md)、[历史 V1/V2 对照](V1_TO_V2_UI_AUDIT.md)保留设计依据；其中历史“尚未接入”的状态以当前发行说明为准。

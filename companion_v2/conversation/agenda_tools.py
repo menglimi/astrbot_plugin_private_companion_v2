@@ -27,7 +27,7 @@ TOOL_FIELDS = {
     "memo.list": (frozenset(), frozenset({"limit", "after", "search", "state", "purpose"})),
     "memo.edit": (frozenset({"memo_id", "expected_revision", "changes"}), frozenset()),
     **{f"memo.{action}": (frozenset({"memo_id", "expected_revision"}), frozenset())
-       for action in ("complete", "reopen", "pin", "unpin")},
+       for action in ("complete", "reopen", "pin", "unpin", "delete")},
     "reminder.create": (frozenset(), frozenset({"schedule", "message", "memo_id", "expected_memo_revision"})),
     "reminder.read": (frozenset({"reminder_id"}), frozenset()),
     "reminder.list": (frozenset(), frozenset({"limit", "after_id"})),

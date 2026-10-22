@@ -15,6 +15,7 @@ from companion_v2.product import PRODUCT_VERSION
 from .discovery import declarations_for_manifest
 from .image_native.adapter import PLUGIN_ID as IMAGE_PACKAGE_ID
 from .image_native.extension import ImageExtensionAPI
+from .image_native.package import package_hash as image_package_hash
 from .screen_provider import NativeScreenProvider, PLUGIN_ID as SCREEN_PACKAGE_ID
 from .settings import ExtensionSettings
 
@@ -27,7 +28,7 @@ MANAGED_EXTENSIONS = frozenset({"content", "reality", "together", "game", "live"
 
 
 class BundledNativeLease:
-    def __init__(self, package_id, port, *, api=None, furniture, factory=None):
+    def __init__(self, package_id, port, *, api=None, furniture, factory=None, package_version=PRODUCT_VERSION):
         self.port = port
         self.api = api
         self.star = None
@@ -39,7 +40,6 @@ class BundledNativeLease:
         self.factory = factory
         self.state = "inactive"
         self.error_code = None
-        package_version = PRODUCT_VERSION
         manifest = parse_manifest(port.manifest(), plugin_id=package_id, version=package_version)
         package = replace(manifest.package, furniture=(furniture,))
         self.manifest = replace(manifest, package=package)
@@ -123,9 +123,14 @@ def create_bundled_extension(data_root, name, *, now=None, context=None, control
         return BundledNativeLease(PLUGIN_ID, port, factory=factory,
             furniture=FurnitureDescriptor(name, name, "创作书架", name))
     if name == "image":
+        # Rebuilt transports can differ within one public release. Keep each
+        # catalog descriptor immutable without making a normal rebuild a conflict.
+        # Use the same identity for provider requests and persisted declarations.
+        version = PRODUCT_VERSION + "+image." + image_package_hash()
         api = ImageExtensionAPI(data_root=root, config_path=root / "extensions" / name / "config.json",
-                                version=PRODUCT_VERSION)
+                                version=version)
         return BundledNativeLease(IMAGE_PACKAGE_ID, api.companion_v2_native(), api=api, factory=factory,
+            package_version=version,
             furniture=FurnitureDescriptor(name, IMAGE_EXTENSION_ID, "画面工作室", name))
     if name == "screen":
         port = NativeScreenProvider(root / "extensions" / name, version=PRODUCT_VERSION, now=now)

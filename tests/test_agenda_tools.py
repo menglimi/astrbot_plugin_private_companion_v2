@@ -98,6 +98,21 @@ class AgendaToolTests(unittest.TestCase):
         self.assertIn("local_registered/local_prepared", request.instruction)
         self.assertEqual(self.runtime.read_all("SELECT * FROM outbox", ()), ())
 
+    def test_delete_is_exposed_only_through_the_memo_delete_tool(self):
+        session, _ = self.session()
+        created = session.execute(call_id="save", action="memo.create",
+                                  arguments={"title": "午饭的事", "body": "改天再聊"}).unwrap()
+        payload = json.loads(created.payload_json)
+        arguments = {"memo_id": payload["object_id"], "expected_revision": payload["revision"]}
+        deleted = session.execute(call_id="remove", action="memo.delete", arguments=arguments).unwrap()
+        result = json.loads(deleted.payload_json)
+        self.assertEqual(result["state"], "deleted")
+        self.assertEqual(result["object_id"], payload["object_id"])
+        stale = session.execute(call_id="remove-again", action="memo.delete", arguments=arguments).unwrap()
+        self.assertEqual(stale.state, "failed")
+        self.assertEqual(session.execute(call_id="legacy", action="memo.delete.commit",
+                                         arguments={}).failure.code, "tool_not_available")
+
     def test_model_cannot_replace_owner_role_scope_identity_or_invoke_internal_due(self):
         session, _ = self.session()
         for injected in ("actor", "owner", "scope", "role", "expected_role_revision", "recipient"):

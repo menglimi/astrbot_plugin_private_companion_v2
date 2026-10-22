@@ -14,7 +14,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE_ID = "astrbot_plugin_private_companion"
-VERSION = "7.0.1"
+VERSION = "7.0.0"
 RELEASE_SCHEMA = "companion.v2.release.v2"
 NATIVE_EXTENSION_FILES = {
     "content": ("companion_v2/content/assembly.py", "companion_v2/content/provider.py",
@@ -71,6 +71,7 @@ NATIVE_ASSEMBLY_FILES = ("astrbot_host/native_extensions/__init__.py",
                          "astrbot_host/native_extensions/settings.py",
                          "astrbot_host/native_extensions/service.py")
 NATIVE_CAPABILITY_BASELINE = "tools/native_capability_baseline.json"
+PACKAGED_NATIVE_BASELINE = "native-capability-baseline.json"
 NATIVE_HASH_GLOBS = {
     "content": "companion_v2/content",
     "image": "astrbot_host/native_extensions/image_native",
@@ -91,12 +92,12 @@ NATIVE_HASH_FILES = {
 }
 LEGACY_PROVIDER_IDS = frozenset("astrbot_plugin_" + name + "_companion" for name in
     ("content", "image", "reality", "screen", "together", "game", "live_stream"))
-CORE_DIRS = ("companion_v2", "astrbot_host", "pages", "docs", "tests", "fixtures", "tools")
+CORE_DIRS = ("companion_v2", "astrbot_host", "pages")
+SOURCE_ONLY_DIRS = frozenset({"docs", "fixtures", "tests", "tools"})
 ROOT_FILES = {
     "metadata.yaml", "_conf_schema.json", "README.md", "CHANGELOG.md",
     "requirements.txt", "requirements-optional-input.txt", "requirements-optional-mic.txt",
-    "pyproject.toml", "LICENSE", "NOTICE", "logo.png", ".editorconfig",
-    "手机陪伴终端从零配对说明书.md",
+    "pyproject.toml", "LICENSE", "NOTICE", "logo.png",
 }
 EXCLUDED_DIRS = {
     "data", ".git", "__pycache__", ".pytest_cache", "node_modules", "logs",
@@ -115,16 +116,6 @@ EXCLUDED_FILES = {
     "pages/陪伴小屋/theme-preview.html",
     "pages/陪伴小屋/v2-surface-preview.html",
     "pages/陪伴小屋/_probe-timeline.html",
-    # 文档侧的设计稿快照同样是生成物（contact-rhythm 例外：它是生成器读的模板）。
-    "docs/V2_SURFACE_PREVIEW_20260928.html",
-    "docs/RELEASE_V2_0.md",
-    "docs/INTEGRATION_ACCEPTANCE_V2_0.md",
-    # The migration acceptance note contains counts from a real private data set.
-    "docs/V670_TO_V700_MIGRATION_20261019.md",
-    "fixtures/reply_efficiency_preview.json",
-    # This standalone mini-game is not part of the companion plugin release.
-    "tests/bubble_bonbon_smoke.mjs",
-    "tests/_trace_apply.py",
 }
 EXCLUDED_SUFFIXES = {".pyc", ".pyo", ".log", ".out", ".db", ".sqlite", ".sqlite3", ".bak", ".backup"}
 TEXT_SUFFIXES = {
@@ -227,7 +218,7 @@ def refresh_native_baseline(root, version):
 def allowed(path, root):
     relative = path.relative_to(root)
     return (relative.as_posix() not in EXCLUDED_FILES
-            and relative.as_posix() != "fixtures/proactive/news_feed_juya_20261004.xml"
+            and not (relative.parts and relative.parts[0] in SOURCE_ONLY_DIRS)
             and not any(part in EXCLUDED_DIRS for part in relative.parts)
             and not path.is_symlink()
             and path.resolve().is_relative_to(root.resolve())
@@ -366,10 +357,13 @@ def build_plugin(root, directories, output):
     relative_files = {}
     for path in sources(root, directories):
         relative_files[path.relative_to(root).as_posix()] = checked_payload(path, root)
+    # The source baseline belongs to the release tooling, but its pinned hashes
+    # must remain independently verifiable in the install archive.
+    relative_files[PACKAGED_NATIVE_BASELINE] = checked_payload(root / NATIVE_CAPABILITY_BASELINE, root)
     required = {"main.py", "metadata.yaml", "_conf_schema.json", "CHANGELOG.md", "pyproject.toml",
                 "companion_v2/legacy/configuration_rules.json",
                 "pages/陪伴小屋/index.html", "pages/陪伴小屋/page-build.json",
-                NATIVE_CAPABILITY_BASELINE}
+                PACKAGED_NATIVE_BASELINE}
     if not required.issubset(relative_files):
         raise ValueError("incomplete plugin source: " + root.name)
     project_version = re.search(r'^version\s*=\s*"([^"]+)"$', relative_files["pyproject.toml"].decode("utf-8"), re.MULTILINE)
@@ -377,7 +371,7 @@ def build_plugin(root, directories, output):
         raise ValueError("pyproject version must match the release version")
     runtime_contract = verify_runtime_sources(relative_files)
     verify_native_baseline(VERSION, native_artifact_hashes(relative_files),
-                           json.loads(relative_files[NATIVE_CAPABILITY_BASELINE]))
+                           json.loads(relative_files[PACKAGED_NATIVE_BASELINE]))
     public_entries = [name for name in relative_files if len(Path(name).parts) == 3
                       and Path(name).parts[0] == "pages" and name.endswith("/index.html")]
     if public_entries != ["pages/陪伴小屋/index.html"]:
@@ -406,7 +400,7 @@ def build(output, core_only=False):
         raise ValueError("release output must be outside installed plugin directories")
     output.mkdir(parents=True, exist_ok=True)
     # Stage the complete release first. A validation failure publishes no new ZIP.
-    with TemporaryDirectory(prefix="companion-v2-package-") as temporary:
+    with TemporaryDirectory(prefix="companion-package-", dir=output) as temporary:
         stage = Path(temporary)
         packages = [build_plugin(ROOT, CORE_DIRS, stage)]
         manifest = {"schema": RELEASE_SCHEMA, "product": "我会永远陪着你", "version": VERSION,

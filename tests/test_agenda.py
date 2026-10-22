@@ -28,7 +28,7 @@ SCOPE = ScopeRef(INSTALLATION, "onebot", ScopeKind.PRIVATE, "window-a")
 TARGET = AgendaTarget(SCOPE, ROLE, USER)
 ACTIONS = (
     "memo.create", "memo.read", "memo.list", "memo.edit", "memo.complete", "memo.reopen", "memo.pin",
-    "memo.unpin", "memo.delete.commit", "memo.reminder.set", "reminder.create", "reminder.reschedule",
+    "memo.unpin", "memo.delete", "memo.delete.commit", "memo.reminder.set", "reminder.create", "reminder.reschedule",
     "reminder.cancel", "reminder.read", "reminder.list", "reminder.deliver", "operation.lookup",
 )
 

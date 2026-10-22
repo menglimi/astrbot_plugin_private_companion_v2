@@ -4,6 +4,7 @@ import asyncio
 from functools import partial
 import importlib
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import ModuleType, SimpleNamespace
@@ -26,7 +27,7 @@ from astrbot.core import db_helper
 
 async def run():
     assert_sdk_database_isolated(db_helper)
-    root = Path(__file__).resolve().parents[1]
+    root = Path(os.environ.get("COMPANION_CANDIDATE_CORE", Path(__file__).resolve().parents[1])).resolve()
     package = ModuleType("companion_life_entry_fixture")
     package.__path__ = [str(root)]
     sys.modules[package.__name__] = package

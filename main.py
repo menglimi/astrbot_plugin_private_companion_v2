@@ -64,6 +64,10 @@ from .astrbot_host.core_reply_telemetry import (
     observe_core_reply_suppressed,
 )
 from .astrbot_host.calendar_command import parse_calendar_command
+from .astrbot_host.functional_commands import classify_functional_command, inject_functional_command_instruction
+from .astrbot_host.group_command import receive_group_llm_command
+from .astrbot_host.reset_command import receive_reset_command
+from companion_v2.conversation.group_llm_block import GroupLLMBlock
 from .astrbot_host.private_debounce import PrivateDebounce
 from .astrbot_host.event_routing import (
     COMPANION_INTAKE_PRIORITY, competing_command_handler, suppress_default_reply,
@@ -538,6 +542,46 @@ class PrivateCompanionV2StagingPlugin(Star):
         origin_key = self._origin_key_for_event(event)
         kind = getattr(getattr(getattr(event, "message_obj", None), "type", None), "value", None)
         channel = "private" if kind == "FriendMessage" else "group" if kind == "GroupMessage" else "unknown"
+        if channel == "group":
+            # 群 LLM 开关必须先于候选准入处理：封锁期间普通消息不再请求模型，
+            # 但「开启 LLM」这条命令本身仍要能执行并回执。
+            try:
+                group_command = await receive_group_llm_command(self.staging, event, target=target)
+            except Exception as error:
+                group_command = None
+                logger.warning("[CompanionV2] 群 LLM 指令处理异常 event_ref=%s error_type=%s",
+                               event_ref, type(error).__name__)
+            if group_command is not None:
+                suppress_default_reply(event)
+                if group_command.failure is not None:
+                    self._record_no_reply(event, group_command.failure.code, origin_key=origin_key,
+                                          channel=channel, event_ref=event_ref, stage="command")
+                else:
+                    logger.info("[CompanionV2] 群 LLM 指令由专用流程处理 event_ref=%s", event_ref)
+                return
+            block = (GroupLLMBlock(self.staging.runtime, now=self.staging.now)
+                     if getattr(self.staging, "runtime", None) is not None else None)
+            if block is not None and block.status_for_target(target) is not None:
+                suppress_default_reply(event)
+                self._record_no_reply(event, "group_llm_blocked", origin_key=origin_key,
+                                      channel=channel, event_ref=event_ref, stage="admission")
+                return
+        if channel == "private":
+            # 全部重置必须在建批次之前执行并直发回执：窗口重置会取消在途批次。
+            try:
+                reset_command = await receive_reset_command(self.staging, event, target=target)
+            except Exception as error:
+                reset_command = None
+                logger.warning("[CompanionV2] 全部重置指令处理异常 event_ref=%s error_type=%s",
+                               event_ref, type(error).__name__)
+            if reset_command is not None:
+                suppress_default_reply(event)
+                if reset_command.failure is not None:
+                    self._record_no_reply(event, reset_command.failure.code, origin_key=origin_key,
+                                          channel=channel, event_ref=event_ref, stage="command")
+                else:
+                    logger.info("[CompanionV2] 全部重置由专用流程处理 event_ref=%s", event_ref)
+                return
         is_calendar_command = (channel == "private"
                                and parse_calendar_command(str(getattr(event, "message_str", "") or "")))
         debounce_manager = None
@@ -865,6 +909,7 @@ class PrivateCompanionV2StagingPlugin(Star):
         application = getattr(getattr(self.staging, "session", None), "application", None)
         observer = getattr(getattr(self.staging, "session", None), "core_reply_observations", None)
         self._observe_core_phase(prepared, "running")
+        classify_functional_command(event, channel=str(prepared.get("channel") or ""), own_module=__name__)
         if application is not None:
             try:
                 with measure_core_preparation(event, "tool_injection", now=self.staging.now):
@@ -873,6 +918,10 @@ class PrivateCompanionV2StagingPlugin(Star):
                 logger.warning("[CompanionV2] V2 工具暂不可用，保留 AstrBot 核心工具 error_type=%s",
                                type(error).__name__)
         prepare_native_host_request(self.staging, event, req)
+        inject_functional_command_instruction(
+            event, req, channel=str(prepared.get("channel") or ""), own_module=__name__,
+            application=application,
+            context=prepared.get("context") if isinstance(prepared, dict) else None)
         with measure_core_preparation(event, "send_tool_injection", now=self.staging.now):
             inject_core_reply_send_tool(event, req, submit=getattr(observer, "submit", None))
         try:

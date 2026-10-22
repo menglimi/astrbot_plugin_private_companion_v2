@@ -200,7 +200,7 @@ class AgendaService:
         changes: Mapping[str, object] | None = None,
     ) -> Outcome[AgendaReceipt]:
         actions = {"edit": "memo.edit", "complete": "memo.complete", "reopen": "memo.reopen",
-                   "pin": "memo.pin", "unpin": "memo.unpin", "delete": "memo.delete.commit"}
+                   "pin": "memo.pin", "unpin": "memo.unpin", "delete": "memo.delete"}
         if action not in actions:
             return Outcome.failed("unknown_agenda_action", "memo action is unsupported")
         patch = dict(changes or {})

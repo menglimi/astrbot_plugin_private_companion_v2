@@ -23,6 +23,25 @@ from companion_v2.execution.models import TaskError, digest
 from companion_v2.foundation.refs import ScopeKind
 
 
+async def send_text_notice(controller, route, *, text, transport=None):
+    """平台直发一句纯文本到已认证的路由（私聊或群），返回有界回执。"""
+    if not text or not str(text).strip():
+        return {"state": "skipped", "reason": "blank_line"}
+    api = transport if transport is not None else _transport(controller, route)
+    if route.kind is ScopeKind.GROUP:
+        action, target = "send_group_msg", {"group_id": int(route.peer)}
+    else:
+        action, target = "send_private_msg", {"user_id": int(route.peer)}
+    try:
+        result = await api.call_action(action, self_id=route.login, **target,
+                                       message=[{"type": "text", "data": {"text": str(text)}}])
+    except Exception:  # noqa: BLE001 - 平台调用失败只记状态，不重放
+        return {"state": "failed", "reason": "platform_call_failed"}
+    identifier = result.get("message_id") if isinstance(result, Mapping) else None
+    return {"state": "delivered", "message_id": identifier,
+            "receipt": digest(["text-notice.v1", route.platform_id, route.login, route.peer, str(text)])}
+
+
 async def send_private_notice(controller, event, *, text, route, transport=None):
     """平台直发一句纯文本；返回有界回执，供诊断与"为什么回了这个人"查证。
 

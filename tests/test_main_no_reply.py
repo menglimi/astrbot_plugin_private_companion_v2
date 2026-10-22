@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib.util
+import os
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
@@ -15,7 +16,7 @@ from companion_v2.foundation.outcome import Outcome
 from companion_v2.storage.runtime import StorageRuntime
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(os.environ.get("COMPANION_CANDIDATE_CORE", Path(__file__).resolve().parents[1])).resolve()
 PACKAGE_NAME = "_companion_v2_no_reply_entry_test"
 PACKAGE = ModuleType(PACKAGE_NAME)
 PACKAGE.__path__ = [str(ROOT)]

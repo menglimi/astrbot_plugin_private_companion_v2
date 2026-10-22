@@ -4,6 +4,7 @@ from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 # The SDK fixture sets a temporary ASTRBOT_ROOT before importing the host.
 from tests import test_astrbot_staging_host as support
@@ -31,6 +32,44 @@ class NativeSingleSessionTests(unittest.IsolatedAsyncioTestCase):
         self.controller = support.AstrBotStagingController(self.native, support.host_config(),
             Path(temporary.name), native_types=types, now=lambda: NOW)
         self.addAsyncCleanup(self.controller.terminate)
+
+    async def test_rebuilt_image_catalog_upgrades_without_overwriting_release_history(self):
+        from astrbot_host.native_extensions.builtins import create_bundled_extension
+        from companion_v2.product import PRODUCT_VERSION
+
+        c = self.controller
+        (await c.initialize_profile()).unwrap()
+        repository = CapabilityRepository(c.runtime)
+        first = create_bundled_extension(c.data_root, "image")
+        self.addAsyncCleanup(first.aclose)
+        current = first.manifest.package
+        legacy = replace(current, package_version=PRODUCT_VERSION, artifact_hash="old-build")
+        repository.register_descriptor(legacy, registered_at=NOW).unwrap()
+        repository.acquire(extension_id="image", package_id=legacy.package_id,
+            package_version=legacy.package_version, expected_revision=0, observed_at=NOW).unwrap()
+        repository.pause(extension_id="image", expected_revision=1, observed_at=NOW).unwrap()
+
+        (await c.start()).unwrap()
+        installed = repository.installation(extension_id="image").unwrap()
+        self.assertEqual(installed.package_version, current.package_version)
+        self.assertEqual(installed.desired_state.value, "paused")
+        self.assertEqual(installed.revision, 3)
+        self.assertIn(legacy, repository.descriptors(extension_id="image"))
+        self.assertEqual(first.port.version, current.package_version)
+        self.assertTrue(all(d.descriptor.binding.version == first.port.version for d in first.declarations()))
+        (await c.stop()).unwrap()
+
+        with patch("astrbot_host.native_extensions.builtins.image_package_hash", return_value="b" * 64), \
+                patch("astrbot_host.native_extensions.image_native.adapter.package_hash", return_value="b" * 64):
+            (await c.start()).unwrap()
+        updated = repository.installation(extension_id="image").unwrap()
+        self.assertNotEqual(updated.package_version, installed.package_version)
+        self.assertEqual(updated.artifact_hash, "b" * 64)
+        self.assertEqual(updated.desired_state, installed.desired_state)
+        self.assertEqual(updated.revision, 4)
+        self.assertEqual(len(repository.descriptors(extension_id="image")), 3)
+        self.assertEqual(c.runtime.read_all("PRAGMA foreign_key_check", ()), ())
+        self.assertEqual(c.runtime.read_all("SELECT * FROM capability_authorizations", ()), ())
 
     async def test_single_load_is_read_only_start_registers_only_stop_rebuilds_registry(self):
         c = self.controller
