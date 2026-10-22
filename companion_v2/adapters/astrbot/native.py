@@ -376,9 +376,11 @@ class NativePrivateBridge:
                 snapshot = await bounded_native_lookup(snapshot, operation="persona_snapshot", report_slow=False)
         snapshot_persona = (snapshot.get("persona_id") if isinstance(snapshot, dict)
             and snapshot.get("bot_id") == account.bot_id and snapshot.get("persona_id") in projected_ids
-            and snapshot.get("conversation_id") == cid
+            and (snapshot.get("conversation_id") == cid
+                 or snapshot.get("selection_source") == "verified")
             else None)
         window_snapshot_used = snapshot_persona is not None and not fresh_selection
+        used_override = False
         if window_snapshot_used:
             # A verified window binding belongs to the UMO, not to AstrBot's
             # replaceable conversation row. Conversation reset/recreation must
@@ -395,6 +397,7 @@ class NativePrivateBridge:
                         or any(ord(char) < 32 for char in override)):
                     raise TaskError("host_persona_invalid", "the V2 window persona override is invalid")
                 selected = override
+                used_override = True
             else:
                 if self.persona_snapshot_lookup is not None:
                     conversation_persona_id = await bounded_native_lookup(
@@ -441,7 +444,8 @@ class NativePrivateBridge:
             if persona.get("name") != selected:
                 raise TaskError("host_persona_invalid", "AstrBot returned a different persona than the V2 mapping")
         projection = self.personas.get((account.bot_id, selected))
-        if projection is not None and self.persona_window_snapshot_update is not None:
+        if (projection is not None and self.persona_window_snapshot_update is not None
+                and not used_override):
             self.persona_window_snapshot_update(
                 umo, account.self_id, account.bot_id, selected, projection.role.subject_id, cid)
         special = False
