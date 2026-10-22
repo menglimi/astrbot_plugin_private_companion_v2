@@ -376,6 +376,7 @@ class NativePrivateBridge:
                 snapshot = await bounded_native_lookup(snapshot, operation="persona_snapshot", report_slow=False)
         snapshot_persona = (snapshot.get("persona_id") if isinstance(snapshot, dict)
             and snapshot.get("bot_id") == account.bot_id and snapshot.get("persona_id") in projected_ids
+            and snapshot.get("conversation_id") == cid
             else None)
         window_snapshot_used = snapshot_persona is not None and not fresh_selection
         if window_snapshot_used:
