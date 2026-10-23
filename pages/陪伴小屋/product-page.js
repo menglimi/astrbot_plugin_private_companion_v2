@@ -1166,7 +1166,11 @@ window.CompanionProduct = (() => {
     errorLabel:code=>errors[code]||"当前设置未能确认，请刷新并核对账号、人格与模型。",
     theme:currentTheme,setTheme,appearance:()=>({...appearance}),setAppearance,resetAppearance,dimensions,
     themeLight,lightOf:id=>themeLight[id]||"day",followLight:()=>followLight,setFollowLight,syncLight,
-    targets:()=>catalog?.targets||[],targetLabel,subjectLabel,platformLabel,accountLabel,roleLabel,scopeLabel,actorLabel,executorLabel,
+    targets:()=>catalog?.targets||[],
+    /* 账号和宿主人格是角色准备目录，不是聊天窗口目录。迁移向导用它们
+       展示多 Bot / 多角色拓扑，再用 targets 给可接收迁移的角色补上真实路由。 */
+    accounts:()=>catalog?.accounts||[], personas:()=>catalog?.personas||[],
+    targetLabel,subjectLabel,platformLabel,accountLabel,roleLabel,scopeLabel,actorLabel,executorLabel,
     get manifest(){return manifest;},get data(){return data;},stateCard,scheduleCard,capabilityCard,growthCard,memoryCard,
     workspace,unmountWorkspace,mountWorkspace,workspaceAddress,providerAddress,extensionsMarkup,providersMarkup,capabilitiesMarkup,providerDetail,growthMarkup,
     extension:id=>manifest?.extensions?.find(p=>p.capability_id===id),

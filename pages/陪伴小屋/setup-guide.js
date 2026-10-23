@@ -3,6 +3,16 @@
 window.CompanionSetup = (() => {
   const PREFIX = "setup";
   const ORDER = ["binding", "model", "knowledge", "relationships", "proactive_test"];
+  const MIGRATION_STEPS = [
+    {id: 1, short: "伴侣", title: "设置 Bot 与伴侣角色", note: "先在账号与会话中准备一个或多个 Bot 和角色。"},
+    {id: 2, short: "来源", title: "检查旧版来源", note: "确认旧版目录可读，并保持旧版资料不变。"},
+    {id: 3, short: "配置", title: "接续插件配置", note: "核对配置差异，再决定哪些设置沿用旧版。"},
+    {id: 4, short: "资料", title: "选择资料范围", note: "选择要带入的角色资料、用户资料、群资料和归档。"},
+    {id: 5, short: "多角色", title: "分配旧版人格", note: "一份旧版人格资料可以分配给多个 Bot 和伴侣角色。"},
+    {id: 6, short: "预览", title: "预览并确认", note: "复核配置、资料数量和保留项后再写入。"},
+    {id: 7, short: "导入", title: "分批导入资料", note: "按批次写入并读取每批回执，未完成的可以继续。"},
+    {id: 8, short: "完成", title: "查看迁移结果", note: "核对已导入、保留和仍需处理的内容。"},
+  ];
   const LABELS = {
     binding: "核心管理员窗口",
     model: "插件模型", knowledge: "世界知识", relationships: "关系教学", proactive_test: "主动消息测试",
@@ -92,6 +102,7 @@ window.CompanionSetup = (() => {
   let proactiveOptIn = false;
   let proactiveWatcher = false;
   let legacyTargetId = "";
+  let legacyBotKey = "";
   let legacyRoleId = "";
   let legacyRootDraft = "";
   let legacyConfigScope = "plugin";
@@ -103,6 +114,13 @@ window.CompanionSetup = (() => {
   let legacyDataInventory = null;
   let legacyView = "review";
   let legacyMappingView = "current";
+  let legacyWizardStep = 1;
+  let legacyConfigSkipped = false;
+  let legacyDataCanApply = false;
+  let legacyPendingConfirmations = [];
+  let legacyPersonaBatchCanApplyState = false;
+  let legacyPersonaBatchReadyState = true;
+  let legacyMigrationFinished = false;
   const legacyOpenDetails = new Set();
   let legacyDataResult = null;
   let legacyDataError = "";
@@ -124,6 +142,8 @@ window.CompanionSetup = (() => {
   let legacyPersonaMappings = new Map();
   let legacyPersonaDestinationSequence = 0;
   let legacyPersonaBatchError = "";
+  let legacyAccountCatalog = null;
+  let legacyAccountCatalogState = "idle";
   let legacyPersonaBatchProgress = "";
   let legacyImportReactions = true;
   let legacyImportGroupNetwork = false;
@@ -475,7 +495,8 @@ window.CompanionSetup = (() => {
     return `<button type="button" class="button${primary ? " primary" : ""}" data-go="life">${escape(label)}</button>`;
   }
 
-  const legacyTargetLabel = item => product()?.targetLabel?.(item) || item.display_name || "当前会话对象";
+  const legacyTargetLabel = item => product()?.targetLabel?.(item) || item.display_name
+    || (item?.scope_kind === "group" ? "未命名群目标" : "未命名私聊范围");
   const legacyRoleLabel = (item,index) => product()?.roleLabel?.(item,index) || item.role_name || item.persona_ids?.filter(Boolean).join(" / ") || "当前角色";
   const legacyAccountLabel = item => product()?.accountLabel?.(item) || item.account_name || "当前账号";
   const legacySources = {"private.host_configuration": "陪伴插件配置", "private.core_profiles": "人物与关系档案",
@@ -544,6 +565,163 @@ window.CompanionSetup = (() => {
     return {targets, target, roles, role};
   }
 
+  function legacyBotKeyOf(target) {
+    if (!target) return "";
+    // A Bot can own several private ranges. Prefer the stable account tuple;
+    // fixtures without native ids fall back to the target so separate bots do
+    // not collapse into one row in the picker.
+    const stable = [target.platform_id || "", target.bot_id || "", target.account_id || ""];
+    return stable.some(Boolean) ? JSON.stringify(stable) : String(target.target_id || "");
+  }
+
+  function legacyBotGroups() {
+    const groups = new Map();
+    const ensure = (source, fallbackKey = "") => {
+      if (!source) return null;
+      const key = legacyBotKeyOf(source) || fallbackKey;
+      if (!key) return null;
+      const group = groups.get(key) || {key, targets: [], roles: new Map(), account: source};
+      if (!group.account || source.account_name || source.display_name) group.account = {...group.account, ...source};
+      groups.set(key, group);
+      return group;
+    };
+    /* page/targets also carries the connected account/persona inventory. Keep
+       these entries even when no private target has been configured yet: the
+       first migration step must tell the user what still needs preparation. */
+    const accounts = legacyAccountCatalog?.accounts || [];
+    for (const account of accounts) {
+      ensure(account);
+    }
+    for (const persona of (legacyAccountCatalog?.personas || [])) {
+      const matchesAccount = item => item.bot_id === persona.bot_id
+        && (!persona.platform_id || item.platform_id === persona.platform_id)
+        && (!persona.account_id || item.account_id === persona.account_id);
+      const account = accounts.find(matchesAccount)
+        || (product()?.targets?.() || []).find(matchesAccount)
+        || {platform_id: persona.platform_id || "", account_id: persona.account_id || "",
+          bot_id: persona.bot_id || "", account_name: persona.account_name || ""};
+      const group = ensure(account);
+      if (!group) continue;
+      const roleId = persona.role_id || `${persona.bot_id || ""}:${persona.persona_id || ""}`;
+      const current = group.roles.get(roleId);
+      const personaId = persona.persona_id === "[%None]" ? "[%None]" : persona.persona_id || "";
+      const role = {role_id: roleId, role_name: persona.label || persona.persona_id || "默认人格",
+        persona_ids: personaId ? [personaId] : [], legacy_api: null};
+      if (!current) group.roles.set(roleId, {role, target: null});
+    }
+    for (const target of (product()?.targets?.() || [])) {
+      if (target.scope_kind === "group") continue;
+      const group = ensure(target);
+      if (!group) continue;
+      group.targets.push(target);
+      for (const role of target.roles || []) {
+        const current = group.roles.get(role.role_id);
+        if (!current || (!current.role.legacy_api && role.legacy_api)) {
+          group.roles.set(role.role_id, {role, target});
+        }
+      }
+    }
+    return [...groups.values()].map(group => ({...group, roles: [...group.roles.values()]}))
+      .sort((a, b) => String(a.account?.account_name || a.account?.account_id || a.key)
+        .localeCompare(String(b.account?.account_name || b.account?.account_id || b.key), "zh-CN"));
+  }
+
+  async function loadLegacyAccountCatalog(generationAtStart) {
+    try {
+      const catalog = await api("GET", "/targets");
+      if (generationAtStart !== mountGeneration || !migrationOnly || !root) return;
+      legacyAccountCatalog = catalog && Array.isArray(catalog.accounts) && Array.isArray(catalog.personas)
+        ? catalog : null;
+      legacyAccountCatalogState = legacyAccountCatalog ? "ready" : "unavailable";
+      render();
+    } catch {
+      if (generationAtStart !== mountGeneration || !migrationOnly || !root) return;
+      legacyAccountCatalog = null;
+      legacyAccountCatalogState = "unavailable";
+      render();
+    }
+  }
+
+  function legacySelectedBotGroup() {
+    const groups = legacyBotGroups();
+    return groups.find(item => item.key === legacyBotKey)
+      || groups.find(item => item.targets.some(target => target.target_id === legacyTargetId))
+      || null;
+  }
+
+  function legacyRoleCandidates() {
+    return (product()?.targets?.() || []).flatMap(target =>
+      (target.scope_kind === "group" ? [] : target.roles || []).map((role, index) => ({target, role, index,
+        ready: Boolean(role.legacy_api)})));
+  }
+
+  function legacyRoleSetupMarkup() {
+    const choices = legacyChoices();
+    const groups = legacyBotGroups();
+    const selectedGroup = legacySelectedBotGroup();
+    const readyRoleCount = groups.reduce((sum, group) =>
+      sum + group.roles.filter(item => item.role.legacy_api).length, 0);
+    const roles = selectedGroup?.roles || [];
+    const selected = Boolean(choices.role && legacyAddress());
+    const topology = groups.map(group => {
+      const readyRoles = group.roles.filter(item => item.role.legacy_api);
+      const account = group.account || group.targets[0] || {};
+      const accountName = legacyAccountLabel(account);
+      const roleRows = group.roles.length
+        ? `<ul class="setup-migration-role-topology-roles">${group.roles.map((item, index) => `<li>
+          <span>${escape(legacyRoleLabel(item.role, index))}</span>
+          <small class="${item.role.legacy_api ? "is-ready" : "is-pending"}">${item.role.legacy_api ? "可接收迁移" : "待在账号与会话中设置"}</small>
+        </li>`).join("")}</ul>`
+        : `<p class="setup-migration-role-topology-empty">尚未分配 AstrBot 人格</p>`;
+      return `<li>
+      <div class="setup-migration-role-topology-account"><strong>${escape(accountName)}</strong><span>${escape(product()?.platformLabel?.(account) || "当前平台")} · Bot ${escape(account.bot_id || "未标记")}</span><small>${readyRoles.length} / ${group.roles.length} 个角色可接收旧版资料</small></div>
+      ${roleRows}
+    </li>`; }).join("");
+    return `<section class="setup-migration-role-setup">
+      <div class="setup-migration-role-lead">
+        <h4>先设置接收角色</h4>
+        <p>旧版没有伴侣角色。先在「账号与会话」为 Bot 分配 AstrBot 人格并建立角色；下方会列出每个 Bot 和角色的准备状态。</p>
+      </div>
+      <ul class="setup-migration-role-ways" aria-label="Bot 与角色的配置方式">
+        <li><strong>一个 Bot，多名伴侣</strong><span>可为不同 AstrBot 人格分别建立角色。</span></li>
+        <li><strong>多个 Bot，分别配置</strong><span>每个已连接账号都可配置自己的角色。</span></li>
+        <li><strong>一份旧版人格，多处接续</strong><span>第 5 步可添加多个 Bot / 角色去向，逐个预览和导入。</span></li>
+      </ul>
+      <div class="setup-migration-context setup-migration-role-form">
+        <section class="setup-migration-step"><span class="setup-migration-step-index">01</span><div>
+          <h4>选择本次检查所用的 Bot 和角色</h4>
+          <div class="setup-legacy-scope">
+            <label><span>Bot 账号</span><select data-setup-legacy="bot"><option value="">选择 Bot 账号</option>${groups.map(group => {
+              const readyCount = group.roles.filter(item => item.role.legacy_api).length;
+              return `<option value="${escape(group.key)}" ${legacyBotKey === group.key ? "selected" : ""}>${escape(legacyAccountLabel(group.account || group.targets[0]))} · ${readyCount ? `${readyCount} 个可接收角色` : "尚未准备角色"}</option>`;
+            }).join("")}</select></label>
+            <label><span>伴侣角色</span><select data-setup-legacy="role" ${selectedGroup ? "" : "disabled"}><option value="">选择伴侣角色</option>${roles.map((item,index) => `<option value="${escape(item.role.role_id)}"${legacyRoleId === item.role.role_id ? " selected" : ""}${item.role.legacy_api ? "" : " disabled"}>${escape(legacyRoleLabel(item.role,index))}${item.role.legacy_api ? "" : " · 暂无可用迁移范围"}</option>`).join("")}</select></label>
+          </div>
+          <p class="setup-migration-step-note">${selected ? `当前选择「${escape(legacyRoleLabel(choices.role))}」用于读取旧版配置和资料清单；角色资料仍归角色所有，不会绑定到私聊窗口。其他接收角色可在第 5 步添加。` : "如果还没有可选角色，请打开“账号与会话”，为一个或多个 Bot 配置角色并保存，再返回此页。"}</p>
+        </div></section>
+      </div>
+      ${topology ? `<section class="setup-migration-role-topology"><header><h4>Bot 与伴侣角色</h4><span>${groups.length} 个 Bot · ${readyRoleCount} 个角色可接收旧版资料</span></header><ul>${topology}</ul></section>`
+        : legacyAccountCatalogState === "loading" ? `<p class="setup-migration-empty" role="status">正在读取已连接的 Bot 账号和 AstrBot 人格…</p>`
+          : legacyAccountCatalogState === "unavailable" ? `<p class="setup-migration-empty" role="alert">暂时读不到 Bot 与人格目录。可以先前往「账号与会话」完成设置，保存后返回本页。</p>`
+            : `<p class="setup-migration-empty" role="status">尚未发现已连接的 OneBot 账号。连接账号后，可在「账号与会话」为它分配 AstrBot 人格并建立一个或多个伴侣角色。</p>`}
+      <div class="setup-actions setup-migration-role-actions">
+        <button type="button" class="button" data-setup-legacy-wizard="open-host">去设置 Bot 与伴侣角色</button>
+      </div>
+    </section>`;
+  }
+
+  function legacySourceStepMarkup() {
+    return `<section class="setup-migration-source-panel">
+      <header><div><h4>检查旧版来源</h4><p>旧版文件只读；先确认目录和来源指纹，再进入配置试算。</p></div><span class="setup-migration-status">${legacyFinding ? "已检查" : "待检查"}</span></header>
+      <label class="setup-legacy-path"><span>旧版数据目录（可选）</span><input type="text" inputmode="text" autocomplete="off" spellcheck="false" data-setup-legacy="root" value="${escape(legacyRootDraft)}" placeholder="留空时自动查找"></label>
+      <p class="setup-legacy-scope-note">手动填写时使用旧版插件数据目录的绝对路径。</p>
+      ${legacyFinding ? `<p class="setup-migration-source-status" role="status">${legacyFinding.install?.v1_present ? "已找到旧版资料来源。" : "检查完成，暂未发现可迁移资料。"}</p>
+        ${legacyFinding.v1_root ? `<p class="setup-migration-source-path">发现目录：<code>${escape(legacyFinding.v1_root)}</code></p>` : ""}` : ""}
+      ${legacyError ? `<p class="setup-inline-error" role="alert">${escape(legacyDisplayText(legacyError))}</p>` : ""}
+      <div class="setup-actions">${legacyButton("legacy-scan", legacyFinding ? "重新检查旧版来源" : "检查旧版来源", {primary: true, disabled: !legacyAddress()})}</div>
+    </section>`;
+  }
+
   function preselectUniqueLegacyDestination() {
     const destinations = (product()?.targets?.() || []).flatMap(target =>
       (target.roles || []).filter(role => role.legacy_api).map(role => ({target, role})));
@@ -552,6 +730,7 @@ window.CompanionSetup = (() => {
     if (choices.length !== 1) return false;
     const [{target, role}] = choices;
     legacyTargetId = target.target_id;
+    legacyBotKey = legacyBotKeyOf(target);
     legacyRoleId = role.role_id;
     legacyApi = product().relative(role.legacy_api);
     return Boolean(legacyApi);
@@ -825,8 +1004,8 @@ window.CompanionSetup = (() => {
       || worldbookReady || (referencesReady && destination.confirm_reference_persona_mapping);
   }
 
-  function renderLegacyPersonaBatch(personas) {
-    const locked = legacyWriting();
+  function renderLegacyPersonaBatch(personas, {allowApply = false} = {}) {
+    const locked = legacyWriting() || legacyWizardStep !== 5;
     const ready = (personas || []).filter(item => item.state === "ready");
     if (!ready.length) return "";
     syncLegacyPersonaMappings(personas);
@@ -838,10 +1017,17 @@ window.CompanionSetup = (() => {
     });
     const assignments = legacyPersonaAssignments(ready);
     const duplicates = hasDuplicateLegacyPersonaRoles(assignments);
+    const decisionStarted = ready.some(item => {
+      const mapping = legacyPersonaMappings.get(item.persona_id || "");
+      return Boolean(mapping?.skip || mapping?.destinations.length);
+    });
+    legacyPersonaBatchReadyState = !decisionStarted || allDecided && !duplicates
+      && assignments.every(({destination}) => destination.plan?.plan_token && !destination.error);
     const canPreview = allDecided && assignments.length > 0 && !duplicates && !locked;
     const canApply = allDecided && assignments.some(item => legacyPersonaBatchCanApply(item.destination))
       && assignments.every(({destination}) => destination.plan?.plan_token && !destination.error)
-      && !duplicates && !locked;
+      && !duplicates && !legacyWriting();
+    legacyPersonaBatchCanApplyState = canApply;
     const statusLabel = destination => ({unmapped: "待映射", mapped: "待试算", planning: "正在试算", ready: "已试算",
       applying: "正在导入", imported: "本批已完成", partial: "仍有后续批次或未导入项",
       skipped: "已明确跳过", error: "执行失败", unknown: "结果未确认", stale: "来源已变化"}[destination.status]
@@ -864,10 +1050,10 @@ window.CompanionSetup = (() => {
         const result = destination.result;
         const resultLine = result ? `最近一批：表情 ${Number(result.reaction_created) || 0} 张，日记/梦境 ${Number(result.journal_created) || 0} 条，参考图 ${Number(result.reference_images?.reference_created) || 0} 张，衣物 ${Number(result.reference_images?.wardrobe_created) || 0} 条；参考图 ${Number(result.reference_images?.reference_remaining) || 0} 张、衣物 ${Number(result.reference_images?.wardrobe_remaining) || 0} 条待继续。` : "";
         return `<div class="setup-legacy-persona-destination" data-destination-row="${escape(destination.destination_id)}">
-          <div class="setup-legacy-persona-destination-head"><strong>目标映射 ${destinationIndex + 1}</strong><span>${escape(statusLabel(destination))}${destination.error ? ` · ${escape(destination.error)}` : ""}</span><button type="button" data-setup-legacy-batch-remove="${escape(sourceId)}" data-destination-id="${escape(destination.destination_id)}" ${locked ? "disabled" : ""}>移除</button></div>
+          <div class="setup-legacy-persona-destination-head"><strong>伴侣去向 ${destinationIndex + 1}</strong><span>${escape(statusLabel(destination))}${destination.error ? ` · ${escape(destination.error)}` : ""}</span><button type="button" data-setup-legacy-batch-remove="${escape(sourceId)}" data-destination-id="${escape(destination.destination_id)}" ${locked ? "disabled" : ""}>移除</button></div>
           <div class="setup-legacy-persona-destination-fields">
-            <label><span>当前版本私聊目标</span><select data-setup-legacy-batch-target data-persona-id="${escape(sourceId)}" data-destination-id="${escape(destination.destination_id)}" ${mapping.skip || locked ? "disabled" : ""}><option value="">明确选择目标</option>${targets.map(item => `<option value="${escape(item.target_id)}" ${destination.target_id === item.target_id ? "selected" : ""}>${escape(legacyTargetLabel(item))} · ${escape(legacyAccountLabel(item))}</option>`).join("")}</select></label>
-            <label><span>当前版本角色</span><select data-setup-legacy-batch-role data-persona-id="${escape(sourceId)}" data-destination-id="${escape(destination.destination_id)}" ${mapping.skip || !target || locked ? "disabled" : ""}><option value="">明确选择角色</option>${roles.map((role, roleIndex) => {
+            <label><span>Bot 与私聊范围</span><select data-setup-legacy-batch-target data-persona-id="${escape(sourceId)}" data-destination-id="${escape(destination.destination_id)}" ${mapping.skip || locked ? "disabled" : ""}><option value="">选择 Bot / 私聊范围</option>${targets.map(item => `<option value="${escape(item.target_id)}" ${destination.target_id === item.target_id ? "selected" : ""}>${escape(legacyAccountLabel(item))} · ${escape(legacyTargetLabel(item))}</option>`).join("")}</select></label>
+            <label><span>接收伴侣角色</span><select data-setup-legacy-batch-role data-persona-id="${escape(sourceId)}" data-destination-id="${escape(destination.destination_id)}" ${mapping.skip || !target || locked ? "disabled" : ""}><option value="">选择接收角色</option>${roles.map((role, roleIndex) => {
               const duplicate = legacyPersonaRoleTaken(destination.target_id, role.role_id, sourceId, destination.destination_id);
               return `<option value="${escape(role.role_id)}" ${destination.role_id === role.role_id ? "selected" : ""} ${duplicate ? "disabled" : ""}>${escape(legacyRoleLabel(role, roleIndex))}${duplicate ? " · 已映射" : ""}</option>`;
             }).join("")}</select></label>
@@ -892,19 +1078,19 @@ window.CompanionSetup = (() => {
         <div class="setup-legacy-persona-source"><strong>${escape(legacyPersonaLabel(persona, sourceId ? `旧版人格：${sourceId}` : "主角色（companions.json）"))}</strong><span>${mapping.skip ? "已明确跳过" : `${mapping.destinations.length} 个目的地${hasSuggestion ? " · 唯一人格 ID 匹配候选待核对" : ""}`}</span></div>
         <label class="setup-legacy-persona-skip"><input type="checkbox" data-setup-legacy-batch-skip data-persona-id="${escape(sourceId)}" ${mapping.skip ? "checked" : ""} ${locked ? "disabled" : ""}><span>明确跳过此人格</span></label>
         ${mapping.skip ? "" : `<div class="setup-legacy-persona-destinations">${destinations || `<p class="setup-legacy-persona-note">尚未添加目标。不会自动复制到任何当前版本私聊。</p>`}
-          <button type="button" class="button" data-setup-legacy-batch-add="${escape(sourceId)}" ${locked ? "disabled" : ""}>添加当前版本目的地</button>
+          <button type="button" class="button" data-setup-legacy-batch-add="${escape(sourceId)}" ${locked ? "disabled" : ""}>添加一个 Bot / 伴侣角色</button>
         </div>`}
       </div>`;
     }).join("");
     const unready = (personas || []).filter(item => item.state !== "ready").length;
     return `<section class="setup-legacy-persona-batch">
-      <h5>多人格运行资料映射</h5>
-      <p>逐个人格添加当前版本私聊目标与角色，或明确跳过。未选择的人格留待之后处理。${unready ? `另有 ${unready} 份来源不可读取。` : ""}</p>
+      <h5>旧版人格与多 Bot / 多伴侣角色映射</h5>
+      <p>一份旧版人格资料可以添加多个 Bot 和伴侣角色去向；每个去向独立试算和导入，不会自动复制。暂不选择的人格会留待之后处理。${unready ? `另有 ${unready} 份来源不可读取。` : ""}</p>
       ${legacyPersonaBatchError ? `<p class="setup-inline-error">${escape(legacyPersonaBatchError)}</p>` : ""}
       ${legacyPersonaBatchProgress ? `<p class="setup-legacy-persona-progress" role="status">${escape(legacyPersonaBatchProgress)}</p>` : ""}
       ${duplicates ? `<p class="setup-inline-error">同一个当前版本私聊目标与角色只能映射一次，请先移除重复项。</p>` : ""}
       <div class="setup-legacy-persona-list">${rows}</div>
-      <div class="setup-actions">${legacyButton("legacy-data-batch-plan", "试算已选择的目的地", {primary: !assignments.every(item => item.destination.plan), disabled: !canPreview})}${canApply ? legacyButton("legacy-data-batch-apply", "按目的地逐项导入", {primary: true}) : ""}</div>
+      <div class="setup-actions">${legacyButton("legacy-data-batch-plan", "试算已选择的目的地", {primary: !assignments.every(item => item.destination.plan), disabled: !canPreview})}${canApply && allowApply ? legacyButton("legacy-data-batch-apply", "按目的地逐项导入", {primary: true}) : ""}</div>
     </section>`;
   }
 
@@ -939,7 +1125,7 @@ window.CompanionSetup = (() => {
       && (!legacyGroupImportNetwork && !legacyGroupImportWorldbook ? false : legacyGroupConfirmMemberIds));
     return `<section class="setup-legacy-persona-batch setup-legacy-group-mapping">
       <h5>旧版群记录映射</h5>
-      <p>群内互动图和群范围资料需映射到对应当前版本群。核对平台、Bot、群号和成员 ID；个人关系账户不在此处迁移。当前支持 OneBot。</p>
+      <p>群资料需另选当前版本群目标；群内互动图和群范围资料会映射到对应当前版本群。核对平台、Bot、群号和成员 ID；个人关系账户不在此处迁移。当前支持 OneBot。</p>
       <div class="setup-legacy-persona-row">
         <strong>${escape(legacyPersonaLabel(choices.persona, "先选择可读取的旧版人格"))}</strong>
         <strong>${escape(legacyDataGroupId ? `旧版群 ${legacyDataGroupId}` : "先选择旧版群记录")}</strong>
@@ -1055,15 +1241,15 @@ window.CompanionSetup = (() => {
   }
 
   function legacyMigrationHeader(ready = false) {
-    const description = ready ? "目标已选定；先检查与试算，再确认写入。"
-      : legacyChoices().role ? "唯一可用的当前版本目标与人格已预选，正在只读检查旧版来源。"
-      : "旧版文件只读；先选来源、写入目标和配置范围。";
-    return `<header class="setup-migration-header"><div><p class="setup-kicker">迁移设置</p><h3>从旧版安全迁入当前版本</h3><p>${description}</p></div><span class="setup-migration-badge">旧版只读</span></header>${legacyInstallNotice()}`;
+    const step = MIGRATION_STEPS[Math.min(Math.max(legacyWizardStep - 1, 0), MIGRATION_STEPS.length - 1)];
+    const description = legacyWizardStep === 1 ? "先准备接收角色、Bot 账号和人格绑定。"
+      : ready ? step.note : "先选择当前版本的接收角色，再检查旧版资料。";
+    return `<header class="setup-migration-header"><div><p class="setup-kicker">迁移设置 · 旧版资料</p><h3>${escape(step.title)}</h3><p>${description}</p></div><span class="setup-migration-badge">旧版只读</span></header>`;
   }
 
   function legacyTargetHint(target, role) {
-    if (!target) return "先选择当前版本会话对象；人格列表会随目标刷新。";
-    if (!role) return `已选会话对象：${legacyTargetLabel(target)}；继续选择当前版本人格。`;
+    if (!target) return "先选择当前版本私聊范围；人格列表会随目标刷新。";
+    if (!role) return `已选私聊范围：${legacyTargetLabel(target)}；继续选择当前版本人格。`;
     const roleIndex = Array.isArray(target.roles) ? target.roles.findIndex(item => item.role_id === role.role_id) : -1;
     return `当前写入目标：${legacyTargetLabel(target)} · ${legacyRoleLabel(role, roleIndex < 0 ? 0 : roleIndex)}`;
   }
@@ -1093,26 +1279,11 @@ window.CompanionSetup = (() => {
   }
 
   function legacyScopePanel() {
-    const choices = legacyChoices();
     return `<section class="setup-stage setup-legacy setup-legacy-scope-only">
-      ${legacyMigrationHeader()}
-      <div class="setup-migration-context">
-        <section class="setup-migration-step"><span class="setup-migration-step-index">01</span><div><h4>迁移来源</h4>
-          <label class="setup-legacy-path"><span>旧版数据目录（可选）</span><input type="text" inputmode="text" autocomplete="off" spellcheck="false" data-setup-legacy="root" value="${escape(legacyRootDraft)}" placeholder="留空时自动查找"></label>
-          <p class="setup-legacy-scope-note">手动填写时使用 AstrBot 插件数据目录的绝对路径。</p>
-        </div></section>
-        <section class="setup-migration-step"><span class="setup-migration-step-index">02</span><div><h4>当前版本写入目标</h4>
-          <div class="setup-legacy-scope">
-            <label><span>会话对象（私聊 / 群聊）</span><select data-setup-legacy="target"><option value="">选择当前版本目标</option>${choices.targets.map(item => `<option value="${escape(item.target_id)}" ${legacyTargetId === item.target_id ? "selected" : ""}>${escape(legacyTargetLabel(item))} · ${escape(legacyAccountLabel(item))}</option>`).join("")}</select></label>
-            <label><span>人格（角色）</span><select data-setup-legacy="role" ${legacyTargetId ? "" : "disabled"}><option value="">选择当前版本人格</option>${choices.roles.map((item,index) => `<option value="${escape(item.role_id)}" ${legacyRoleId === item.role_id ? "selected" : ""}>${escape(legacyRoleLabel(item,index))}</option>`).join("")}</select></label>
-          </div>
-          <p class="setup-migration-step-note">${legacyTargetHint(choices.target, choices.role)}</p>
-        </div></section>
-        <section class="setup-migration-step"><span class="setup-migration-step-index">03</span><div><h4>配置范围</h4>
-          ${legacyConfigScopeMarkup()}
-        </div></section>
-      </div>
-      <div class="setup-migration-next-step"><strong>下一步</strong><span>${choices.role ? "唯一目标已预选；只读检查完成后即可试算迁移。" : "选好当前版本目标和人格后，页面会启用“检查旧版配置”和“试算资料”操作。"}</span></div>
+      ${legacyMigrationHeader(legacyWizardStep > 1)}
+      ${legacyWizardProgressMarkup()}
+      ${legacyWizardStep === 1 ? legacyRoleSetupMarkup() : legacySourceStepMarkup()}
+      ${legacyWizardControls()}
     </section>`;
   }
 
@@ -1136,6 +1307,96 @@ window.CompanionSetup = (() => {
   function legacyTabs(items, current, attribute, label) {
     return `<nav class="setup-migration-tabs" aria-label="${escape(label)}">${items.map(([id, title]) =>
       `<button type="button" data-${attribute}="${id}" aria-pressed="${id === current}">${title}</button>`).join("")}</nav>`;
+  }
+
+  function legacyWizardReady(step) {
+    const selection = legacySelection();
+    if (step === 1) return Boolean(selection.role && selection.api);
+    if (step === 2) return Boolean(legacyWizardReady(1) && legacyFinding);
+    if (step === 3) return Boolean(legacyWizardReady(2) && (legacyConfigSkipped
+      || legacyResult?.configuration_imported === true || legacyResult?.state === "already_imported"
+      || (legacyResult?.state === "nothing_to_import" && legacyResult?.completion_recorded === true)
+      || legacyPlan?.change_count === 0 || legacyFinding?.install?.configuration_imported));
+    if (step === 4) return Boolean(legacyWizardReady(3) && legacyDataPlan?.plan_token && !legacyDataRefreshing);
+    if (step === 5) return Boolean(legacyWizardReady(4) && !legacyMemoryPlanDirty
+      && !legacyPendingConfirmations.length && legacyPersonaBatchReadyState);
+    if (step === 6) return Boolean(legacyWizardReady(5));
+    if (step === 7) return Boolean(legacyWizardReady(6) && legacyDataPlan?.plan_token && !legacyDataRefreshing);
+    if (step === 8) return Boolean(legacyWizardReady(7) && !legacyDataCanApply && !legacyPersonaBatchCanApplyState);
+    return false;
+  }
+
+  function legacyWizardReachable(step) {
+    if (step <= legacyWizardStep) return true;
+    return legacyWizardReady(step - 1);
+  }
+
+  function legacyWizardProgressMarkup() {
+    const current = Math.min(Math.max(Number(legacyWizardStep) || 1, 1), MIGRATION_STEPS.length);
+    return `<nav class="setup-migration-wizard" aria-label="旧版迁移步骤"><ol>${MIGRATION_STEPS.map(item => {
+      const active = item.id === current;
+      const complete = item.id < current || legacyWizardReady(item.id);
+      const reachable = legacyWizardReachable(item.id);
+      return `<li class="${active ? "is-current" : ""} ${complete ? "is-complete" : ""}">
+        <button type="button" data-setup-legacy-step="${item.id}" aria-current="${active ? "step" : "false"}" ${reachable ? "" : "disabled"}>
+          <span class="setup-migration-wizard-index">${complete && !active ? "✓" : String(item.id).padStart(2, "0")}</span>
+          <span><strong>${escape(item.short)}</strong><small>${escape(item.title)}</small></span>
+        </button>
+      </li>`;
+    }).join("")}</ol><p class="setup-migration-wizard-note"><strong>${escape(MIGRATION_STEPS[current - 1].title)}</strong><span>${escape(MIGRATION_STEPS[current - 1].note)}</span></p></nav>`;
+  }
+
+  function legacyWizardNextLabel() {
+    if (legacyWizardStep === 1) return "检查旧版来源";
+    if (legacyWizardStep === 2) return "继续核对配置";
+    if (legacyWizardStep === 3) return "选择资料范围";
+    if (legacyWizardStep === 4) return "核对资料归属";
+    if (legacyWizardStep === 5) return "查看迁移预览";
+    if (legacyWizardStep === 6) return "进入导入";
+    if (legacyWizardStep === 7) return legacyDataCanApply ? (legacyDataResult ? "继续导入下一批" : "导入所选资料")
+      : legacyPersonaBatchCanApplyState ? "导入已映射角色资料" : "查看迁移结果";
+    return "返回资料与备份";
+  }
+
+  function legacyWizardControls() {
+    const previous = legacyWizardStep > 1
+      ? `<button type="button" class="button" data-setup-legacy-wizard="back">上一步</button>` : "";
+    const nextDisabled = legacyWizardStep === 1 && !legacyWizardReady(1)
+      || legacyWizardStep === 2 && !legacyWizardReady(2)
+      || legacyWizardStep === 3 && !legacyWizardReady(3)
+      || legacyWizardStep === 4 && !legacyWizardReady(4)
+      || legacyWizardStep === 5 && !legacyWizardReady(5)
+      || legacyWizardStep === 6 && !legacyWizardReady(6)
+      || legacyWizardStep === 7 && (!legacyWizardReady(7) || legacyDataRefreshing);
+    const skip = legacyWizardStep === 3 && legacyFinding && !legacyWizardReady(3)
+      ? `<button type="button" class="button" data-setup-legacy-wizard="skip-config">保留当前配置，跳过配置迁移</button>` : "";
+    const hint = legacyWizardStep === 1 && !legacyWizardReady(1)
+      ? "先在账号与会话中准备至少一个可接收迁移的角色。"
+      : legacyWizardStep === 5 && legacyPendingConfirmations.length
+      ? `请确认：${escape(legacyPendingConfirmations.join("、"))}。`
+      : legacyWizardStep === 7
+        ? legacyDataCanApply ? "每次导入后会重新核对清单；还有剩余内容时可继续下一批。" : "所选范围已无可导入批次，可以查看最终结果。"
+        : legacyWizardStep === 8 ? "核对导入回执与保留项目。" : "完成当前步骤后继续，已确认的选择会保留。";
+    const finalAction = legacyWizardStep === 8 ? "finish" : "next";
+    return `<div class="setup-migration-wizard-actions">${previous}<span>${hint}</span>${skip}<button type="button" class="button primary" data-setup-legacy-wizard="${finalAction}" ${nextDisabled ? "disabled" : ""}>${legacyWizardNextLabel()}</button></div>`;
+  }
+
+  function legacyConfigurationStepMarkup({findings, scope, settings, differences, audit, blocked, canApply}) {
+    const pending = !legacyFinding ? "尚未检查旧版来源；先完成只读检查，页面才会显示可迁移范围。"
+      : !legacyPlan ? "来源已读取，点击“试算配置差异”查看将要写入的字段。"
+        : legacyPlan.change_count > 0 && !legacyResult ? `已试算 ${Number(legacyPlan.change_count) || 0} 项配置，核对后写入当前版本。`
+          : "配置步骤已完成，可以继续选择要迁入的资料。";
+    return `<section class="setup-migration-check setup-migration-wizard-panel"><header><div><h4>接续插件配置</h4><p>${escape(pending)}</p></div><span class="setup-migration-status">${legacyResult ? "已写入" : legacyPlan ? "已试算" : legacyFinding ? "已检查" : "待检查"}</span></header>
+      ${legacyInstallNotice()}
+      ${legacyConfigScopeMarkup()}
+      <div class="setup-migration-wizard-actions setup-migration-inline-actions">
+        ${legacyButton("legacy-scan", legacyFinding ? "重新检查旧版" : "检查旧版配置", {disabled: !legacySelection().api})}
+        ${legacyFinding && !legacyPlan ? legacyButton("legacy-plan", "试算配置差异", {primary: true}) : ""}
+        ${legacyPlan && !legacyResult && legacyPlan.change_count > 0 ? legacyButton("legacy-apply", "写入当前版本", {primary: true, disabled: !canApply}) : ""}
+      </div>
+      ${legacyError ? `<p class="setup-inline-error" role="alert">${escape(legacyDisplayText(legacyError))}</p>` : ""}
+      ${legacyConfigurationCheckMarkup(findings, scope, settings, differences, audit)}
+    </section>`;
   }
 
   function legacyDetails(key, title, body, {attention = false} = {}) {
@@ -1269,10 +1530,35 @@ window.CompanionSetup = (() => {
     </section>`;
   }
 
+  function legacyImportStepMarkup() {
+    const pending = legacyDataCanApply
+      ? (legacyDataResult ? "上一批已有回执；确认后继续导入剩余批次。" : "已完成试算，可以导入当前选择的资料。")
+      : legacyDataPlan?.plan_token ? "当前清单没有满足条件的导入批次，可以查看结果。" : "先完成资料试算和归属确认。";
+    return `<section class="setup-migration-import-step setup-migration-wizard-panel">
+      <header><div><h4>分批导入资料</h4><p>${escape(pending)}</p></div><span class="setup-migration-status">${legacyDataCanApply ? "可以导入" : "无待导入批次"}</span></header>
+      ${legacyProgressMarkup()}
+      ${legacyDataErrorMarkup()}
+      ${legacyDataResult ? legacyDataResultMarkup() : ""}
+      <div class="setup-migration-final-action"><header><div><h4>${legacyDataCanApply ? "确认写入当前批次" : "本次无需写入"}</h4><p>${legacyDataCanApply ? "重复内容按来源标识去重；导入完成后会重新读取剩余清单。" : "可直接进入结果页，仍需处理的内容会保留在迁移回执中。"}</p></div></header><div class="setup-actions">${legacyButton("legacy-data-apply", legacyDataResult ? "继续导入下一批" : "导入所选资料", {primary: true, disabled: !legacyDataCanApply})}</div></div>
+    </section>`;
+  }
+
+  function legacyFinishStepMarkup() {
+    const hasReceipt = Boolean(legacyDataResult || legacyMigrationFinished);
+    return `<section class="setup-migration-finish-step setup-migration-wizard-panel">
+      <header><div><h4>迁移结果</h4><p>${hasReceipt ? "下面是最近一次执行回执；未导入的项目仍保留在旧版归档中。" : "当前没有可执行的导入批次。"}</p></div><span class="setup-migration-status">${hasReceipt ? "已记录" : "无变更"}</span></header>
+      ${legacyDataResult ? legacyDataResultMarkup() : ""}
+      ${legacyDataPlan ? legacyDetails("finish-inventory", "仍保留的资料", legacyDataCheckMarkup()) : ""}
+      <div class="setup-migration-final-action"><div class="setup-actions"><button type="button" class="button primary" data-setup-legacy-wizard="finish">返回资料与备份</button></div></div>
+    </section>`;
+  }
+
   function legacyPanel() {
     const selection = legacySelection();
     const legacyScope = selection.role;
     if (!legacyScope) return legacyScopePanel();
+    legacyPersonaBatchReadyState = true;
+    legacyPersonaBatchCanApplyState = false;
     const targets = selection.targets;
     const roles = selection.roles;
     const findings = legacyPlan?.findings ?? legacyFinding?.findings ?? [];
@@ -1353,6 +1639,8 @@ window.CompanionSetup = (() => {
     if (legacyImportJournals && Number(journalSummary.batch_count) > 0 && !legacyConfirmPersonaMapping) pendingConfirmations.push("日记所属角色");
     if ((referencesReady || wardrobeReady) && !legacyConfirmReferencePersonaMapping) pendingConfirmations.push("角色图库归属");
     if (legacyImportExpressions && expressionSummary.remaining > 0 && !legacyConfirmExpressionMapping) pendingConfirmations.push("表达所属角色");
+    legacyPendingConfirmations = pendingConfirmations;
+    legacyPersonaBatchCanApplyState = false;
     const canApplyData = Boolean(legacyDataPlan?.plan_token
       && !legacyMemoryPlanDirty
       && !pendingConfirmations.length
@@ -1368,6 +1656,7 @@ window.CompanionSetup = (() => {
         || ((referencesReady || wardrobeReady) && legacyConfirmReferencePersonaMapping)
         || (legacyImportExpressions && expressionSummary.available && expressionSummary.remaining > 0 && legacyConfirmExpressionMapping)
         || worldbookCanApply));
+    legacyDataCanApply = canApplyData;
     const dataReasons = {target_image_limit: "超过当前版本单张图片限制", unsupported_image_type: "当前版本不支持此图片格式",
       invalid_filename: "文件名不安全", image_missing: "素材文件缺失", image_path_outside_library: "文件位于素材目录之外",
       catalog_hash_mismatch: "目录哈希与文件不一致", asset_count_limit: "超过单次扫描条数",
@@ -1413,37 +1702,25 @@ window.CompanionSetup = (() => {
     const confirmationsMarkup = confirmations.length ? `<fieldset class="setup-legacy-confirmations"><legend>写入前确认</legend><p>只有与当前版本目标明确对应的资料才会写入；未确认的内容继续保留在隔离归档中。</p>${confirmations.join("")}</fieldset>` : "";
     return `<section class="setup-stage setup-legacy setup-migration-workspace">
       ${legacyMigrationHeader(true)}
+      ${legacyWizardProgressMarkup()}
       <fieldset class="setup-migration-body" aria-busy="${legacyActiveJobs().length > 0}">
-      <details class="setup-migration-context-editor" data-migration-detail="source-context" ${legacyOpenDetails.has("source-context") ? "open" : ""}>
-      <summary><span><strong>${escape(legacyTargetLabel(selection.target))} · ${escape(legacyRoleLabel(selection.role))}</strong><small>${escape(legacyConfigScopeLabel())} · ${legacyRootDraft ? "指定来源目录" : "自动查找旧版资料"}</small></span><span>调整来源与目标</span></summary>
-      <fieldset class="setup-migration-context" ${legacyWriting() ? "disabled" : ""}>
-        <section class="setup-migration-step"><span class="setup-migration-step-index">01</span><div><h4>迁移来源</h4>
-          <label class="setup-legacy-path"><span>旧版数据目录（可选）</span><input type="text" inputmode="text" autocomplete="off" spellcheck="false" data-setup-legacy="root" value="${escape(legacyRootDraft)}" placeholder="留空时自动查找"></label>
-          <p class="setup-legacy-scope-note">手动填写时使用 AstrBot 插件数据目录的绝对路径。</p>
-        </div></section>
-        <section class="setup-migration-step"><span class="setup-migration-step-index">02</span><div><h4>当前版本写入目标</h4>
-          <div class="setup-legacy-scope">
-            <label><span>会话对象（私聊 / 群聊）</span><select data-setup-legacy="target"><option value="">选择当前版本目标</option>${targets.map(item => `<option value="${escape(item.target_id)}" ${legacyTargetId === item.target_id ? "selected" : ""}>${escape(legacyTargetLabel(item))} · ${escape(legacyAccountLabel(item))}</option>`).join("")}</select></label>
-            <label><span>人格（角色）</span><select data-setup-legacy="role" ${legacyTargetId ? "" : "disabled"}><option value="">选择当前版本人格</option>${roles.map((item,index) => `<option value="${escape(item.role_id)}" ${legacyRoleId === item.role_id ? "selected" : ""}>${escape(legacyRoleLabel(item,index))}</option>`).join("")}</select></label>
-          </div>
-          <p class="setup-migration-step-note">${legacyTargetHint(selection.target, selection.role)}</p>
-        </div></section>
-        <section class="setup-migration-step"><span class="setup-migration-step-index">03</span><div><h4>配置范围</h4>
-          ${legacyConfigScopeMarkup()}
-        </div></section>
-      </fieldset>
-      </details>
-      ${legacyTabs([["review", "迁移结果检查"], ["mapping", "资料范围与映射"]], legacyView, "setup-legacy-view", "迁移工作区")}
+      <div class="setup-migration-role-step" ${legacyWizardStep === 1 ? "" : "hidden"}>${legacyRoleSetupMarkup()}</div>
+      <div class="setup-migration-source-step" ${legacyWizardStep === 2 ? "" : "hidden"}>${legacySourceStepMarkup()}</div>
+      <div class="setup-migration-compat" aria-hidden="true">${legacyTabs([["review", "迁移结果检查"], ["mapping", "资料范围与映射"]], legacyView, "setup-legacy-view", "迁移工作区")}</div>
       ${legacyProgressMarkup()}
-      <div class="setup-migration-review" ${legacyView === "review" ? "" : "hidden"}>
+      <div class="setup-migration-review" ${[3, 6].includes(legacyWizardStep) ? "" : "hidden"}>
         ${legacyError ? `<p class="setup-inline-error" role="alert">${escape(legacyDisplayText(legacyError))}</p>` : ""}
         ${legacyDataErrorMarkup()}
         ${notice && !legacyError && !legacyDataError ? noticeMarkup() : ""}
-        ${legacyReviewMarkup({findings, scope: sourceReviewScope, settings: plannedSettings,
-          differences: reviewDifferences, audit: auditDifferences, blocked, canApply, pendingConfirmations})}
+        ${legacyWizardStep === 3 ? legacyConfigurationStepMarkup({findings, scope: sourceReviewScope,
+          settings: plannedSettings, differences: reviewDifferences, audit: auditDifferences, blocked, canApply}) : ""}
+        ${legacyWizardStep === 6 ? legacyReviewMarkup({findings, scope: sourceReviewScope, settings: plannedSettings,
+          differences: reviewDifferences, audit: auditDifferences, blocked, canApply, pendingConfirmations}) : ""}
+        ${legacyWizardStep === 6 ? confirmationsMarkup : ""}
+        ${legacyWizardStep === 6 && personaOptions.length ? renderLegacyPersonaBatch(personaOptions) : ""}
       </div>
-      <div class="setup-legacy-data" ${legacyView === "mapping" ? "" : "hidden"}>
-        <header class="setup-migration-section-head"><div><h4>资料范围与映射</h4><p>群资料需另选当前版本群目标；个人关系账户不在此处迁移。</p></div>
+      <div class="setup-legacy-data" ${[4, 5].includes(legacyWizardStep) ? "" : "hidden"}>
+        <header class="setup-migration-section-head"><div><h4>${legacyWizardStep === 4 ? "选择资料范围" : "资料归属映射"}</h4><p>${legacyWizardStep === 4 ? "按旧版人格选择角色资料；用户和群资料可单独选择。" : "逐个确认旧版人格的接收角色，以及群和历史记录的对应关系。"}</p></div>
           ${legacyButton("legacy-data-plan", inventory ? "刷新资料清单" : "读取资料清单", {disabled: !selection.api})}</header>
         ${legacyDataErrorMarkup()}
         ${!inventory ? `<p class="setup-migration-empty">读取清单后选择旧版人格、资料类型和对应目标。</p>` : ""}
@@ -1455,8 +1732,8 @@ window.CompanionSetup = (() => {
           <label class="setup-legacy-path"><span>旧版群记录 / 范围</span><select data-setup-legacy="data-group" ${groupOptions.length ? "" : "disabled"}><option value="">不选择群</option>${groupOptions.map(item => `<option value="${escape(item.source_group_id)}" ${legacyDataGroupId === item.source_group_id ? "selected" : ""}>群 ${escape(item.source_group_id)} · ${Number(item.member_count) || 0} 位成员 / ${Number(item.edge_count) || 0} 条边 / ${Number(item.worldbook_entry_count) || 0} 条知识 / ${Number(item.member_profile_count) || 0} 份成员资料</option>`).join("")}</select></label>
           ${selectedGroup && legacyDataPlan ? `<p class="setup-legacy-scope-note">${selectedNetworkGroup ? `群成员互动图将从旧版群 ${escape(selectedGroup.source_group_id)} 映射到当前版本群 ${escape(legacyDataPlan.target_group_id || "（当前目标不是群）")}，含 ${Number(selectedGroup.member_count) || 0} 位成员和 ${Number(selectedGroup.edge_count) || 0} 条互动边。${Number(selectedGroup.omitted_member_count) || Number(selectedGroup.omitted_edge_count) ? `另有 ${Number(selectedGroup.omitted_member_count) || 0} 位成员、${Number(selectedGroup.omitted_edge_count) || 0} 条互动边超过当前版本上限，不会导入。` : ""}${Number(selectedGroup.rejected_member_count) || Number(selectedGroup.rejected_edge_count) ? `无法识别 ${Number(selectedGroup.rejected_member_count) || 0} 位成员、${Number(selectedGroup.rejected_edge_count) || 0} 条互动边。` : ""}` : ""}${selectedWorldbookGroup ? `所选旧版群还有 ${Number(selectedWorldbookGroup.entry_count) || 0} 条群范围知识条目。` : ""}</p>` : ""}
         </fieldset>
-        ${legacyTabs([["current", "当前目标资料"], ["personas", "其他人格映射"], ["groups", "群资料映射"], ["memory", "记忆身份映射"]], legacyMappingView, "setup-legacy-mapping-view", "资料映射分区")}
-        <fieldset class="setup-migration-mapping-panel" ${legacyWriting() ? "disabled" : ""} ${legacyMappingView === "current" ? "" : "hidden"}>
+        <div class="setup-migration-subnav" ${legacyWizardStep === 5 ? "" : "hidden"}>${legacyTabs([["current", "当前角色资料"], ["personas", "多角色映射"], ["groups", "群资料映射"], ["memory", "记忆身份映射"]], legacyMappingView, "setup-legacy-mapping-view", "资料映射分区")}</div>
+        <fieldset class="setup-migration-mapping-panel" ${legacyWriting() ? "disabled" : ""} ${legacyMappingView === "current" && [4, 5].includes(legacyWizardStep) ? "" : "hidden"}>
         <fieldset class="setup-legacy-option-groups">
           <legend>导入与保留范围</legend>
           <section class="setup-legacy-option-group"><header><strong>直接导入当前版本</strong><span>会写入当前已选目标；重复内容按来源标识去重。</span></header><div class="setup-legacy-data-checks">
@@ -1474,23 +1751,23 @@ window.CompanionSetup = (() => {
           </div></section>
         </fieldset>
 
-        ${confirmationsMarkup}
+        ${legacyWizardStep === 4 ? confirmationsMarkup : ""}
         ${legacyDataPlan && !legacyDataPlan.group_target_available && selectedGroup ? `<p class="setup-legacy-scope-note">当前版本目标不是群会话；切换到对应群目标后才能导入群成员互动图。</p>` : ""}
         ${legacyDataPlan && !legacyDataPlan.target_private_available ? `<p class="setup-legacy-scope-note">日记与梦境只能导入到私聊目标，请切换到当前角色的当前版本私聊目标。</p>` : ""}
         <div class="setup-actions">
           ${legacyButton("legacy-data-plan", legacyDataPlan ? "重新试算所选资料" : "试算所选资料", {primary: !legacyDataPlan, disabled: !selection.api})}
-          ${legacyButton("legacy-data-apply", legacyDataResult ? "继续导入下一批" : "导入所选资料", {primary: true, disabled: !canApplyData})}
-          ${legacyDataResult ? `<button type="button" class="button" data-setup-legacy-view="review">查看导入结果</button>` : ""}
+          <span class="setup-migration-inline-hint">范围确认后，下一步会复核身份映射并预览导入结果。</span>
         </div>
         ${!canApplyData ? `<p class="setup-legacy-scope-note" role="status">${!legacyDataPlan ? "先读取资料清单。" : legacyMemoryPlanDirty ? "身份已调整，请重新试算。" : pendingConfirmations.length ? `尚需确认：${escape(pendingConfirmations.join("、"))}。` : "选择至少一项可导入资料。"}</p>` : ""}
       </fieldset>
-      <fieldset class="setup-migration-mapping-panel" ${legacyWriting() ? "disabled" : ""} ${legacyMappingView === "personas" ? "" : "hidden"}>
+      ${legacyWizardStep === 5 ? confirmationsMarkup : ""}
+      <fieldset class="setup-migration-mapping-panel" ${legacyWriting() ? "disabled" : ""} ${legacyWizardStep === 5 && legacyMappingView === "personas" ? "" : "hidden"}>
         ${inventory ? renderLegacyPersonaBatch(personaOptions) : `<p class="setup-migration-empty">先读取资料清单。</p>`}
       </fieldset>
-      <fieldset class="setup-migration-mapping-panel" ${legacyWriting() ? "disabled" : ""} ${legacyMappingView === "groups" ? "" : "hidden"}>
+      <fieldset class="setup-migration-mapping-panel" ${legacyWriting() ? "disabled" : ""} ${legacyWizardStep === 5 && legacyMappingView === "groups" ? "" : "hidden"}>
         ${inventory && legacyDataGroupId ? renderLegacyGroupMapping() : `<p class="setup-migration-empty">先在上方选择旧版群记录，再映射到当前版本群与角色。</p>`}
       </fieldset>
-      <fieldset class="setup-migration-mapping-panel" ${legacyWriting() ? "disabled" : ""} ${legacyMappingView === "memory" ? "" : "hidden"}>
+      <fieldset class="setup-migration-mapping-panel" ${legacyWriting() ? "disabled" : ""} ${legacyWizardStep === 5 && legacyMappingView === "memory" ? "" : "hidden"}>
         <h5>独立记忆库身份</h5><p class="setup-legacy-scope-note">${inventory ? "仅迁入已映射身份的历史资料，未映射内容保留归档。" : "先读取资料清单。"}</p>
         ${legacyDataChoiceMarkup("import-memory-database", "导入独立记忆库", {checked: legacyImportMemoryDatabase, disabled: !memoryArchiveAvailable})}
         ${privateMemoryOwners.length ? `<details class="setup-legacy-values" data-migration-detail="memory-private" ${legacyOpenDetails.has("memory-private") ? "open" : ""}><summary>旧私聊身份映射（${legacyMemoryOwnerIds.size} / ${privateMemoryOwners.length}）</summary><p>仅迁入已映射的合规私聊历史；其余保留在隔离归档。</p><ul>${privateMemoryOwners.map(item => {
@@ -1519,7 +1796,8 @@ window.CompanionSetup = (() => {
         ${legacyPrivateMemoryPanel(selection)}
         <div class="setup-actions">${legacyButton("legacy-data-plan", "重新试算身份映射", {disabled: !selection.api})}<button type="button" class="button" data-setup-legacy-mapping-view="current">返回范围确认与导入</button></div>
       </fieldset>
-        ${legacyDataPlan ? legacyDetails("data-inventory", "资料明细与保留项目", `<div class="setup-legacy-plan setup-legacy-data-plan">
+      <div class="setup-migration-data-review" ${legacyWizardStep === 6 ? "" : "hidden"}>
+      ${legacyDataPlan ? legacyDetails("data-inventory", "资料明细与保留项目", `<div class="setup-legacy-plan setup-legacy-data-plan">
           <p class="setup-legacy-plan-lead"><strong>本次资料试算</strong><span>表情素材 ${Number(reactionSummary.ready) || 0} 张待导入，已存在 ${Number(reactionSummary.already_present) || 0} 张；本批 ${Number(reactionSummary.batch_count) || 0} 张 / ${Math.ceil((Number(reactionSummary.batch_bytes) || 0) / 1048576)} MB${Number(reactionSummary.remaining_after_batch) ? `，后续还需 ${Number(reactionSummary.remaining_after_batch)} 张` : ""}。</span></p>
           <p>日记与梦境：${Number(journalSummary.ready) || 0} 条待导入，${Number(journalSummary.already_present) || 0} 个日期已有当前版本记录会保留；本批 ${Number(journalSummary.batch_count) || 0} 条 / ${Math.ceil((Number(journalSummary.batch_bytes) || 0) / 1024)} KB${Number(journalSummary.remaining_after_batch) ? `，后续还需 ${Number(journalSummary.remaining_after_batch)} 条` : ""}。预览只显示日期和大小，不显示正文。</p>
           ${journalSummary.samples?.length ? `<p>本批日期：${journalSummary.samples.slice(0, 12).map(item => `${escape(item.date)}（${escape(item.kind === "dream" ? "梦境" : "日记")}，${Number(item.size) || 0} 字节）`).join("、")}</p>` : ""}
@@ -1540,6 +1818,13 @@ window.CompanionSetup = (() => {
           ${legacyDataPlan.warnings?.map(item => `<p>${escape(legacyDisplayText(item))}</p>`).join("") || ""}
         </div>`) : ""}
       </div>
+      </div>
+      <div class="setup-migration-run-step" ${legacyWizardStep === 7 ? "" : "hidden"}>
+        ${personaOptions.length ? renderLegacyPersonaBatch(personaOptions, {allowApply: true}) : ""}
+        ${legacyImportStepMarkup()}
+      </div>
+      <div class="setup-migration-finish-step" ${legacyWizardStep === 8 ? "" : "hidden"}>${legacyFinishStepMarkup()}</div>
+      ${legacyWizardControls()}
       </fieldset>
     </section>`;
   }
@@ -1709,8 +1994,7 @@ window.CompanionSetup = (() => {
       const people = (upgrade.targets || []).map(item => item.participant_id).join("、");
       const voices = (upgrade.personas || []).map(item => item.persona_id).join("、");
       return `<section class="setup-upgrade-review" aria-labelledby="setup-upgrade-title">
-        <header class="setup-upgrade-review-header"><h3 id="setup-upgrade-title">已识别旧版配置</h3>
-          <span class="setup-mode-badge">6.7.0 → 7.0.0</span></header>
+        <header class="setup-upgrade-review-header"><h3 id="setup-upgrade-title">已识别旧版配置</h3></header>
         <dl class="setup-upgrade-facts">
           <div><dt>角色人格</dt><dd>${escape(voices || "待确认")}</dd></div>
           <div><dt>私聊对象</dt><dd>${escape(people || "待确认")}</dd></div>
@@ -1726,8 +2010,7 @@ window.CompanionSetup = (() => {
     const install = legacyFinding?.install;
     if (upgrade?.present && upgrade.configured && !install) {
       return `<section class="setup-upgrade-review" aria-labelledby="setup-upgrade-title">
-        <header class="setup-upgrade-review-header"><h3 id="setup-upgrade-title">旧版连接已接续</h3>
-          <span class="setup-mode-badge">6.7.0 → 7.0.0</span></header>
+        <header class="setup-upgrade-review-header"><h3 id="setup-upgrade-title">旧版连接已接续</h3></header>
         <footer class="setup-upgrade-review-actions"><p>继续迁移配置和资料。</p>
           ${button("open-migration", "继续迁移", {primary: true})}</footer></section>`;
     }
@@ -2412,7 +2695,131 @@ window.CompanionSetup = (() => {
     }
   }
 
+  async function advanceLegacyWizard() {
+    const selection = legacySelection();
+    if (legacyWizardStep >= 2 && (!selection.role || !selection.api)) {
+      legacyError = "请先在第 1 步选择当前版本接收角色。";
+      render();
+      return;
+    }
+    legacyError = "";
+    if (legacyWizardStep === 1) {
+      legacyWizardStep = 2;
+      legacyView = "review";
+      render();
+      if (!legacyFinding) await act("legacy-scan");
+      return;
+    }
+    if (legacyWizardStep === 2) {
+      if (!legacyFinding) { await act("legacy-scan"); return; }
+      legacyWizardStep = 3;
+      legacyView = "review";
+      render();
+      return;
+    }
+    if (legacyWizardStep === 3) {
+      if (!legacyFinding) { await act("legacy-scan"); return; }
+      if (!legacyPlan) { await act("legacy-plan"); return; }
+      if (Number(legacyPlan.change_count) > 0 && !legacyResult) {
+        legacyError = "请先核对配置变化，再点击“写入当前版本”；也可以暂不迁入配置，继续迁移资料。";
+        render();
+        return;
+      }
+      legacyWizardStep = 4;
+      legacyView = "mapping";
+      legacyMappingView = "current";
+      render();
+      if (!legacyDataPlan && legacyAddress()) await act("legacy-data-plan");
+      return;
+    }
+    if (legacyWizardStep === 4) {
+      if (!legacyDataPlan?.plan_token || legacyDataRefreshing) { await act("legacy-data-plan"); return; }
+      legacyWizardStep = 5;
+      legacyView = "mapping";
+      legacyMappingView = "personas";
+      render();
+      return;
+    }
+    if (legacyWizardStep === 5) {
+      if (!legacyDataPlan?.plan_token || legacyDataRefreshing) { await act("legacy-data-plan"); return; }
+      if (legacyMemoryPlanDirty) {
+        legacyError = "身份映射刚刚发生变化，请重新试算资料后再进入预览。";
+        render();
+        return;
+      }
+      if (legacyPendingConfirmations.length) {
+        legacyError = `请先确认：${legacyPendingConfirmations.join("、")}。`;
+        render();
+        return;
+      }
+      legacyWizardStep = 6;
+      legacyView = "review";
+      render();
+      return;
+    }
+    if (legacyWizardStep === 6) {
+      legacyWizardStep = 7;
+      legacyView = "review";
+      render();
+      return;
+    }
+    if (legacyWizardStep === 7 && legacyDataCanApply) {
+      await act("legacy-data-apply");
+      return;
+    }
+    if (legacyWizardStep === 7 && legacyPersonaBatchCanApplyState) {
+      await act("legacy-data-batch-apply");
+      return;
+    }
+    if (legacyWizardStep === 7) {
+      legacyMigrationFinished = true;
+      legacyWizardStep = 8;
+      legacyView = "review";
+      render();
+      return;
+    }
+    if (legacyDataCanApply) await act("legacy-data-apply");
+    else {
+      legacyError = "当前没有已选且可导入的资料，请返回上一步调整范围或确认映射。";
+      render();
+    }
+  }
+
+  function setLegacyWizardStep(step) {
+    const next = Number(step);
+    if (!Number.isInteger(next) || next < 1 || next > MIGRATION_STEPS.length || !legacyWizardReachable(next)) return;
+    legacyWizardStep = next;
+    if ([1, 2, 3, 6, 8].includes(next)) legacyView = "review";
+    else legacyView = "mapping";
+    if (next === 4) legacyMappingView = "current";
+    else if (next === 5 && legacyMappingView === "current") legacyMappingView = "personas";
+    render();
+    if ([4, 5, 6, 7, 8].includes(next) && !legacyDataInventory && legacyAddress()) void act("legacy-data-plan");
+  }
+
   function onClick(event) {
+    const wizardStep = event.target.closest?.("[data-setup-legacy-step]")?.dataset.setupLegacyStep;
+    if (wizardStep) {
+      setLegacyWizardStep(wizardStep);
+      return;
+    }
+    const wizardAction = event.target.closest?.("[data-setup-legacy-wizard]")?.dataset.setupLegacyWizard;
+    if (wizardAction === "next") { void advanceLegacyWizard(); return; }
+    if (wizardAction === "open-host") { window.navigate?.("manage", "host"); return; }
+    if (wizardAction === "finish") { window.navigate?.("manage", "data", "storage"); return; }
+    if (wizardAction === "back") {
+      if (legacyWizardStep > 1) setLegacyWizardStep(legacyWizardStep - 1);
+      return;
+    }
+    if (wizardAction === "skip-config") {
+      legacyConfigSkipped = true;
+      legacyWizardStep = 4;
+      legacyView = "mapping";
+      legacyMappingView = "current";
+      render();
+      if (!legacyDataInventory && legacyAddress()) void act("legacy-data-plan");
+      return;
+    }
     const detailKey = event.target.closest?.("[data-setup-legacy-detail]")?.dataset.setupLegacyDetail;
     if (detailKey) {
       const details = root?.querySelector(`[data-migration-detail="${detailKey}"]`);
@@ -2426,6 +2833,7 @@ window.CompanionSetup = (() => {
     if (["current", "personas", "groups", "memory"].includes(mappingShortcut)) {
       legacyView = "mapping";
       legacyMappingView = mappingShortcut;
+      legacyWizardStep = mappingShortcut === "current" ? 4 : 5;
       render();
       if (!legacyDataInventory && legacyAddress()) void act("legacy-data-plan");
       return;
@@ -2433,6 +2841,7 @@ window.CompanionSetup = (() => {
     const migrationView = event.target.closest?.("[data-setup-legacy-view]")?.dataset.setupLegacyView;
     if (["review", "mapping"].includes(migrationView)) {
       legacyView = migrationView;
+      legacyWizardStep = migrationView === "review" ? 6 : 4;
       render();
       if (migrationView === "mapping" && !legacyDataInventory && legacyAddress()) void act("legacy-data-plan");
       return;
@@ -2440,6 +2849,7 @@ window.CompanionSetup = (() => {
     const mappingView = event.target.closest?.("[data-setup-legacy-mapping-view]")?.dataset.setupLegacyMappingView;
     if (["current", "personas", "groups", "memory"].includes(mappingView)) {
       legacyMappingView = mappingView;
+      legacyWizardStep = mappingView === "current" ? 4 : 5;
       render();
       return;
     }
@@ -2516,7 +2926,11 @@ window.CompanionSetup = (() => {
       legacyConfirmExpressionMapping = false;
     }
     if (input?.dataset?.setupLegacy === "target") {
+      legacyWizardStep = 1;
+      legacyConfigSkipped = false;
+      legacyMigrationFinished = false;
       legacyTargetId = input.value;
+      legacyBotKey = legacyBotKeyOf((product()?.targets?.() || []).find(item => item.target_id === input.value));
       legacyRoleId = "";
       legacyApi = "";
       legacyFinding = legacyPlan = legacyResult = null;
@@ -2533,7 +2947,30 @@ window.CompanionSetup = (() => {
       legacyDataError = "";
       render();
     }
+    if (input?.dataset?.setupLegacy === "bot") {
+      legacyWizardStep = 1;
+      legacyConfigSkipped = false;
+      legacyMigrationFinished = false;
+      legacyBotKey = input.value;
+      const group = legacyBotGroups().find(item => item.key === legacyBotKey);
+      const readyRoles = (group?.roles || []).filter(item => item.role.legacy_api);
+      const initial = readyRoles[0] || null;
+      legacyTargetId = readyRoles.length === 1 ? initial?.target.target_id || "" : "";
+      legacyRoleId = readyRoles.length === 1 ? initial?.role.role_id || "" : "";
+      legacyApi = "";
+      legacyFinding = legacyPlan = legacyResult = null;
+      legacyDataPlan = legacyDataResult = null;
+      legacyDataGroupId = legacyDataPersonaId = "";
+      legacyImportWorldbook = legacyImportReferenceImages = legacyImportWardrobeItems = false;
+      legacyConfirmReferencePersonaMapping = legacyConfirmMemberIds = legacyConfirmPersonaMapping = false;
+      legacyError = legacyDataError = "";
+      render();
+      return;
+    }
     if (input?.dataset?.setupLegacy === "root") {
+      legacyWizardStep = 2;
+      legacyConfigSkipped = false;
+      legacyMigrationFinished = false;
       legacyRootDraft = input.value;
       legacyDataPersonaId = legacyDataGroupId = "";
       legacyFinding = legacyPlan = legacyResult = null;
@@ -2553,17 +2990,24 @@ window.CompanionSetup = (() => {
       legacyError = "";
       legacyDataError = "";
       render();
-      if (legacyView === "mapping" && legacyAddress()) void act("legacy-data-plan");
       return;
     }
     if (input?.dataset?.setupLegacy === "configuration-scope") {
+      legacyWizardStep = 3;
+      legacyConfigSkipped = false;
       legacyConfigScope = ["plugin", "proactive", "reality", "all"].includes(input.value) ? input.value : "plugin";
       legacyFinding = legacyPlan = legacyResult = null;
       legacyError = "";
       render();
     }
     if (input?.dataset?.setupLegacy === "role") {
-      legacyRoleId = input.value;
+      legacyWizardStep = 1;
+      legacyConfigSkipped = false;
+      legacyMigrationFinished = false;
+      const group = legacySelectedBotGroup();
+      const selected = group?.roles.find(item => item.role.role_id === input.value && item.role.legacy_api);
+      legacyRoleId = selected?.role.role_id || input.value;
+      if (selected) legacyTargetId = selected.target.target_id;
       legacyApi = "";
       legacyFinding = legacyPlan = legacyResult = null;
       legacyDataPlan = legacyDataResult = null;
@@ -2577,11 +3021,13 @@ window.CompanionSetup = (() => {
       legacyConfirmPersonaMapping = false;
       legacyError = "";
       legacyDataError = "";
+      legacyApi = legacyAddress();
       render();
       if (legacyView === "mapping" && legacyAddress()) void act("legacy-data-plan");
       return;
     }
     if (input?.dataset?.setupLegacy === "data-group") {
+      legacyWizardStep = 4;
       legacyDataGroupId = input.value;
       legacyImportGroupNetwork = Boolean(input.value && ((legacyDataPlan || legacyDataInventory)?.group_networks || []).some(item => item.source_group_id === input.value));
       invalidateLegacyDataSelection();
@@ -2590,6 +3036,7 @@ window.CompanionSetup = (() => {
       return;
     }
     if (input?.dataset?.setupLegacy === "data-persona") {
+      legacyWizardStep = 4;
       legacyDataPersonaId = input.value;
       legacyDataGroupId = "";
       legacyImportGroupNetwork = false;
@@ -2893,12 +3340,19 @@ window.CompanionSetup = (() => {
     proactiveOptIn = false;
     advancedOpen = false;
     advancedBlock = "understanding";
-    legacyTargetId = legacyRoleId = legacyApi = "";
+    legacyTargetId = legacyBotKey = legacyRoleId = legacyApi = "";
     legacyFinding = legacyPlan = legacyResult = null;
     legacyDataPlan = legacyDataResult = null;
     legacyDataInventory = null;
     legacyView = "review";
     legacyMappingView = "current";
+    legacyWizardStep = 1;
+    legacyConfigSkipped = false;
+    legacyDataCanApply = false;
+    legacyPendingConfirmations = [];
+    legacyPersonaBatchCanApplyState = false;
+    legacyPersonaBatchReadyState = true;
+    legacyMigrationFinished = false;
     legacyOpenDetails.clear();
     legacyRootDraft = "";
     legacyConfigScope = "plugin";
@@ -2932,9 +3386,11 @@ window.CompanionSetup = (() => {
     legacyError = "";
     legacyDataError = "";
     migrationProgress = "";
-    const hasUniqueLegacyDestination = preselectUniqueLegacyDestination();
+    legacyAccountCatalog = null;
+    legacyAccountCatalogState = migrationOnly ? "loading" : "idle";
+    preselectUniqueLegacyDestination();
     render();
-    if (migrationOnly && hasUniqueLegacyDestination) void act("legacy-scan");
+    if (migrationOnly) void loadLegacyAccountCatalog(mountGeneration);
     if (!migrationOnly) refresh();
   }
 
