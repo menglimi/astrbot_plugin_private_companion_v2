@@ -11,7 +11,8 @@ const source = fs.readFileSync(sourcePath, 'utf8');
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const settle = async () => { for (let i = 0; i < 12; i += 1) await flush(); };
 
-function harness({status, responses = {}, targets = [], refreshedTargets = targets, bridgeResponses = {}, configEditorsAvailable = true}) {
+function harness({status, responses = {}, targets = [], refreshedTargets = targets, bridgeResponses = {}, configEditorsAvailable = true,
+  confirmResult = true}) {
   const calls = [];
   const bridgeCalls = [];
   const editorCalls = [];
@@ -20,6 +21,9 @@ function harness({status, responses = {}, targets = [], refreshedTargets = targe
   const stateMounts = [];
   const listeners = {};
   const navigation = [];
+  const prompts = [];
+  const sessionValues = new Map();
+  let directoryRefreshes = 0;
   let currentTargets = targets;
   let html = '';
   let currentStatus = status;
@@ -48,7 +52,7 @@ function harness({status, responses = {}, targets = [], refreshedTargets = targe
       return Promise.resolve({});
     },
     targets: () => currentTargets,
-    async refreshDirectory() { currentTargets = refreshedTargets; },
+    async refreshDirectory() { directoryRefreshes += 1; currentTargets = refreshedTargets; },
     role: () => configEditorsAvailable ? {reply_api: '/astrbot_plugin_private_companion/reply/current',
       model_api: '/astrbot_plugin_private_companion/model'} : null,
     scopeKey: () => 'installation-a:target-a:role-a',
@@ -71,18 +75,25 @@ function harness({status, responses = {}, targets = [], refreshedTargets = targe
   }} : null;
   const sandbox = {window: {CompanionProduct: product, CompanionConfigEditors: configEditors,
     navigate: (...args) => navigation.push(args),
+    CompanionConfirm: async options => { prompts.push(options); return confirmResult; },
     CompanionWorkbench: configEditorsAvailable ? {create() {}} : null, AstrBotPluginPage: bridge,
     CompanionReplyPage: {mount(element, options) { replyMounts.push({element, options}); }, unmount() {}},
     CompanionStatePage: {mount(element, options) { stateMounts.push({element, options}); }, unmount() {}}}, document, Promise, Set, Map, String,
-    Number, Object, Array, RegExp, Error, Date, JSON, Math, setTimeout, clearTimeout};
+    Number, Object, Array, RegExp, Error, Date, JSON, Math, setTimeout, clearTimeout,
+    sessionStorage: {getItem: key => sessionValues.get(key) || null, setItem: (key, value) => sessionValues.set(key, value),
+      removeItem: key => sessionValues.delete(key)}};
   vm.runInNewContext(source, sandbox);
   return {
     calls,
     bridgeCalls,
     navigation,
+    prompts,
     get html() { return html; },
     mount: () => sandbox.window.CompanionSetup.mount(node),
     mountMigration: () => sandbox.window.CompanionSetup.mountMigration(node),
+    promptUpgradeAtStartup: callback => sandbox.window.CompanionSetup.promptUpgradeAtStartup(callback),
+    continueUpgrade: upgrade => sandbox.window.CompanionSetup.continueUpgrade(upgrade),
+    get directoryRefreshes() { return directoryRefreshes; },
     click(action) {
       listeners.click({target: {closest(selector) {
         if (selector === '[data-setup-action]' && !action.startsWith('legacy-')) return {dataset: {setupAction: action}};
@@ -149,6 +160,53 @@ test('first upgrade opens migration with the newly saved destination available',
   await settle();
   assert.ok(page.calls.some(call => call.method === 'GET' && call.route === route),
     'migration should immediately discover the newly created destination');
+});
+
+test('startup detects an old configuration and offers a direct upgrade guide once', async () => {
+  const page = harness({status: {upgrade: {present: true, configured: false, can_prepare: true,
+    source_sha256: 'legacy-config-fingerprint'}}});
+  const continued = [];
+  assert.equal(await page.promptUpgradeAtStartup(upgrade => continued.push(upgrade)), true);
+  assert.equal(page.prompts.length, 1);
+  assert.equal(page.prompts[0].title, '发现旧版配置');
+  assert.match(page.prompts[0].message, /直接打开旧版资料迁入/);
+  assert.deepEqual(page.navigation, []);
+  assert.deepEqual(continued, [{present: true, configured: false, can_prepare: true,
+    source_sha256: 'legacy-config-fingerprint'}]);
+  assert.equal(await page.promptUpgradeAtStartup(() => assert.fail('dismissed startup prompt must not continue twice')), false);
+  assert.equal(page.prompts.length, 1);
+});
+
+test('confirming the startup prompt prepares the legacy connection and opens migration directly', async () => {
+  const upgrade = {present: true, configured: false, can_prepare: true,
+    plan_token: 'reviewed-source', source_sha256: 'legacy-config-fingerprint'};
+  const page = harness({status: {upgrade}, responses: {'POST setup/upgrade': {saved: true, started: true}}});
+  assert.equal(await page.promptUpgradeAtStartup(current => page.continueUpgrade(current)), true);
+  assert.deepEqual(JSON.parse(JSON.stringify(page.calls.filter(call => call.method === 'POST')
+    .map(call => ({route: call.route, body: call.body})))), [
+    {route: 'setup/upgrade', body: {confirmed: true, plan_token: 'reviewed-source'}},
+  ]);
+  assert.equal(page.directoryRefreshes, 1);
+  assert.deepEqual(page.navigation, [['manage', 'data', 'migration']]);
+});
+
+test('startup upgrade preparation failure does not open migration', async () => {
+  const page = harness({status: {upgrade: {present: true, configured: false, can_prepare: true,
+    plan_token: 'reviewed-source'}}, responses: {'POST setup/upgrade': {started: false, startup_error: 'host unavailable'}}});
+  await assert.rejects(page.promptUpgradeAtStartup(upgrade => page.continueUpgrade(upgrade)), /host unavailable/);
+  assert.deepEqual(page.navigation, []);
+  assert.equal(page.directoryRefreshes, 0);
+  assert.equal(await page.promptUpgradeAtStartup(() => {}), true,
+    'a failed preparation should be offered again instead of being suppressed for the session');
+  assert.equal(page.prompts.length, 2);
+});
+
+test('startup guide explains when an old mapping cannot be fully verified', async () => {
+  const page = harness({status: {upgrade: {present: true, configured: false, can_prepare: false,
+    source_sha256: 'legacy-config-fingerprint'}}});
+  assert.equal(await page.promptUpgradeAtStartup(upgrade => page.continueUpgrade(upgrade)), true);
+  assert.match(page.prompts[0].message, /直接打开「账号与会话」核对/);
+  assert.deepEqual(page.navigation, [['manage', 'host']]);
 });
 
 test('private memory migration confirms the selected role and exposes retained work', async () => {

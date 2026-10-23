@@ -135,6 +135,8 @@ h1 { margin: 0; font-size: clamp(25px, 4vw, 34px); line-height: 1.22; letter-spa
 .notice[data-kind="error"] { border-color: color-mix(in srgb, var(--danger) 35%, var(--line)); background: var(--danger-soft); color: var(--danger); }
 .status-panel, .actions-panel { position:relative; overflow:hidden; border:1px solid var(--line); border-radius:16px; background:var(--surface); box-shadow:var(--shadow); }
 .panel-heading { align-items: center; }
+.status-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.status-actions [hidden] { display: none; }
 .panel-heading h2 { margin: 0; font-size: 19px; line-height: 1.35; }
 .panel-heading .eyebrow { margin-bottom: 5px; }
 .status-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 18px 0 15px; }
@@ -190,6 +192,7 @@ dialog::backdrop { background: rgba(25, 27, 45, .48); }
   .shell { width: min(100% - 28px, 520px); padding: 30px 0 44px; }
   .topbar { gap: 10px; }
   .topbar, .panel-heading { flex-wrap: wrap; }
+  .status-actions { width: 100%; }
   .connection { margin-top: 0; }
   .status-panel, .actions-panel { padding: 18px 15px 15px; }
   .action-grid { grid-template-columns: 1fr; gap: 9px; }

@@ -128,6 +128,55 @@ window.CompanionSetup = (() => {
   let legacyImportReactions = true;
   let legacyImportGroupNetwork = false;
   let legacyImportWorldbook = false;
+  let startupUpgradePrompt = null;
+
+  async function promptUpgradeAtStartup(onContinue) {
+    if (startupUpgradePrompt) return startupUpgradePrompt;
+    startupUpgradePrompt = (async () => {
+      let status;
+      try { status = await api("GET", "/status"); }
+      catch { return false; }
+      const upgrade = status?.upgrade;
+      if (!upgrade?.present || upgrade.configured) return false;
+      const fingerprint = typeof upgrade.source_sha256 === "string" && upgrade.source_sha256
+        ? upgrade.source_sha256 : "detected";
+      const storageKey = `companion-upgrade-guide:${fingerprint}`;
+      try { if (sessionStorage.getItem(storageKey) === "shown") return false; } catch { /* Private browsing may disable storage. */ }
+      if (typeof window.CompanionConfirm !== "function") return false;
+      const message = upgrade.can_prepare
+        ? "已识别到旧版账号、人格和模型配置。确认后会自动接续这些设置，并直接打开旧版资料迁入；旧版资料保持原样。"
+        : "已找到旧版配置，但当前在线账号、人格或模型还不能自动配对。确认后会直接打开「账号与会话」核对；补齐后即可继续迁入，旧版资料保持原样。";
+      const accepted = await window.CompanionConfirm({
+        title: "发现旧版配置",
+        message,
+        confirmText: upgrade.can_prepare ? "接续配置并继续" : "前往账号与会话",
+        cancelText: "稍后处理",
+      });
+      try { sessionStorage.setItem(storageKey, "shown"); } catch { /* The current page still prevents duplicate prompts. */ }
+      if (accepted && typeof onContinue === "function") {
+        try { await onContinue(upgrade); }
+        catch (error) {
+          try { sessionStorage.removeItem(storageKey); } catch { /* Retry remains available after a page reload. */ }
+          throw error;
+        }
+      }
+      return true;
+    })();
+    try { return await startupUpgradePrompt; }
+    finally { startupUpgradePrompt = null; }
+  }
+
+  async function continueUpgrade(upgrade) {
+    if (!upgrade?.can_prepare || typeof upgrade.plan_token !== "string" || !upgrade.plan_token) {
+      window.navigate?.("manage", "host");
+      return false;
+    }
+    const result = await api("POST", "/upgrade", {confirmed: true, plan_token: upgrade.plan_token});
+    if (!result?.started) throw new Error(result?.startup_error || "旧版连接已保存，但当前运行环境尚未就绪。请在开始使用页查看详情。");
+    await product().refreshDirectory();
+    window.navigate?.("manage", "data", "migration");
+    return true;
+  }
   let legacyImportReferenceImages = false;
   let legacyImportWardrobeItems = false;
   let legacyConfirmReferencePersonaMapping = false;
@@ -1653,8 +1702,7 @@ window.CompanionSetup = (() => {
     </section>`;
   }
 
-  /* 升级引导卡：旧版用户装完 7.0.0 后先走一遍当前版本的绑定流程，再去确认新旧对应。
-     只在探测到「有旧版数据且还没导入」时出现，绑好对象与角色后才有扫描地址。 */
+  /* 升级引导卡：自动接续无法确认的绑定时，显示缺项并保留手动核对入口。 */
   function upgradeCard() {
     const upgrade = state?.upgrade;
     if (upgrade?.present && !upgrade.configured) {
@@ -2919,5 +2967,5 @@ window.CompanionSetup = (() => {
       || !!legacyRootDraft;
   }
 
-  return {mount, mountMigration, unmount, refresh, isDirty};
+  return {mount, mountMigration, unmount, refresh, isDirty, promptUpgradeAtStartup, continueUpgrade};
 })();

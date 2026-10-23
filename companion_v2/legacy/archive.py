@@ -37,6 +37,7 @@ class V1ArchivePlan:
     files: tuple[ArchiveFile, ...]
     issues: tuple[tuple[str, str], ...]
     fingerprint: str
+    excluded_directories: tuple[str, ...] = ()
 
     @property
     def total_bytes(self):
@@ -80,7 +81,7 @@ def _file_key(path: Path):
     return (int(info.st_size), int(info.st_mtime_ns), int(info.st_dev), int(info.st_ino))
 
 
-def build_v1_archive_plan(v1_root: str | Path) -> V1ArchivePlan:
+def build_v1_archive_plan(v1_root: str | Path, *, exclude_roots=()) -> V1ArchivePlan:
     candidate = Path(v1_root).expanduser()
     try:
         root_info = candidate.lstat()
@@ -89,6 +90,16 @@ def build_v1_archive_plan(v1_root: str | Path) -> V1ArchivePlan:
     if not stat.S_ISDIR(root_info.st_mode) or _is_reparse(root_info):
         raise ValueError("archive_source_not_directory")
     root = candidate.resolve(strict=True)
+    excluded = set()
+    for value in exclude_roots:
+        try:
+            path = Path(value).expanduser().resolve(strict=True)
+            if path != root and path.is_relative_to(root):
+                excluded.add(path)
+        except (OSError, RuntimeError, ValueError):
+            continue
+    excluded_relative = tuple(sorted(str(path.relative_to(root)).replace("\\", "/")
+                                     for path in excluded))
     files, issues = [], []
     pending = [(root, "")]
     while pending:
@@ -109,7 +120,8 @@ def build_v1_archive_plan(v1_root: str | Path) -> V1ArchivePlan:
             if entry.is_symlink() or _is_reparse(info):
                 issues.append((relative, "reparse_point"))
             elif stat.S_ISDIR(info.st_mode):
-                pending.append((Path(entry.path), relative))
+                if Path(entry.path).resolve() not in excluded:
+                    pending.append((Path(entry.path), relative))
             elif stat.S_ISREG(info.st_mode):
                 try:
                     info = os.stat(entry.path, follow_symlinks=False)
@@ -127,12 +139,13 @@ def build_v1_archive_plan(v1_root: str | Path) -> V1ArchivePlan:
     issues.sort()
     material = {
         "schema": SCHEMA,
+        "excluded_directories": list(excluded_relative),
         "files": [item.fingerprint_item() for item in files],
         "issues": [[path, reason] for path, reason in issues],
     }
     fingerprint = hashlib.sha256(json.dumps(material, ensure_ascii=False, sort_keys=True,
         separators=(",", ":")).encode("utf-8")).hexdigest()
-    return V1ArchivePlan(root, tuple(files), tuple(issues), fingerprint)
+    return V1ArchivePlan(root, tuple(files), tuple(issues), fingerprint, excluded_relative)
 
 
 def _safe_relative_path(root: Path, relative_path: str) -> Path:
@@ -260,7 +273,10 @@ def copy_v1_archive(plan: V1ArchivePlan, archive_root: str | Path, *, archive_id
                 raise ValueError("archive_source_changed")
             entries.append({"path": item.relative_path, "size": size, "sha256": digest.hexdigest()})
 
-        current = build_v1_archive_plan(plan.root)
+        current = build_v1_archive_plan(
+            plan.root,
+            exclude_roots=tuple(plan.root / relative for relative in plan.excluded_directories),
+        )
         if current.fingerprint != plan.fingerprint or current.issues != plan.issues:
             raise ValueError("archive_source_changed")
         manifest = {

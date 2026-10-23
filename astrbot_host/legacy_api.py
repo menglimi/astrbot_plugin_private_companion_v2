@@ -78,6 +78,7 @@ from companion_v2.legacy.configuration_migration import (
 )
 
 from .management_identity import dashboard_operator
+from .legacy_archive_location import migration_archive_root
 from .legacy_config import (V1_HOST_CONFIG_NAME, V1_PLUGIN_DATA_NAME,
                             V1_REALITY_PLUGIN_DATA_NAME, V1_IMAGE_PLUGIN_DATA_NAME,
                             read_v1_host_configuration,
@@ -768,7 +769,9 @@ class LegacyMigrationWebAPI:
             return planned
         data_plan = build_data_plan(root, source_persona_id=source_persona_id,
                                     v1_configuration=migration.v1_configuration)
-        archive_plan = build_v1_archive_plan(root)
+        runtime_root = getattr(self.controller, "data_root", None)
+        archive_plan = build_v1_archive_plan(
+            root, exclude_roots=(runtime_root,) if runtime_root is not None else ())
         memory_plan = self._memory_source_plan(root)
         context, service = self._data_context(session)
         owner = service.ensure_reaction_catalog(context)
@@ -1195,7 +1198,9 @@ class LegacyMigrationWebAPI:
             return found
         data_plan = build_data_plan(root, source_persona_id=source_persona_id,
                                     v1_configuration=migration.v1_configuration)
-        archive_plan = build_v1_archive_plan(root)
+        runtime_root = getattr(self.controller, "data_root", None)
+        archive_plan = build_v1_archive_plan(
+            root, exclude_roots=(runtime_root,) if runtime_root is not None else ())
         memory_plan = self._memory_source_plan(root)
         if (not isinstance(memory_owner_ids, (tuple, list)) or len(memory_owner_ids) > MAX_OWNER_BINDINGS
                 or any(type(value) is not str or len(value) != 64
@@ -1252,7 +1257,7 @@ class LegacyMigrationWebAPI:
         memory_materials_result = None
         if import_memory_database:
             try:
-                archive_root = Path(self.controller.data_root).resolve() / "legacy-v1-archives"
+                archive_root = migration_archive_root(self.controller, root)
                 memory_archive_result = copy_memory_database_archive(memory_plan, archive_root)
             except Exception as error:  # noqa: BLE001 - keep source paths and memory content private
                 code = str(error) if str(error).startswith("memory_archive_") else "memory_archive_failed"
@@ -1283,7 +1288,7 @@ class LegacyMigrationWebAPI:
                 }
         if import_archive:
             try:
-                archive_root = Path(self.controller.data_root).resolve() / "legacy-v1-archives"
+                archive_root = migration_archive_root(self.controller, root)
                 archive_result = copy_v1_archive(archive_plan, archive_root, allow_incomplete=True)
             except Exception as error:  # noqa: BLE001 - do not expose source paths or content
                 code = str(error) if str(error).startswith("archive_") else "legacy_archive_failed"

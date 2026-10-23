@@ -1082,7 +1082,13 @@
     element.hidden = !text;
   }
   function stateLabel(value) {
+    if (value === "uninitialized" && isEnabled()) {
+      return hasSavedRoleMappings() ? "角色已映射，等待准备" : "等待角色映射";
+    }
     return ({ running: "运行中", new: "正在准备", stopped: "已停止", uninitialized: "等待角色映射", unloaded: "正在准备" })[value] || "状态待核对";
+  }
+  function hasSavedRoleMappings() {
+    return (status?.targets || []).some(target => Array.isArray(target?.roles) && target.roles.length > 0);
   }
   function isAccepting() { return Boolean(status?.accepting); }
   function isEnabled() {
@@ -1513,6 +1519,18 @@
       window.parent?.postMessage?.({channel: "companion-workspace", kind: "host-mappings-updated"}, "*");
       try { await readStatus(); }
       catch { notice("角色映射已保存；运行状态暂未读到，可重新读取。", "info"); return; }
+      if (result.startup_error) {
+        const modelPending = ["host_provider_required", "host_provider_unavailable"].includes(result.startup_error);
+        const message = modelPending
+          ? "请到「模型与连接」选择当前可用的模型连接，再点「准备并启动」；角色映射已经保存。"
+          : `运行未启动：${failureMessage(result.startup_error)}`;
+        notice(`角色映射已保存。${message}`, modelPending ? "info" : "error");
+        return;
+      }
+      if (result.requires_initialize) {
+        notice("角色映射已保存；点「准备并启动」完成角色准备。", "info");
+        return;
+      }
       notice(result.started ? "角色映射已保存并自动加载。" : "角色映射已保存，运行状态已更新。", "success");
     } catch (error) { notice(`保存未完成：${publicError(error)}`, "error"); }
     finally { setBusy(false); updateBindingCheck(); }
@@ -1528,7 +1546,8 @@
     paintStatusValue("accepting", isAccepting() ? "正在运行" : "未运行");
     $("safety-note").textContent = isAccepting()
       ? "已归入角色的人格自动处理其会话；主动消息按各窗口权限发送。"
-      : "保存角色映射后，插件自动准备并运行对应窗口。";
+      : hasSavedRoleMappings() ? "角色映射已保存；准备并启动后开始处理对应会话。"
+        : "保存角色映射后，插件会自动准备并运行对应窗口。";
     $("safety-note").hidden = !$("safety-note").textContent;
     if (status.last_failure?.code || status.settings_error) {
       const code = status.last_failure?.code || status.settings_error;
@@ -1541,6 +1560,35 @@
   }
   function updateControls() {
     $("refresh").disabled = busy;
+    const start = $("start-host");
+    if (start) {
+      start.hidden = !isEnabled() || isAccepting();
+      start.disabled = busy || start.hidden;
+    }
+  }
+  async function startHost() {
+    if (busy || !host || !isEnabled() || isAccepting()) return;
+    const button = $("start-host");
+    setLoading(button, true);
+    setBusy(true);
+    try {
+      const result = await api("POST", `${host.prefix}/start`, {}, 120000);
+      await readStatus();
+      if (isAccepting() || result?.state === "running") {
+        notice("角色已准备并开始接收消息。", "success");
+      } else if (status?.last_failure?.code || status?.settings_error) {
+        notice(failureMessage(status.last_failure?.code || status.settings_error), "error");
+      } else {
+        notice("启动结果暂未确认，请查看运行状态。", "info");
+      }
+    } catch (error) {
+      try { await readStatus(); } catch { /* Keep the operation error visible below. */ }
+      if (isAccepting()) notice("角色已准备并开始接收消息。", "success");
+      else notice(publicError(error), "error");
+    } finally {
+      setBusy(false);
+      setLoading(button, false);
+    }
   }
   async function readStatus() {
     let lastError = null;
@@ -1612,6 +1660,7 @@
     catch (error) { notice(publicError(error), "error"); }
     finally { setBusy(false); setLoading($("refresh"), false); }
   });
+  $("start-host")?.addEventListener("click", startHost);
   $("topology-session-prev").addEventListener("click", () => changeTopologySessionPage(-1));
   $("topology-session-next").addEventListener("click", () => changeTopologySessionPage(1));
   $("topology-session-filters").addEventListener("click", event => {

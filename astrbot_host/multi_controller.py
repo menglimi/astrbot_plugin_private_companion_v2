@@ -86,6 +86,8 @@ class AstrBotMultiController:
             self.settings, self._storage_profile_root, self._adopting_legacy_profile = self._resolve_settings(self.config)
             self.poke_policy = PokePolicy.parse(self.config.get("poke"))
             self.settings_error = None
+            if self.authority is not None:
+                self.authority.settings = self.settings
         except (HostControlError, ValueError) as error:
             self.settings = None
             self._storage_profile_root = None
@@ -399,7 +401,8 @@ class AstrBotMultiController:
             self.last_failure["operation"] = operation
         return Outcome.failed(code, reason)
 
-    async def _probe(self, settings=None, *, include_conversations=True, include_window_personas=True):
+    async def _probe(self, settings=None, *, include_conversations=True, include_window_personas=True,
+                     allow_unavailable_model=False):
         settings = settings or self._settings()
         personas = []
         for mapping in settings.personas:
@@ -469,18 +472,37 @@ class AstrBotMultiController:
                     "conversation_id": bridge._conversation_key(window["unified_msg_origin"], window.get("conversation_id")),
                     "role_ids": (mapping.role_id,),
                 }
-        provider = self.context.get_provider_by_id(settings.common.provider_id)
+        provider_id = settings.common.provider_id
+        provider = self.context.get_provider_by_id(provider_id) if provider_id else None
+        model_issue = None
         if type(provider) is not self.native_types.provider:
-            raise TaskError("host_provider_unavailable", "the configured model has no verified native adapter")
-        assemble_providers(self.context, bridge=None, native_types=self.native_types,
-                           primary_id=settings.common.provider_id, additional=settings.common.additional_providers,
-                           defaults=TextProviderSettings(settings.common.provider_id, settings.common.tariff,
-                               settings.common.max_output_tokens, settings.common.maximum_input_estimate,
-                               settings.common.output_parameter, settings.common.streaming))
+            model_issue = "host_provider_unavailable" if provider_id else "host_provider_required"
+            if not allow_unavailable_model:
+                reason = ("the configured model has no verified native adapter" if provider_id
+                          else "select a loaded AstrBot text provider")
+                raise TaskError(model_issue, reason)
+        else:
+            try:
+                assemble_providers(self.context, bridge=None, native_types=self.native_types,
+                                   primary_id=provider_id, additional=settings.common.additional_providers,
+                                   defaults=TextProviderSettings(provider_id, settings.common.tariff,
+                                       settings.common.max_output_tokens, settings.common.maximum_input_estimate,
+                                       settings.common.output_parameter, settings.common.streaming))
+            except (TaskError, TypeError, ValueError, AttributeError, KeyError) as error:
+                if not allow_unavailable_model:
+                    raise
+                model_issue = getattr(error, "code", "host_provider_unavailable")
         manifest = {"binding_contract": settings.binding_contract,
-                    "settings_fingerprint": settings.fingerprint, "provider_fingerprint": provider_fingerprint(provider),
+                    "settings_fingerprint": settings.fingerprint,
+                    "provider_fingerprint": provider_fingerprint(provider) if model_issue != "host_provider_required"
+                        and provider is not None and type(provider) is self.native_types.provider else "",
                     "personas": [asdict(persona) for persona in personas]}
         manifest["fingerprint"] = digest(manifest)
+        # Account/persona mappings have their own validity. Keep a pending model
+        # issue out of the signed manifest so a later model selection can start
+        # the already-saved mapping without changing its identity contract.
+        if model_issue is not None:
+            manifest["_model_issue"] = model_issue
         # Native reads may outlive termination. A reviewed candidate can also be
         # the first valid configuration, so rechecking the old settings here
         # would reject the very mapping that apply_bindings is preparing.
@@ -573,6 +595,7 @@ class AstrBotMultiController:
     async def probe(self):
         async with self._lifecycle_lock:
             try:
+                self.refresh_settings()
                 manifest, _ = await self._probe(include_conversations=True, include_window_personas=False)
                 return Outcome.success({"installation_id": self.settings.installation_id,
                     "configuration_fingerprint": manifest["fingerprint"], "targets": len(self.settings.all_targets),
@@ -585,6 +608,7 @@ class AstrBotMultiController:
         async with self._lifecycle_lock:
             try:
                 self._idle()
+                self.refresh_settings()
                 manifest, conversations = await self._probe()
                 async with self._control_lock:
                     if self._terminated:
@@ -650,7 +674,9 @@ class AstrBotMultiController:
                 save = getattr(self, "save_plugin_config", None)
                 if not callable(save):
                     raise TaskError("account_config_persistence_unavailable", "the host has no plugin configuration writer")
-            manifest, _ = await self._probe(settings, include_conversations=False)
+            manifest, _ = await self._probe(settings, include_conversations=False,
+                                            allow_unavailable_model=True)
+            model_issue = manifest.pop("_model_issue", None)
             async with self._control_lock:
                 if self._terminated:
                     raise TaskError("host_terminated", "the shared host is stopping or terminated")
@@ -716,6 +742,9 @@ class AstrBotMultiController:
         # lifecycle methods only after the apply lock has been released; both
         # methods acquire the same lifecycle lock themselves.
         if settings.enabled:
+            if model_issue is not None:
+                result.update(requires_initialize=True, started=False, startup_error=model_issue)
+                return result
             initialized = await self.initialize_profile()
             if initialized.failure is not None:
                 result.update(requires_initialize=True, started=False,
@@ -731,6 +760,7 @@ class AstrBotMultiController:
     async def load_existing(self):
         async with self._lifecycle_lock:
             try:
+                self.refresh_settings()
                 self._settings()
                 if not (self.profile_root / "runtime" / StorageRuntime.DATABASE_FILENAME).is_file():
                     return Outcome.success({"loaded": False, "started": False})
@@ -788,10 +818,14 @@ class AstrBotMultiController:
     async def start(self):
         async with self._lifecycle_lock:
             try:
-                self._settings()
                 if self.session is not None and self.session.application.state == "running":
                     return Outcome.success({"state": "running", "replayed": True})
                 self._idle()
+                # Model settings can be changed from another workspace while
+                # this host is stopped. Re-read them here so retrying Start
+                # uses the newly selected provider without re-saving mappings.
+                self.refresh_settings()
+                self._settings()
                 manifest, conversations = await self._probe()
                 async with self._control_lock:
                     if self._terminated:

@@ -1,10 +1,9 @@
 """Read retained V1 work in the existing migration workspace."""
 
-from pathlib import Path
-
 from astrbot.api.web import request
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.legacy.archived_work import archived_work_inventory, archived_work_rows
+from .legacy_archive_location import migration_archive_root
 
 
 class LegacyArchiveWebAPI:
@@ -21,7 +20,7 @@ class LegacyArchiveWebAPI:
             return outcome_response(Outcome.failed("legacy_archive_query_invalid", "归档查询参数无效。"))
         arguments = dict(query.items())
         def work(migration, root, session):
-            archive_root = Path(self.legacy.controller.data_root) / "legacy-v1-archives"
+            archive_root = migration_archive_root(self.legacy.controller, root)
             if not arguments:
                 return Outcome.success(archived_work_inventory(archive_root))
             return Outcome.success(archived_work_rows(archive_root, arguments.get("archive_id"),

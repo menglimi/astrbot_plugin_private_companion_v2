@@ -209,7 +209,8 @@ async def run(v1_root: Path, v1_config_path: Path) -> dict:
                     prefix = (intent["group_id"] + "."
                               if intent["target_kind"] == "configuration_registry" else
                               "semantic." if intent["target_kind"] == "semantic_config" else
-                              "weather." if intent["target_kind"] == "weather_host_settings" else "")
+                              "weather." if intent["target_kind"] == "weather_host_settings" else
+                              "image.output." if intent["target_kind"] == "image_output_config" else "")
                     expected_receipts.update(prefix + field for field in intent["fields"])
                 before_values = {(row["target_key"], row["field_id"]): row["value_json"]
                     for row in controller.runtime.read_all(
@@ -230,7 +231,14 @@ async def run(v1_root: Path, v1_config_path: Path) -> dict:
                 raise RuntimeError("configuration_plan_count_mismatch")
             actual_receipts = Counter(result["written"])
             if expected_receipts - actual_receipts:
-                raise RuntimeError("configuration_planned_receipt_missing")
+                missing = expected_receipts - actual_receipts
+                raise RuntimeError("configuration_planned_receipt_missing:" + json.dumps({
+                    "missing": dict(missing),
+                    "actual": dict(actual_receipts),
+                    "intent_targets": [{"target_kind": item["target_kind"],
+                        "group_id": item["group_id"], "fields": item["fields"]}
+                        for item in intents],
+                }, ensure_ascii=False, sort_keys=True))
             supplementary = actual_receipts - expected_receipts
             from companion_v2.role_work.life.configuration import SLEEP_FIELDS
             allowed_supplementary = {"role.life." + field for field in SLEEP_FIELDS}
@@ -291,6 +299,12 @@ async def run(v1_root: Path, v1_config_path: Path) -> dict:
                                                  if settings[field] != value)
                         if WeatherHostSettings(reloaded).view()["source_state"] != "configured":
                             raise RuntimeError("weather_consumer_configuration_invalid")
+                    elif intent["target_kind"] == "image_output_config":
+                        from astrbot_host.native_extensions.image_native.output_configuration import settings
+                        image_settings = settings(api._image_extension_api())
+                        mismatched_fields.extend("image.output." + field
+                            for field, value in intent["values"].items()
+                            if image_settings.get(field) != value)
                     else:
                         raise RuntimeError("configuration_verifier_missing:" + intent["target_kind"])
                     verified_fields += len(intent["fields"])

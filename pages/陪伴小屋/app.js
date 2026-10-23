@@ -441,6 +441,16 @@ function integrationStateCopy(id){
 }
 async function probeHost(){
   await product.connect(onProductChanged);
+  /* 旧版配置识别不应要求用户先找到「开始使用」。接入主页面后先只读检查；
+     需要迁移时用统一弹窗把用户直接带到接续页，确认仍由用户主动完成。 */
+  if(route==='manage'&&(manageTab==='setup'||manageTab==='data'&&dataPane==='migration'))return;
+  void window.CompanionSetup?.promptUpgradeAtStartup?.(async upgrade=>{
+    try{await window.CompanionSetup.continueUpgrade(upgrade);}
+    catch(error){
+      toast(error?.message||'旧版配置接续失败，请在「开始使用」页查看状态后重试。');
+      navigate('manage','setup');
+    }
+  });
 }
 function onProductChanged(reason){
   integrationSnapshot=product.manifest;

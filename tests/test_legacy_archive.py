@@ -140,6 +140,21 @@ class LegacyArchiveTests(unittest.TestCase):
                 archived_work_rows(root/'archive','../v1','work','jobs')
             self.assertEqual(hashlib.sha256(database.read_bytes()).hexdigest(),before)
 
+    def test_nested_runtime_is_excluded_from_v1_archive_and_revalidated(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "v1"
+            runtime = source / "companion-7"
+            runtime.mkdir(parents=True)
+            (source / "companions.json").write_text("{}", encoding="utf-8")
+            (runtime / "companion-v2.sqlite3").write_bytes(b"new runtime")
+            plan = build_v1_archive_plan(source, exclude_roots=(runtime,))
+            result = copy_v1_archive(plan, root / "archive")
+            archive = root / "archive" / result["archive_id"]
+            self.assertFalse((archive / "files" / "companion-7").exists())
+            self.assertEqual(result["file_count"], 1)
+            self.assertEqual(verify_v1_archive(archive)["file_count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

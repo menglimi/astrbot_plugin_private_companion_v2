@@ -211,6 +211,49 @@ class MultiHostTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.controller.settings_error)
         self.assertTrue(self.controller.status()["accepting"])
 
+    async def test_reviewed_persona_mapping_saves_before_a_model_is_selected(self):
+        candidate = multi_config()
+        candidate["model"]["provider_id"] = ""
+        unconfigured = deepcopy(candidate)
+        unconfigured["multi_host"] = {"enabled": False, "targets": [], "personas": []}
+        self.controller = self.make_controller(unconfigured)
+        self.assertEqual(self.controller.settings_error.code, "host_mappings_required")
+
+        def save(document):
+            self.controller.config.clear()
+            self.controller.config.update(deepcopy(document))
+
+        self.controller.save_plugin_config = save
+        result = await self.controller.apply_bindings(candidate)
+
+        self.assertTrue(result["saved"], result)
+        self.assertFalse(result["started"], result)
+        self.assertTrue(result["requires_initialize"], result)
+        self.assertEqual(result["startup_error"], "host_provider_required")
+        self.assertEqual(self.controller.config["multi_host"]["personas"], candidate["multi_host"]["personas"])
+        self.assertIsNone(self.controller.runtime)
+        self.assertIsNone(self.controller.settings_error)
+
+    async def test_reviewed_persona_mapping_saves_when_selected_model_is_unavailable(self):
+        candidate = multi_config()
+        candidate["model"]["provider_id"] = "temporarily-missing"
+        unconfigured = deepcopy(candidate)
+        unconfigured["multi_host"] = {"enabled": False, "targets": [], "personas": []}
+        self.controller = self.make_controller(unconfigured)
+
+        def save(document):
+            self.controller.config.clear()
+            self.controller.config.update(deepcopy(document))
+
+        self.controller.save_plugin_config = save
+        result = await self.controller.apply_bindings(candidate)
+
+        self.assertTrue(result["saved"], result)
+        self.assertFalse(result["started"], result)
+        self.assertEqual(result["startup_error"], "host_provider_unavailable")
+        self.assertEqual(self.controller.config["multi_host"]["personas"], candidate["multi_host"]["personas"])
+        self.assertIsNone(self.controller.runtime)
+
     async def test_profile_initialization_does_not_load_the_global_identity_grant_snapshot(self):
         with patch("companion_v2.identity_policy.repository.PersistentIdentityDirectory.snapshot",
                    side_effect=AssertionError("profile provisioning should read only the current subject")):
