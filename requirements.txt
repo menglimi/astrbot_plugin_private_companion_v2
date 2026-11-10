@@ -1,7 +1,7 @@
 # AstrBot itself supplies the astrbot package and is intentionally not listed here.
 # These libraries back the plugin's network, image, and calendar integrations.
 aiohttp>=3.9,<4
-Pillow>=10,<13
+Pillow>=9,<15
 chinese-calendar>=1.9.2
 lunarcalendar>=0.0.9
 markdown-it-py>=3,<5

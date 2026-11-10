@@ -1,7 +1,7 @@
 # 「我会永远陪着你」完整工作原理
 
 > 适用版本：`astrbot_plugin_private_companion` v6.4.5b（2026-09-03）
-> 目标：AstrBot `>= 4.22.0`，官方声明平台 `aiocqhttp` 与 `qq_official`。
+> 目标：AstrBot `>= 4.20.0`，官方声明平台 `aiocqhttp` 与 `qq_official`。
 > 文档定位：**源码层**工作原理——不是产品使用手册，也不是 API 索引，而是把"插件内部在做什么、按什么顺序、由谁负责"完整铺开。
 
 ---
@@ -44,7 +44,7 @@
 | 包名 | `astrbot_plugin_private_companion` |
 | 显示名 | **我会永远陪着你** |
 | 版本 | `6.4.5b` |
-| AstrBot 依赖 | `>= 4.22.0` |
+| AstrBot 依赖 | `>= 4.20.0` |
 | 官方平台 | `aiocqhttp`、`qq_official` |
 | 管理入口 | AstrBot 插件扩展页"陪伴面板"，可选独立 WebUI（默认关闭） |
 | 数据存储 | JSON（默认兼容）或 SQLite |

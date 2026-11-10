@@ -96,7 +96,7 @@ version: 6.7.0
 support_platforms:
   - aiocqhttp
   - qq_official
-astrbot_version: ">=4.22.0"
+astrbot_version: ">=4.20.0"
 pages:
   - name: companion-panel
     title: 陪伴面板
