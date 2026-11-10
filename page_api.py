@@ -785,6 +785,7 @@ class PrivateCompanionPageApi(
         async def wake_when_due() -> None:
             try:
                 await asyncio.sleep(max(0.0, float(scheduled_ts) - time.time()))
+                logger.info("主动消息链路测试到点唤醒: user=%s", user_key)
                 await kicker()
             except asyncio.CancelledError:
                 raise
@@ -804,7 +805,16 @@ class PrivateCompanionPageApi(
             label=f"troubleshooting_proactive_{user_key[:40]}",
         )
         if task is None:
-            return None
+            # A page API lifecycle may already be closing while the operator
+            # presses the test button.  The diagnostic still owns one short
+            # timer; losing it leaves the receipt pending forever.
+            try:
+                task = asyncio.create_task(
+                    wake_when_due(),
+                    name=f"troubleshooting_proactive_{user_key[:40]}",
+                )
+            except RuntimeError:
+                return None
         tasks[user_key] = task
         return task
 
