@@ -11278,7 +11278,7 @@ function setupGuideWorldbookDraftHtml() {
           ${setupGuideCheck("worldbookSelfRegistration", "介绍自登记方法", "完成首次配置后，可以告诉群友如何按规则自登记，再由你审核。")}
         </div>
         <div class="setup-guide-grid-2">
-          ${setupGuideText("worldbookUserId", "身份 QQ / 节点 ID", "10001", false, { badge: "必填", badgeTone: "required" })}
+          ${setupGuideText("worldbookUserId", "身份 / 节点 ID", "QQ 号、openid 或平台用户 ID", false, { badge: "必填", badgeTone: "required" })}
           ${setupGuideText("worldbookNickname", "名称 / 昵称", "朋友", false, { badge: "必填", badgeTone: "required" })}
           ${setupGuideText("worldbookGender", "性别", "可填男、女、未知或自定义描述")}
         </div>

@@ -27337,7 +27337,7 @@ class PrivateCompanionPageApi(
             return re.sub(r"[^A-Za-z0-9_:-]+", "_", text)[:80]
         if text.isdigit():
             return text
-        return re.sub(r"[^A-Za-z0-9_:-]+", "_", text)[:80]
+        return re.sub(r"[^A-Za-z0-9_.:@-]+", "_", text)[:80]
 
     def _worldbook_member_id_valid(self, user_id: str, *, allow_opaque: bool = False) -> bool:
         if user_id.isdigit():
@@ -27390,12 +27390,10 @@ class PrivateCompanionPageApi(
                 platform_profile = platform_getter(kind=target_platform)
             except Exception:
                 platform_profile = {}
-        allow_opaque = bool(
-            user_id
-            and user_id in target_ids
-            and isinstance(platform_profile, dict)
-            and platform_profile.get("kind") == "qq_official"
-        )
+        # Any explicitly configured target is a trusted node key.  Personal
+        # WeChat uses an openid such as ``o9...@im.wechat``; it is opaque and
+        # must not be rejected just because the adapter kind is not QQ Official.
+        allow_opaque = bool(user_id and user_id in target_ids)
         return self._worldbook_member_id_valid(
             user_id,
             allow_opaque=allow_opaque or self._worldbook_known_opaque_member_id(user_id),
