@@ -4,6 +4,11 @@
 
 ## 6.7.1 - 2026-11-10
 
+### 首次配置
+
+- 首次配置引导完成后，自动把目标私聊用户设为主要用户/主动对象，补齐 `proactive_daily_limit`、`manual_enabled` 与 `proactive_private_enabled` 能力；
+- 个人微信 UMO 使用适配器实际名称（如 `weixin_personal_sqco`），不再只使用实例 ID `weixin_oc`，修复主动消息找不到目标会话。
+
 ### 诊断
 
 - 新增有界内存日志缓冲（最多 2000 条，不落盘），插件启动自动挂载；

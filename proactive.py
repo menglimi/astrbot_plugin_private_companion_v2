@@ -1126,9 +1126,13 @@ class ProactiveMixin(UserRestGateMixin):
         if not user_id or self._is_bot_self_user_id(user_id):
             return ""
         platform = ""
-        instance_resolver = getattr(self, "_preferred_platform_instance_id", None)
-        if callable(instance_resolver):
-            platform = _single_line(instance_resolver(), 80)
+        name_resolver = getattr(self, "_preferred_platform_name", None)
+        if callable(name_resolver):
+            platform = _single_line(name_resolver(), 80)
+        if not platform:
+            instance_resolver = getattr(self, "_preferred_platform_instance_id", None)
+            if callable(instance_resolver):
+                platform = _single_line(instance_resolver(), 80)
         if not platform:
             platform = _single_line(getattr(self, "target_platform", ""), 80) or "aiocqhttp"
         return f"{platform}:FriendMessage:{user_id}"

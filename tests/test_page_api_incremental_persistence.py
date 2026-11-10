@@ -169,6 +169,7 @@ class PageApiIncrementalPersistenceTests(unittest.TestCase):
                 "worldbook_deleted_member_ids",
                 "setup_guide_completed_at",
                 "setup_guide_completed_version",
+                "users",
             },
             "_setup_guide_generate_daily_plan_fast": {
                 "daily_plan",

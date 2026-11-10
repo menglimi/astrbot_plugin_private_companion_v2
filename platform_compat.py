@@ -226,6 +226,33 @@ class PlatformCompatibilityMixin:
         target = self._normalize_platform_kind(getattr(self, "target_platform", ""))
         return target if target != "generic" and not prefix else "generic"
 
+    def _preferred_platform_name(self, *, kind: str = "") -> str:
+        """Return the adapter name used in a UMO, not merely its instance id.
+
+        Some adapters use different values for ``meta.name`` and ``meta.id``.
+        Personal WeChat is one: the instance id may be ``weixin_oc`` while the
+        event/UMO platform name is ``weixin_personal_sqco``.  Sending to the id
+        produces a route that AstrBot never emits.
+        """
+        requested = _single_line(kind or getattr(self, "target_platform", ""), 80)
+        manager = getattr(getattr(self, "context", None), "platform_manager", None)
+        if manager is None or not requested:
+            return requested
+        try:
+            platforms = list(manager.get_insts())
+        except Exception:
+            platforms = list(getattr(manager, "platform_insts", []) or [])
+        for platform in platforms:
+            try:
+                meta = platform.meta()
+            except Exception:
+                continue
+            name = _single_line(getattr(meta, "name", ""), 80)
+            instance_id = _single_line(getattr(meta, "id", ""), 80)
+            if requested in {name, instance_id}:
+                return name or instance_id or requested
+        return requested
+
     def _preferred_platform_instance_id(self, *, kind: str = "") -> str:
         requested = _single_line(kind or getattr(self, "target_platform", ""), 80)
         desired = self._platform_kind_for_umo(requested) if requested else "generic"

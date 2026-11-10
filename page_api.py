@@ -15350,6 +15350,50 @@ class PrivateCompanionPageApi(
                     sync_targets()
                     self.plugin._save_data_sync(sections={"users"})
 
+            # The guide's first step is an explicit administrator decision to
+            # make these private targets the companion recipients.  Materialize
+            # that decision before the final proactive test: target_user_ids is
+            # only a config source, and an auto-created profile otherwise keeps
+            # proactive_daily_limit=0 (so the test reports "对象未启用").
+            if proactive_private and target_ids:
+                async with self.plugin._data_lock:
+                    for index, user_id in enumerate(target_ids):
+                        getter = getattr(self.plugin, "_get_user", None)
+                        user = getter(user_id) if callable(getter) else None
+                        if not isinstance(user, dict):
+                            continue
+                        user["enabled"] = True
+                        user["target_user"] = True
+                        user["manual_enabled"] = True
+                        user["manual_disabled"] = False
+                        if index == 0:
+                            user["relationship_role"] = "owner"
+                        user["proactive_daily_limit"] = max(
+                            1,
+                            min(
+                                30,
+                                _safe_int(settings.get("max_daily_messages"), 8, 0, 30)
+                                or 8,
+                            ),
+                        )
+                        updater = getattr(self.plugin, "_req036_update_capabilities", None)
+                        if callable(updater):
+                            updater(
+                                user,
+                                {
+                                    "private_companion_enabled": True,
+                                    "proactive_private_enabled": True,
+                                },
+                                actor_id="setup_guide",
+                                reason_code="setup_guide_target_grant",
+                            )
+                        ensure_umo = getattr(self.plugin, "_ensure_private_user_umo", None)
+                        if callable(ensure_umo):
+                            ensure_umo(user_id, user)
+                    if callable(sync_targets):
+                        sync_targets()
+                    self.plugin._save_data_sync(sections={"users"})
+
             worldbook_saved = False
             if worldbook_should_save:
                 async with self.plugin._data_lock:
