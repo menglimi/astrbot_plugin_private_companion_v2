@@ -240,10 +240,10 @@ def normalize_diagnostic_result(
     kind = _safe_test_kind(test_type or source.get("type"))
     ok = bool(source.get("ok"))
     unsupported = bool(source.get("unsupported"))
-    pending = bool(source.get("pending")) and not ok
+    pending = bool(source.get("pending"))
     raw_error = source.get("error") or source.get("detail")
     category = "none" if (ok or pending or unsupported) else classify_diagnostic_error(raw_error)
-    phase = "completed" if ok or unsupported else ("scheduled" if pending else "failed")
+    phase = "scheduled" if pending else ("completed" if ok or unsupported else "failed")
     supplied_phase = _safe_identifier(source.get("phase"), 20)
     if supplied_phase in _VALID_PHASES and ((supplied_phase == "running" and pending) or supplied_phase == phase):
         phase = supplied_phase
@@ -256,7 +256,8 @@ def normalize_diagnostic_result(
         public_id = f"diag_{kind}_legacy"
     duration = _as_int(duration_ms) or _as_int(source.get("duration_ms")) or _as_int(source.get("elapsed_ms"))
     title = _PUBLIC_TITLES[kind]
-    detail = "The test completed." if ok else ("The test is scheduled or running." if pending else _PUBLIC_ERROR_LABELS[category])
+    detail = ("The test is scheduled or running." if pending else
+              "The test completed." if ok else _PUBLIC_ERROR_LABELS[category])
 
     envelope = {
         "diagnostic_version": _safe_label(contract_version, 60) or DIAGNOSTIC_ENVELOPE_VERSION,
