@@ -4678,6 +4678,8 @@ class PrivateCompanionPlugin(
         self._private_companion_instance_guard_enabled = True
         self._private_companion_duplicate_instance = False
         super().__init__(context)
+        from .log_buffer import install_log_buffer
+        install_log_buffer()
         initialize_plugin_entrypoint_state(
             self,
             context,

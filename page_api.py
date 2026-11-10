@@ -1140,6 +1140,23 @@ class PrivateCompanionPageApi(
             logger.error("忽略日历候选失败: %s", self._single_line(exc, 180), exc_info=True)
             return self._exception_error("忽略候选失败")
 
+    async def get_logs(self) -> dict[str, Any]:
+        """Return the bounded in-memory plugin log tail."""
+        from .log_buffer import snapshot
+
+        level = self._single_line(request.args.get("level"), 16).upper()
+        query = self._single_line(request.args.get("q"), 120)
+        try:
+            limit = int(request.args.get("limit") or 200)
+        except (TypeError, ValueError):
+            limit = 200
+        try:
+            before = int(request.args.get("before")) if request.args.get("before") else None
+        except (TypeError, ValueError):
+            before = None
+        rows, next_before = snapshot(level=level, query=query, limit=limit, before=before)
+        return self._ok({"logs": rows, "next_before": next_before})
+
     async def get_calendar(self) -> dict[str, Any]:
         try:
             start, end = self._calendar_page_range()
@@ -1246,6 +1263,7 @@ class PrivateCompanionPageApi(
         routes = [
             *self.context_editor.route_bindings(),
             ("/overview", self.get_overview, ["GET"], "Private Companion Page overview"),
+            ("/logs", self.get_logs, ["GET"], "Private Companion Page bounded logs"),
             ("/calendar", self.get_calendar, ["GET"], "Private Companion Page long-lived calendar"),
             ("/calendar/conflicts", self.get_calendar_conflicts, ["GET"], "Private Companion Page calendar conflicts"),
             ("/calendar/preview", self.preview_calendar, ["POST"], "Private Companion Page preview calendar record"),
