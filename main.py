@@ -19202,6 +19202,12 @@ class PrivateCompanionPlugin(
         marker = "<!-- private_companion_group_context_v1 -->"
         if not self._request_has_managed_prompt_marker(req, marker):
             return
+        # A mid-install or fresh group has no plugin timeline yet.  In that
+        # case the marker exists but carries zero history; dropping AstrBot's
+        # native history would make the Bot appear to forget everything that
+        # happened before the plugin was installed.
+        if not bool(getattr(event, "_private_companion_group_history_injected", False)):
+            return
         result = intercept_astrbot_group_context(event, req)
         logger.info(
             "已拦截 AstrBot 群聊对话注入: session=%s history=%s icl=%s",

@@ -127,7 +127,7 @@ class GroupContextInterceptionTests(unittest.TestCase):
         self.assertTrue(item["default"])
         self.assertEqual(
             item["hint"],
-            "开启后，只要本轮已接入插件群聊上下文，就拦截 AstrBot 会话历史和官方群聊 ICL，防止重复注入；插件暂时没有历史消息时也会拦截。",
+            "开启后，只有本轮插件群聊时间线确实包含历史消息时才拦截 AstrBot 会话历史和官方群聊 ICL，防止重复注入；插件刚安装、暂无群历史时会自动保留 AstrBot 官方上下文，避免旧聊天记录突然消失。",
         )
         self.assertEqual(
             item["condition"],
@@ -222,7 +222,7 @@ class GroupContextInterceptionHookTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(hasattr(event, GROUP_CONTEXT_STASH_ATTR))
         self.assertEqual(len(request.extra_user_content_parts), 1)
 
-    async def test_hook_intercepts_when_plugin_context_exists_even_without_history(self) -> None:
+    async def test_hook_preserves_astrbot_history_without_plugin_history(self) -> None:
         plugin = PrivateCompanionPlugin.__new__(PrivateCompanionPlugin)
         plugin.enabled = True
         plugin.persona_setting = lambda key, default=None: (
@@ -243,11 +243,13 @@ class GroupContextInterceptionHookTests(unittest.IsolatedAsyncioTestCase):
 
         await hook(plugin, event, request)
 
+        # No plugin timeline yet: AstrBot's own history must survive.
         self.assertFalse(hasattr(event, GROUP_CONTEXT_STASH_ATTR))
         self.assertEqual(len(request.contexts), 1)
         self.assertEqual(len(request.extra_user_content_parts), 1)
 
         request.system_prompt += "\n<!-- private_companion_group_context_v1 -->\n插件群上下文"
+        setattr(event, GROUP_HISTORY_INJECTED_ATTR, True)
         await hook(plugin, event, request)
 
         self.assertTrue(hasattr(event, GROUP_CONTEXT_STASH_ATTR))

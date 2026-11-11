@@ -8687,7 +8687,7 @@
       "intercept_astrbot_group_context": {
         "description": "拦截AstrBot群聊对话注入",
         "type": "bool",
-        "hint": "开启后，只要本轮已接入插件群聊上下文，就拦截 AstrBot 会话历史和官方群聊 ICL，防止重复注入；插件暂时没有历史消息时也会拦截。",
+        "hint": "开启后，只有本轮插件群聊时间线确实包含历史消息时才拦截 AstrBot 会话历史和官方群聊 ICL，防止重复注入；插件刚安装、暂无群历史时会自动保留 AstrBot 官方上下文，避免旧聊天记录突然消失。",
         "default": true,
         "condition": {
           "enable_group_context_injection": true,
