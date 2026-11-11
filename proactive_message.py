@@ -16563,6 +16563,31 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 ),
             )
         plan = build_photo_reference_plan(plan_intent, candidates)
+        # A matching outfit reference must win over the persona/base sheet.
+        # The base sheet often has a higher configured priority and also claims
+        # the outfit role, which made "校服自拍" come back in the base outfit.
+        if matching_outfit_candidates and plan.bindings:
+            preferred_ids = {
+                str(candidate.get("id") or "").strip()
+                for candidate, _uses_available in matching_outfit_candidates
+                if str(candidate.get("id") or "").strip()
+            }
+            if preferred_ids and plan.primary_reference_id not in preferred_ids:
+                ordered = sorted(
+                    plan.bindings,
+                    key=lambda binding: (
+                        binding.reference_id not in preferred_ids,
+                        -binding.priority,
+                        -len(binding.roles),
+                        binding.reference_id,
+                    ),
+                )
+                plan = PhotoReferencePlan(
+                    tuple(ordered),
+                    ordered[0].reference_id,
+                    "outfit_reference_preferred",
+                    plan.fallback_reason,
+                )
         if (
             not plan.bindings
             and self._photo_persona_fallback_allowed(
