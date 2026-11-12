@@ -2647,9 +2647,9 @@ class NewsExplorationMixin:
         try:
             import aiohttp
 
-            timeout = aiohttp.ClientTimeout(total=12)
+            timeout = aiohttp.ClientTimeout(total=8)
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36 Companion/6.7.1",
                 "Referer": f"https://space.bilibili.com/{mid}",
                 "Accept": "application/json, text/plain, */*",
                 "Accept-Encoding": "gzip, deflate",
@@ -2658,13 +2658,20 @@ class NewsExplorationMixin:
                 f"https://api.bilibili.com/x/space/arc/search?mid={mid}&pn=1&ps={max(1, min(30, item_limit))}&order=pubdate&jsonp=jsonp",
                 f"https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space?host_mid={mid}&timezone_offset=-480&features=itemOpusStyle",
             ]
-            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            async with aiohttp.ClientSession(
+                timeout=timeout, headers=headers, trust_env=False
+            ) as session:
                 for url in api_urls:
                     try:
-                        async with session.get(url) as resp:
-                            if resp.status >= 400:
+                        async with session.get(url, allow_redirects=False) as resp:
+                            if resp.status != 200:
                                 continue
-                            data = await resp.json(content_type=None)
+                            if resp.content_length is not None and resp.content_length > 2_000_000:
+                                continue
+                            raw = await resp.read()
+                            if len(raw) > 2_000_000:
+                                continue
+                            data = json.loads(raw.decode("utf-8", errors="replace"))
                             if isinstance(data, dict) and int(data.get("code") or 0) == 0:
                                 payloads.append(data)
                     except Exception:
@@ -3599,7 +3606,12 @@ class NewsExplorationMixin:
         source_key = str(source.get("key") or self._ai_daily_source_key(source))
         source_name = _single_line(source.get("name"), 40) or "AI日报"
         source_author = _single_line(source.get("author_name"), 60)
-        items = await self._fetch_bilibili_news_search_fallback(source)
+        # Prefer the configured UP's own feed.  Searching Bilibili by keyword
+        # costs several extra requests and often returns unrelated reposts;
+        # the search path is now only a fallback when the direct feed is empty.
+        items = await self._fetch_bilibili_news_source(source)
+        if not items:
+            items = await self._fetch_bilibili_news_search_fallback(source)
         today_items = [
             item for item in items
             if isinstance(item, dict) and self._ai_daily_item_matches_source(item, source, today)
