@@ -3788,6 +3788,10 @@ class CoreStoreMixin:
                         canonical = right.strip()
                         break
             if alias and canonical and alias != canonical:
+                # Aliases are canonical person labels only.  A scoped storage
+                # key here would become a second nested platform key.
+                if ":" in alias or ":" in canonical:
+                    continue
                 aliases[alias] = canonical
         return aliases
 

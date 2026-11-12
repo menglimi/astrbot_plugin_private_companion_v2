@@ -1266,6 +1266,89 @@ class UnifiedPersonRegistry:
                 checkpoint["last_source_operation_id"] = _text(operation_id, "operation_id", 120)
             return {"ok": True, "code": "source_event_recorded", "source_event_count": len(seen)}
 
+    def merge_person(
+        self, source_person_id: str, target_person_id: str, *, operation_id: str = "",
+        actor_id: str = "companion", **_: Any,
+    ) -> dict[str, Any]:
+        """Merge one person into another without detaching identity links."""
+        try:
+            source = _text(source_person_id, "source_person_id")
+            target = _text(target_person_id, "target_person_id")
+            op = _operation_id(operation_id)
+            actor = _text(actor_id, "actor_id", 120)
+        except ValueError:
+            return {"ok": False, "state": "invalid", "code": "invalid_request"}
+        if not op:
+            return {"ok": False, "state": "pending", "code": "explicit_operation_required"}
+        if source == target:
+            return {"ok": False, "state": "invalid", "code": "invalid_request"}
+        with _LOCK:
+            root = _root(self._store)
+            source_profile = root["profiles"].get(source)
+            target_profile = root["profiles"].get(target)
+            if not isinstance(source_profile, dict) or not isinstance(target_profile, dict):
+                return {"ok": False, "state": "pending", "code": "person_not_found"}
+            if source_profile.get("profile_status", "active") != "active":
+                return {"ok": False, "state": "invalid", "code": "person_not_active"}
+            if target_profile.get("profile_status", "active") != "active":
+                return {"ok": False, "state": "invalid", "code": "person_not_active"}
+            now = _now()
+            # Target wins conflicts; source only fills fields the target has
+            # not established yet.  This is a union, not a destructive replace.
+            for key, value in source_profile.items():
+                if key in {"person_id", "resolved_identity_key", "identity_keys", "profile_status",
+                           "merged_into", "updated_at", "projection_revision", "profile_fact_revision"}:
+                    continue
+                if target_profile.get(key) in (None, "", [], {}) and value not in (None, "", [], {}):
+                    target_profile[key] = deepcopy(value)
+            aliases = set(target_profile.get("aliases") or [])
+            aliases.update(source_profile.get("aliases") or [])
+            target_profile["aliases"] = sorted(item for item in aliases if isinstance(item, str) and item)
+            target_profile["identity_keys"] = list(dict.fromkeys(
+                list(target_profile.get("identity_keys") or []) + list(source_profile.get("identity_keys") or [])
+            ))
+            target_profile["updated_at"] = now
+            target_profile["projection_revision"] = int(target_profile.get("projection_revision") or 1) + 1
+
+            moved_links = 0
+            for key, link in list(root["identity_links"].items()):
+                if isinstance(link, dict) and link.get("person_id") == source:
+                    link["person_id"] = target
+                    link["updated_at"] = now
+                    link["last_operation_id"] = op
+                    moved_links += 1
+            moved_overlays = 0
+            for key, overlay in list(root["group_overlays"].items()):
+                if not isinstance(overlay, dict) or overlay.get("person_id") != source:
+                    continue
+                group_scope = str(overlay.get("group_scope") or "")
+                target_key = f"{target}:{_fingerprint(group_scope)[:32]}"
+                if target_key not in root["group_overlays"]:
+                    overlay["person_id"] = target
+                    overlay["updated_at"] = now
+                    root["group_overlays"][target_key] = overlay
+                    moved_overlays += 1
+                root["group_overlays"].pop(key, None)
+            source_profile["profile_status"] = "merged"
+            source_profile["merged_into"] = target
+            source_profile["updated_at"] = now
+            root["audit_events"].append({
+                "event_id": op, "action": "merge_person", "actor_id": actor,
+                "source_person_id": source, "target_person_id": target,
+                "moved_identity_links": moved_links, "moved_group_overlays": moved_overlays,
+                "at": now,
+            })
+            projection = build_person_projection(self._store, target)
+            if projection is None or validate_projection(projection):
+                raise ValueError("person_merge_projection_invalid")
+            return {
+                "ok": True, "state": "resolved", "code": "merged",
+                "source_person_id": source, "target_person_id": target,
+                "moved_identity_links": moved_links,
+                "moved_group_overlays": moved_overlays,
+                "projection": projection,
+            }
+
     def preview_person_merge(self, source_person_id: str, target_person_id: str, operation_id: str = "", **_: Any) -> dict[str, Any]:
         """Expose conflicts without merging two existing people automatically."""
         try:

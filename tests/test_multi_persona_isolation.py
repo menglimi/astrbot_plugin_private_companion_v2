@@ -115,6 +115,21 @@ class _ConversationManager:
 
 
 class MultiPersonaIsolationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_alias_identity_folds_to_the_canonical_person_subject(self):
+        with tempfile.TemporaryDirectory() as root:
+            plugin = _plugin_harness(root)
+            plugin.target_platform = "onebot"
+            plugin._known_bot_self_ids = lambda: {"bot-1"}
+            plugin.private_user_aliases = {"user-1": "canonical-user", "user-2": "canonical-user"}
+            alias_event = _unified_group_event()
+            canonical_event = _unified_group_event()
+            canonical_event.get_sender_id = lambda: "canonical-user"
+            alias_identity = plugin._unified_person_event_identity(alias_event)
+            canonical_identity = plugin._unified_person_event_identity(canonical_event)
+            self.assertEqual(alias_identity["platform_subject_id"], "canonical-user")
+            self.assertEqual(alias_identity, canonical_identity)
+            self.assertEqual(plugin._parse_private_user_aliases("webchat:test:abc=canonical"), {})
+
     async def test_unified_identity_is_persona_scoped_but_wire_group_scope_is_shared(self):
         with tempfile.TemporaryDirectory() as root:
             plugin = _plugin_harness(root)

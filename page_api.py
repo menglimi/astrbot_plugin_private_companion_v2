@@ -1301,6 +1301,7 @@ class PrivateCompanionPageApi(
             ("/user/identity/delete", self.delete_unified_person, ["POST"], "Private Companion Page archived person physical purge preview/apply"),
             ("/user/identity/pending", self.update_pending_identity_review, ["POST"], "Private Companion Page defer/restore pending identity review"),
             ("/user/identity/merge-preview", self.preview_unified_identity_merge, ["POST"], "Private Companion Page unified person merge preview"),
+            ("/user/identity/merge", self.merge_unified_identity, ["POST"], "Private Companion Page unified person merge execute"),
             ("/groups", self.list_groups, ["GET"], "Private Companion Page groups"),
             ("/group", self.get_group, ["GET"], "Private Companion Page group detail"),
             ("/group/update", self.update_group, ["POST"], "Private Companion Page update group"),

@@ -4962,6 +4962,12 @@ class PrivateCompanionPlugin(
                 self_id = ids[0]
         if not sender_id or not self_id:
             return {}
+        # Fold alias identities onto their canonical subject before the person
+        # key is built.  Otherwise two aliases still create two people and the
+        # last speaker overwrites the shared row's person pointer.
+        canonical_sender = self._canonical_private_user_id(sender_id)
+        if canonical_sender and canonical_sender != sender_id:
+            sender_id = canonical_sender
         namespace = _single_line(subject_namespace, 160).lower()
         if not namespace:
             namespace = f"{platform}:bot" if sender_id == self_id else f"{platform}:user"

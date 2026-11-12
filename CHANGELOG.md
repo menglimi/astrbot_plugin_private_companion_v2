@@ -18,6 +18,12 @@
 - 新增「私聊上下文轻量裁剪」开关，默认关闭；
 - 关闭时不再按新会话边界裁剪，也不再在超过 24 条且达到 5 万 token / 120 条时只保留最近 24 条，完全保留 AstrBot 原始私聊上下文。
 
+### 身份合并
+
+- `private_user_aliases` 在解析身份前折到 canonical subject，同一 canonical 下的别名共享同一个 person，不再被最后发言者覆盖 person 指针；
+- 带冒号的 scoped alias 直接拒绝，不再生成嵌套记录；
+- 新增 `/user/identity/merge` 执行接口：可把 source person 合并到 target，重指 identity_links、群覆盖和用户 person 指针，不 detach 任何身份。
+
 ### 生图参考
 
 - 点名服装时优先使用匹配的服装参考图，不再被基础人设图或文字描述抢占；例如“校服自拍”会优先提交校服参考图。

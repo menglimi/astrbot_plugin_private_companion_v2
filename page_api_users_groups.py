@@ -778,6 +778,38 @@ class PrivateCompanionPageApiUsersGroupsMixin:
             logger.warning("统一人物合并预览失败: %s", exc)
             return self._error("统一人物合并预览失败")
 
+    async def merge_unified_identity(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return self._error("请求体必须是 JSON 对象")
+        source_person_id = self._single_line(payload.get("source_person_id"), 80)
+        target_person_id = self._single_line(payload.get("target_person_id"), 80)
+        operation_id = self._single_line(payload.get("operation_id"), 120)
+        if not source_person_id or not target_person_id or not operation_id:
+            return self._error("source_person_id、target_person_id 和 operation_id 均为必填项")
+        try:
+            async with self.plugin._data_lock:
+                registry = self._page_unified_person_registry()
+                result = registry.merge_person(
+                    source_person_id, target_person_id,
+                    operation_id=operation_id,
+                    actor_id="page_administrator",
+                )
+                if not result.get("ok"):
+                    return self._error(str(result.get("code") or "统一人物合并失败"))
+                users = self.plugin.data.get("users")
+                moved_users = 0
+                if isinstance(users, dict):
+                    for user in users.values():
+                        if isinstance(user, dict) and str(user.get("unified_person_id") or "") == source_person_id:
+                            user["unified_person_id"] = target_person_id
+                            moved_users += 1
+                    self.plugin._save_data_sync(sections={"users", "unified_person"})
+                return self._ok({"result": result, "moved_users": moved_users})
+        except Exception as exc:
+            logger.warning("统一人物合并失败: %s", exc)
+            return self._error("统一人物合并失败")
+
     async def update_user(self) -> dict[str, Any]:
         payload = await request.get_json(silent=True)
         if not isinstance(payload, dict):
