@@ -1,4 +1,4 @@
-const HTTP_API = "/astrbot_plugin_private_companion/page";
+﻿const HTTP_API = "/astrbot_plugin_private_companion/page";
 const STANDALONE_HTTP_API = "/api/v1";
 const STANDALONE_MODE_META = "private-companion-mode";
 const STANDALONE_API_BASE_META = "private-companion-api-base";
@@ -1372,6 +1372,7 @@ const featureMeta = {
   enable_relationship_content_tiers: ["关系内容尺度", "把日常和非露骨暧昧纳入统一表达决策；关系阶段只是必要条件，不会自动升级尺度。"],
   enable_auto_user_profile_creation: ["用户档案", "首次收到符合范围的真实消息时自动建立统一用户档案；不会自动授予私聊陪伴或主动联系权限。"],
   enable_mai_style_integration: ["私聊互动策略", "把相处分寸、偏好和本轮接话方式注入回复。"],
+  enable_private_context_guard: ["私聊上下文轻量裁剪", "关闭后完全保留 AstrBot 原始私聊上下文；开启后超长或新会话边界才会裁到最近 24 条。"],
   enable_llm_proactive_persona_judge: ["主动人格判定", "主动计划到点后，判断这个念头是否符合角色、世界观、关系和当前打扰边界，再决定放行、改写、延后或取消。"],
   enable_companion_memory: ["本地陪伴画像", "在插件内整理当前私聊的偏好、边界和关系线索；跨会话长期记忆依赖外部记忆插件。"],
   enable_expression_learning: ["表达方式学习", "从选定私聊或群聊提取抽象表达特征，并按范围用于私聊被动、私聊主动和群聊回复。"],
@@ -1539,6 +1540,7 @@ const featureGroups = [
     note: "回复策略、主动计划判定、正文终审和自然表达；两个主动审核开关彼此独立，关闭正文终审不会自动关闭计划人格判定。",
     keys: [
       "enable_mai_style_integration",
+      "enable_private_context_guard",
       "enable_intent_emotion_analysis",
       "enable_llm_proactive_persona_judge",
       "enable_proactive_message_review",
@@ -1656,6 +1658,7 @@ const featureStageKeySets = {
     "enable_private_image_self_recognition",
     "enable_forward_message_adaptation",
     "enable_mai_style_integration",
+      "enable_private_context_guard",
     "enable_intent_emotion_analysis",
     "enable_passive_topic_suppression",
     "enable_relationship_state_machine",
@@ -1684,6 +1687,7 @@ const featureStageKeySets = {
     "enable_tts_enhancement",
     "enable_outbound_secret_redaction",
     "enable_mai_style_integration",
+      "enable_private_context_guard",
     "enable_llm_proactive_persona_judge",
     "enable_proactive_message_review",
     "enable_relationship_content_tiers",
@@ -1934,6 +1938,7 @@ const safeFeatureKeys = [
   "enable_custom_relationship_stage_policy",
   "enable_relationship_content_tiers",
   "enable_mai_style_integration",
+      "enable_private_context_guard",
   "enable_companion_memory",
   "enable_expression_learning",
   "enable_passive_response_review",

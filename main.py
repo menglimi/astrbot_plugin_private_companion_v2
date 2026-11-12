@@ -17298,6 +17298,8 @@ class PrivateCompanionPlugin(
     def _trim_passive_request_context_if_needed(self, event: AstrMessageEvent, req: ProviderRequest, *, is_private_chat: bool) -> None:
         if not is_private_chat:
             return
+        if not bool(runtime_persona_setting(self, "enable_private_context_guard", False)):
+            return
         contexts = getattr(req, "contexts", None)
         if not isinstance(contexts, list) or len(contexts) <= 24:
             return
@@ -17347,6 +17349,12 @@ class PrivateCompanionPlugin(
         return False
 
     def _sanitize_request_context_new_conversation_boundary(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
+        try:
+            private_chat = bool(event.is_private_chat())
+        except Exception:
+            private_chat = False
+        if private_chat and not bool(runtime_persona_setting(self, "enable_private_context_guard", False)):
+            return
         contexts = getattr(req, "contexts", None)
         if not isinstance(contexts, list) or not contexts:
             return

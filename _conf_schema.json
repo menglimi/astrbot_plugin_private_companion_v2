@@ -37,8 +37,16 @@
       "bot_scope_mode": {
         "description": "Bot 作用域模式",
         "type": "string",
-        "options": ["all", "allowlist", "denylist"],
-        "labels": ["全部 Bot", "仅允许列表", "排除列表"],
+        "options": [
+          "all",
+          "allowlist",
+          "denylist"
+        ],
+        "labels": [
+          "全部 Bot",
+          "仅允许列表",
+          "排除列表"
+        ],
         "hint": "默认对当前 AstrBot 载入的全部 Bot 生效。选择“仅允许列表”后，仅处理填写的 Bot self_id；也接受事件中的 adapter 实例 ID。",
         "default": "all"
       },
@@ -46,7 +54,10 @@
         "description": "Bot 作用域 ID 列表",
         "type": "list",
         "condition": {
-          "bot_scope_mode": ["allowlist", "denylist"]
+          "bot_scope_mode": [
+            "allowlist",
+            "denylist"
+          ]
         },
         "hint": "每行填写一个 Bot self_id 或 adapter 实例 ID。allowlist 留空时不处理任何 Bot；denylist 留空时不排除任何 Bot。",
         "default": []
@@ -286,8 +297,16 @@
       "portrait_global_mode": {
         "description": "全局智能画像模式",
         "type": "string",
-        "options": ["disabled", "use_existing", "learn_and_use"],
-        "labels": ["关闭智能画像", "仅使用已有画像", "持续学习与使用"],
+        "options": [
+          "disabled",
+          "use_existing",
+          "learn_and_use"
+        ],
+        "labels": [
+          "关闭智能画像",
+          "仅使用已有画像",
+          "持续学习与使用"
+        ],
         "hint": "默认持续学习与使用。管理员可在单个用户档案中选择跟随全局或显式覆盖；未安装或未兼容 MemoryCompanion 时会自动关闭且不可开启。画像不能授予私聊或主动联系权限。",
         "default": "learn_and_use"
       },
@@ -301,14 +320,28 @@
         "description": "自动建档平台",
         "type": "list",
         "hint": "允许首次私聊自动建档的平台类型。QQ/NapCat 为 onebot，QQ 官方为 qq_official，Telegram 为 telegram，网页聊天为 webchat，其他适配器为 generic。",
-        "default": ["onebot", "qq_official", "telegram", "webchat", "generic"],
+        "default": [
+          "onebot",
+          "qq_official",
+          "telegram",
+          "webchat",
+          "generic"
+        ],
         "condition": "enable_auto_user_profile_creation"
       },
       "default_nickname_strategy": {
         "description": "默认称呼来源",
         "type": "string",
-        "options": ["platform_display_name", "fixed", "user_id"],
-        "labels": ["优先平台显示名", "固定称呼", "用户 ID"],
+        "options": [
+          "platform_display_name",
+          "fixed",
+          "user_id"
+        ],
+        "labels": [
+          "优先平台显示名",
+          "固定称呼",
+          "用户 ID"
+        ],
         "hint": "平台显示名不可用时回退到默认称呼；不会改变用户 ID、UMO、关系角色或关系分数。",
         "default": "platform_display_name",
         "condition": "enable_auto_user_profile_creation"
@@ -323,7 +356,11 @@
       "default_proactive_daily_limit": {
         "description": "新用户每日主动上限",
         "type": "int",
-        "slider": {"min": 0, "max": 30, "step": 1},
+        "slider": {
+          "min": 0,
+          "max": 30,
+          "step": 1
+        },
         "hint": "自动档案的主动上限；未授予主动权限时强制为 0。",
         "default": 0,
         "condition": "default_proactive_enabled"
@@ -331,8 +368,20 @@
       "default_interaction_band": {
         "description": "新档案默认互动状态",
         "type": "string",
-        "options": ["avoidant", "hurt", "relaxed", "lively", "warm"],
-        "labels": ["回避", "受伤", "放松", "活泼", "温暖"],
+        "options": [
+          "avoidant",
+          "hurt",
+          "relaxed",
+          "lively",
+          "warm"
+        ],
+        "labels": [
+          "回避",
+          "受伤",
+          "放松",
+          "活泼",
+          "温暖"
+        ],
         "hint": "只影响之后建立的普通用户档案；亲近和爱意仅允许主要用户账户使用。",
         "default": "relaxed"
       },
@@ -361,30 +410,93 @@
         "type": "object",
         "invisible": true,
         "items": {
-          "deeply_distant": {"description": "极度疏离", "type": "string", "default": "", "invisible": true},
-          "strongly_distant": {"description": "强烈疏离", "type": "string", "default": "", "invisible": true},
-          "distant": {"description": "疏离", "type": "string", "default": "", "invisible": true},
-          "acquaintance": {"description": "初识", "type": "string", "default": "", "invisible": true},
-          "familiar": {"description": "熟悉", "type": "string", "default": "", "invisible": true},
-          "close": {"description": "亲近", "type": "string", "default": "", "invisible": true},
-          "intimate": {"description": "亲密", "type": "string", "default": "", "invisible": true},
-          "deeply_bonded": {"description": "深度联结", "type": "string", "default": "", "invisible": true},
-          "owner_exclusive": {"description": "专属联结", "type": "string", "default": "", "invisible": true}
+          "deeply_distant": {
+            "description": "极度疏离",
+            "type": "string",
+            "default": "",
+            "invisible": true
+          },
+          "strongly_distant": {
+            "description": "强烈疏离",
+            "type": "string",
+            "default": "",
+            "invisible": true
+          },
+          "distant": {
+            "description": "疏离",
+            "type": "string",
+            "default": "",
+            "invisible": true
+          },
+          "acquaintance": {
+            "description": "初识",
+            "type": "string",
+            "default": "",
+            "invisible": true
+          },
+          "familiar": {
+            "description": "熟悉",
+            "type": "string",
+            "default": "",
+            "invisible": true
+          },
+          "close": {
+            "description": "亲近",
+            "type": "string",
+            "default": "",
+            "invisible": true
+          },
+          "intimate": {
+            "description": "亲密",
+            "type": "string",
+            "default": "",
+            "invisible": true
+          },
+          "deeply_bonded": {
+            "description": "深度联结",
+            "type": "string",
+            "default": "",
+            "invisible": true
+          },
+          "owner_exclusive": {
+            "description": "专属联结",
+            "type": "string",
+            "default": "",
+            "invisible": true
+          }
         }
       },
       "relationship_positive_stage_cap_key": {
         "description": "普通用户正向亲密度阶段上限",
         "type": "string",
-        "options": ["familiar", "close", "intimate", "deeply_bonded"],
-        "labels": ["熟悉", "亲近", "亲密", "深度联结"],
+        "options": [
+          "familiar",
+          "close",
+          "intimate",
+          "deeply_bonded"
+        ],
+        "labels": [
+          "熟悉",
+          "亲近",
+          "亲密",
+          "深度联结"
+        ],
         "hint": "普通用户（非主要用户）的正向亲密度不会超过所选阶段，面板手动调分超限会明确报错。下调时既有正分按旧上限与新上限比例只压缩一次；主要用户不受此上限及下调影响（专属联结模式下分数固定冻结）；负分不受影响。",
         "default": "close"
       },
       "normal_interaction_band_cap": {
         "description": "普通用户互动温度上限",
         "type": "string",
-        "options": ["relaxed", "lively", "warm"],
-        "labels": ["放松", "活泼", "温暖"],
+        "options": [
+          "relaxed",
+          "lively",
+          "warm"
+        ],
+        "labels": [
+          "放松",
+          "活泼",
+          "温暖"
+        ],
         "hint": "普通用户的当前互动状态最多到这里。主要用户账户不受此温度上限影响。",
         "default": "warm"
       },
@@ -434,7 +546,11 @@
       "owner_exclusive_proactive_limit": {
         "description": "主要用户专属主动阶段上限",
         "type": "int",
-        "slider": {"min": 0, "max": 30, "step": 1},
+        "slider": {
+          "min": 0,
+          "max": 30,
+          "step": 1
+        },
         "hint": "只是阶段硬上限；实际次数仍取全局、用户、阶段和动态额度的最小值。",
         "default": 6
       },
@@ -454,7 +570,11 @@
       "group_relationship_daily_net_cap": {
         "description": "每人每群每日净变化上限",
         "type": "int",
-        "slider": {"min": 0, "max": 20, "step": 1},
+        "slider": {
+          "min": 0,
+          "max": 20,
+          "step": 1
+        },
         "hint": "限制同一用户在同一群每天由群互动产生的净好感度变化。",
         "default": 2,
         "condition": "enable_group_relationship_affinity"
@@ -462,7 +582,11 @@
       "group_relationship_window_minutes": {
         "description": "群好感度滚动窗口（分钟）",
         "type": "int",
-        "slider": {"min": 1, "max": 1440, "step": 1},
+        "slider": {
+          "min": 1,
+          "max": 1440,
+          "step": 1
+        },
         "hint": "同一用户与同一群的直接互动在该滚动窗口内共享绝对量预算。",
         "default": 30,
         "condition": "enable_group_relationship_affinity"
@@ -470,7 +594,11 @@
       "group_relationship_window_absolute_cap": {
         "description": "每人每群窗口绝对量上限",
         "type": "int",
-        "slider": {"min": 0, "max": 20, "step": 1},
+        "slider": {
+          "min": 0,
+          "max": 20,
+          "step": 1
+        },
         "hint": "正负变化都占用额度，防止用加分和扣分往返刷量。",
         "default": 1,
         "condition": "enable_group_relationship_affinity"
@@ -478,7 +606,11 @@
       "group_relationship_person_daily_absolute_cap": {
         "description": "每人跨群每日绝对量上限",
         "type": "int",
-        "slider": {"min": 0, "max": 120, "step": 1},
+        "slider": {
+          "min": 0,
+          "max": 120,
+          "step": 1
+        },
         "hint": "一个人在所有测试群累计的正负变化绝对量上限。",
         "default": 4,
         "condition": "enable_group_relationship_affinity"
@@ -486,7 +618,11 @@
       "group_relationship_scope_daily_absolute_cap": {
         "description": "每群全体每日绝对量上限",
         "type": "int",
-        "slider": {"min": 0, "max": 1000, "step": 1},
+        "slider": {
+          "min": 0,
+          "max": 1000,
+          "step": 1
+        },
         "hint": "同一测试群内所有用户合计的正负变化绝对量上限。",
         "default": 20,
         "condition": "enable_group_relationship_affinity"
@@ -494,56 +630,88 @@
       "relationship_event_window_minutes": {
         "description": "亲密度事件去重窗口（分钟）",
         "type": "int",
-        "slider": {"min": 1, "max": 1440, "step": 1},
+        "slider": {
+          "min": 1,
+          "max": 1440,
+          "step": 1
+        },
         "hint": "同一消息和同一原因只结算一次；缺少消息 ID 时在窗口内去重。",
         "default": 30
       },
       "relationship_positive_event_cap": {
         "description": "单次正向亲密度上限",
         "type": "int",
-        "slider": {"min": 1, "max": 30, "step": 1},
+        "slider": {
+          "min": 1,
+          "max": 30,
+          "step": 1
+        },
         "hint": "单个事件最多增加多少分。",
         "default": 4
       },
       "relationship_negative_event_cap": {
         "description": "单次负向亲密度上限",
         "type": "int",
-        "slider": {"min": 1, "max": 60, "step": 1},
+        "slider": {
+          "min": 1,
+          "max": 60,
+          "step": 1
+        },
         "hint": "单个明确负向事件最多扣多少分。普通未回复不会直接扣长期分。",
         "default": 12
       },
       "relationship_positive_daily_cap": {
         "description": "每日正向亲密度上限",
         "type": "int",
-        "slider": {"min": 0, "max": 120, "step": 1},
+        "slider": {
+          "min": 0,
+          "max": 120,
+          "step": 1
+        },
         "hint": "限制单日累计正向增长；0 表示当天不自动增加。",
         "default": 12
       },
       "relationship_decay_grace_days": {
         "description": "自然回落宽限天数",
         "type": "int",
-        "slider": {"min": 0, "max": 30, "step": 1},
+        "slider": {
+          "min": 0,
+          "max": 30,
+          "step": 1
+        },
         "hint": "连续多少天没有有效互动时保持不变。",
         "default": 3
       },
       "relationship_decay_early_per_day": {
         "description": "回落前段每日扣分",
         "type": "int",
-        "slider": {"min": 0, "max": 30, "step": 1},
+        "slider": {
+          "min": 0,
+          "max": 30,
+          "step": 1
+        },
         "hint": "宽限后至第 7 个未互动日每天向 0 回落多少分。",
         "default": 2
       },
       "relationship_decay_middle_per_day": {
         "description": "回落中段每日扣分",
         "type": "int",
-        "slider": {"min": 0, "max": 30, "step": 1},
+        "slider": {
+          "min": 0,
+          "max": 30,
+          "step": 1
+        },
         "hint": "第 8 至第 14 个未互动日每天向 0 回落多少分。",
         "default": 5
       },
       "relationship_decay_late_per_day": {
         "description": "回落后段每日扣分",
         "type": "int",
-        "slider": {"min": 0, "max": 30, "step": 1},
+        "slider": {
+          "min": 0,
+          "max": 30,
+          "step": 1
+        },
         "hint": "第 15 个未互动日起每天向 0 回落多少分。",
         "default": 8
       },
@@ -1869,14 +2037,22 @@
     "description": "Legacy flat config: 群聊表达语义归纳每日批次上限",
     "type": "int",
     "default": 6,
-    "slider": {"min": 1, "max": 50, "step": 1},
+    "slider": {
+      "min": 1,
+      "max": 50,
+      "step": 1
+    },
     "invisible": true
   },
   "expression_group_learning_min_new_messages": {
     "description": "Legacy flat config: 群聊表达语义归纳最少新增消息数",
     "type": "int",
     "default": 20,
-    "slider": {"min": 5, "max": 80, "step": 5},
+    "slider": {
+      "min": 5,
+      "max": 80,
+      "step": 5
+    },
     "invisible": true
   },
   "expression_private_application_mode": {
@@ -2053,7 +2229,6 @@
     "default": 30,
     "invisible": true
   },
-
   "enable_smart_silence": {
     "description": "Legacy flat config: 启用智能沉默",
     "type": "bool",
@@ -3905,7 +4080,11 @@
   "photo_generation_prompt_format": {
     "description": "Legacy flat config: 生图提示词表达方式",
     "type": "string",
-    "options": ["traditional", "natural_language", "nai"],
+    "options": [
+      "traditional",
+      "natural_language",
+      "nai"
+    ],
     "default": "traditional",
     "invisible": true
   },
@@ -3924,7 +4103,11 @@
   "photo_generation_negative_prompt_mode": {
     "description": "Legacy flat config: 生图负面提示词策略",
     "type": "string",
-    "options": ["safe_default", "merge", "replace"],
+    "options": [
+      "safe_default",
+      "merge",
+      "replace"
+    ],
     "default": "safe_default",
     "invisible": true
   },
@@ -4592,7 +4775,15 @@
   "segmented_proactive_component_order": {
     "description": "Legacy flat config: 分段组件先后顺序",
     "type": "list",
-    "default": ["voice", "at", "text", "face", "image", "other", "reaction"],
+    "default": [
+      "voice",
+      "at",
+      "text",
+      "face",
+      "image",
+      "other",
+      "reaction"
+    ],
     "invisible": true
   },
   "segmented_proactive_other_strategy": {
@@ -6773,23 +6964,37 @@
         "type": "bool",
         "hint": "只有目标关键词与已经结束的日程片段相符时才推进，不会把计划中或进行中的活动算作完成。",
         "default": true,
-        "condition": {"enable_personal_goals": true}
+        "condition": {
+          "enable_personal_goals": true
+        }
       },
       "personal_goal_share_cooldown_hours": {
         "description": "目标进展分享冷却（小时）",
         "type": "int",
         "hint": "只有跨越里程碑、长时间停滞或完成时才形成主动候选。",
-        "slider": {"min": 1, "max": 168, "step": 1},
+        "slider": {
+          "min": 1,
+          "max": 168,
+          "step": 1
+        },
         "default": 12,
-        "condition": {"enable_personal_goals": true}
+        "condition": {
+          "enable_personal_goals": true
+        }
       },
       "personal_goal_stall_days": {
         "description": "停滞提醒天数",
         "type": "int",
         "hint": "进行中的目标超过该天数没有真实推进时，可形成一次低压力的主动分享。",
-        "slider": {"min": 1, "max": 30, "step": 1},
+        "slider": {
+          "min": 1,
+          "max": 30,
+          "step": 1
+        },
         "default": 3,
-        "condition": {"enable_personal_goals": true}
+        "condition": {
+          "enable_personal_goals": true
+        }
       },
       "skill_growth_rate": {
         "description": "技能成长倍率",
@@ -6859,6 +7064,12 @@
         "type": "bool",
         "hint": "开启后，普通私聊/群聊被动回复和部分主动消息会在 AstrBot 默认人格之上参考回复风格提示词、互动边界、偏好/表达习惯和简短接话策略。本层不写身份事实，不替换 AstrBot 人格。",
         "default": true
+      },
+      "enable_private_context_guard": {
+        "description": "私聊上下文轻量裁剪",
+        "type": "bool",
+        "hint": "开启后，私聊请求超过 24 条且估算达到 5 万 token / 120 条时只保留最近 24 条，并按“新会话”边界裁掉边界前的历史。默认关闭，关闭时完全保留 AstrBot 原始私聊上下文。",
+        "default": false
       }
     }
   },
@@ -6961,82 +7172,125 @@
         "type": "string",
         "hint": "在陪伴面板的“学习”页管理来源与画像。owner 仅从主要用户学习；selected 仅从勾选私聊学习；all 从全部私聊学习。",
         "default": "owner",
-        "options": ["owner", "selected", "all"],
+        "options": [
+          "owner",
+          "selected",
+          "all"
+        ],
         "invisible": true,
-        "condition": {"enable_expression_learning": true}
+        "condition": {
+          "enable_expression_learning": true
+        }
       },
       "expression_private_learning_source_ids": {
         "description": "私聊学习来源 ID",
         "type": "list",
         "default": [],
         "invisible": true,
-        "condition": {"enable_expression_learning": true}
+        "condition": {
+          "enable_expression_learning": true
+        }
       },
       "expression_group_learning_source_mode": {
         "description": "群聊学习来源",
         "type": "string",
         "hint": "在陪伴面板的“学习”页管理来源与画像。群聊可归纳脱敏后的短表达、梗模板和句法；昵称、账号、关系、事实和支持片段不会进入回复。",
         "default": "disabled",
-        "options": ["disabled", "selected", "all"],
+        "options": [
+          "disabled",
+          "selected",
+          "all"
+        ],
         "invisible": true,
-        "condition": {"enable_expression_learning": true}
+        "condition": {
+          "enable_expression_learning": true
+        }
       },
       "expression_group_learning_source_ids": {
         "description": "群聊学习来源 ID",
         "type": "list",
         "default": [],
         "invisible": true,
-        "condition": {"enable_expression_learning": true}
+        "condition": {
+          "enable_expression_learning": true
+        }
       },
       "expression_group_learning_daily_batch_limit": {
         "description": "群聊语义归纳每日批次上限",
         "type": "int",
         "hint": "所有群共享的每日模型归纳批次上限；情境表达和语法习惯共用已有群片段整理调用，不会额外发起模型请求。",
         "default": 6,
-        "slider": {"min": 1, "max": 50, "step": 1},
+        "slider": {
+          "min": 1,
+          "max": 50,
+          "step": 1
+        },
         "invisible": true,
-        "condition": {"enable_expression_learning": true}
+        "condition": {
+          "enable_expression_learning": true
+        }
       },
       "expression_group_learning_min_new_messages": {
         "description": "每批最少新增群消息",
         "type": "int",
         "hint": "只统计上次归纳后新增的群消息，数量不足时不要求模型归纳表达规则。",
         "default": 20,
-        "slider": {"min": 5, "max": 80, "step": 5},
+        "slider": {
+          "min": 5,
+          "max": 80,
+          "step": 5
+        },
         "invisible": true,
-        "condition": {"enable_expression_learning": true}
+        "condition": {
+          "enable_expression_learning": true
+        }
       },
       "expression_private_application_mode": {
         "description": "私聊使用范围",
         "type": "string",
         "hint": "在陪伴面板的“学习”页管理使用范围。控制哪些私聊会使用去标识的全局表达底色；本地表达规则只对对应学习来源生效。",
         "default": "all",
-        "options": ["all", "selected"],
+        "options": [
+          "all",
+          "selected"
+        ],
         "invisible": true,
-        "condition": {"enable_expression_learning": true}
+        "condition": {
+          "enable_expression_learning": true
+        }
       },
       "expression_private_application_user_ids": {
         "description": "私聊使用对象 ID",
         "type": "list",
         "default": [],
         "invisible": true,
-        "condition": {"enable_expression_learning": true}
+        "condition": {
+          "enable_expression_learning": true
+        }
       },
       "expression_group_application_mode": {
         "description": "群聊使用范围",
         "type": "string",
         "hint": "在陪伴面板的“学习”页管理使用范围。仅影响 Bot 的回复口感；不会把私聊或群聊原话、昵称、关系和事实带入群聊。",
         "default": "all",
-        "options": ["disabled", "all", "selected"],
+        "options": [
+          "disabled",
+          "all",
+          "selected"
+        ],
         "invisible": true,
-        "condition": {"enable_expression_learning": true}
+        "condition": {
+          "enable_expression_learning": true
+        }
       },
       "expression_group_application_ids": {
         "description": "群聊使用对象 ID",
         "type": "list",
         "default": [],
         "invisible": true,
-        "condition": {"enable_expression_learning": true}
+        "condition": {
+          "enable_expression_learning": true
+        }
       },
       "enable_user_habit_learning": {
         "description": "启用用户习惯画像",
@@ -7214,7 +7468,6 @@
           "enable_proactive_message_review": true
         }
       },
-
       "enable_smart_silence": {
         "description": "启用智能沉默",
         "type": "bool",
@@ -10000,7 +10253,13 @@
         "description": "日记写作形式",
         "type": "string",
         "hint": "自动模式会按日期和当天可用经历稳定选择一种形式，不会每次重载都变化。也可固定为场景短记、碎片手记、心绪自述或观察记录。",
-        "options": ["auto", "scene", "fragments", "inner_voice", "observation"],
+        "options": [
+          "auto",
+          "scene",
+          "fragments",
+          "inner_voice",
+          "observation"
+        ],
         "default": "auto",
         "condition": {
           "enable_daily_diary": true
@@ -10010,7 +10269,11 @@
         "description": "日记篇幅",
         "type": "string",
         "hint": "材料不足时允许比目标更短，避免为了凑字数虚构生活细节。",
-        "options": ["short", "standard", "long"],
+        "options": [
+          "short",
+          "standard",
+          "long"
+        ],
         "default": "standard",
         "condition": {
           "enable_daily_diary": true
@@ -10020,7 +10283,11 @@
         "description": "日记写实程度",
         "type": "string",
         "hint": "严格写实只采用已确认经历；自然平衡允许轻微感官表达；个性表达可增强节奏和内心色彩，但都不会虚构事件。",
-        "options": ["strict", "balanced", "expressive"],
+        "options": [
+          "strict",
+          "balanced",
+          "expressive"
+        ],
         "default": "balanced",
         "condition": {
           "enable_daily_diary": true
@@ -10235,7 +10502,11 @@
         "type": "int",
         "hint": "0 表示自然推进；大于 0 时按当前六阶段总天数定位到对应周期日，并只应用一次。重启不会重复重置；修改数值或阶段天数后才会重新应用。",
         "default": 0,
-        "slider": { "min": 0, "max": 180, "step": 1 },
+        "slider": {
+          "min": 0,
+          "max": 180,
+          "step": 1
+        },
         "condition": {
           "enable_advanced_cycle_strategy": true
         }
@@ -10244,186 +10515,292 @@
         "description": "月经期持续天数",
         "type": "int",
         "default": 5,
-        "slider": { "min": 1, "max": 30, "step": 1 },
-        "condition": { "enable_advanced_cycle_strategy": true }
+        "slider": {
+          "min": 1,
+          "max": 30,
+          "step": 1
+        },
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
       },
       "advanced_cycle_menstrual_prompt": {
         "description": "月经期状态描述",
         "type": "string",
         "hint": "作为 Bot 当前模拟状态的柔性背景，不应写成医学结论或固定台词。",
         "default": "处于月经期，身体更容易疲倦，情绪感受稍敏锐",
-        "condition": { "enable_advanced_cycle_strategy": true }
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
       },
       "advanced_cycle_menstrual_mood": {
         "description": "月经期情绪底色",
         "type": "string",
         "default": "疲惫",
-        "condition": { "enable_advanced_cycle_strategy": true }
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
       },
       "advanced_cycle_menstrual_energy": {
         "description": "月经期精力变化",
         "type": "int",
         "hint": "仅在关闭强度联动时使用。",
         "default": -12,
-        "slider": { "min": -50, "max": 30, "step": 1 },
-        "condition": { "enable_advanced_cycle_strategy": true }
+        "slider": {
+          "min": -50,
+          "max": 30,
+          "step": 1
+        },
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
       },
       "advanced_cycle_follicular_days": {
         "description": "卵泡期持续天数",
         "type": "int",
         "default": 5,
-        "slider": { "min": 1, "max": 30, "step": 1 },
-        "condition": { "enable_advanced_cycle_strategy": true }
+        "slider": {
+          "min": 1,
+          "max": 30,
+          "step": 1
+        },
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
       },
       "advanced_cycle_follicular_prompt": {
         "description": "卵泡期状态描述",
         "type": "string",
         "default": "处于卵泡期，精力平稳回升，心情逐渐轻快",
-        "condition": { "enable_advanced_cycle_strategy": true }
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
       },
       "advanced_cycle_follicular_mood": {
         "description": "卵泡期情绪底色",
         "type": "string",
         "default": "轻快",
-        "condition": { "enable_advanced_cycle_strategy": true }
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
       },
       "advanced_cycle_follicular_energy": {
         "description": "卵泡期精力变化",
         "type": "int",
         "hint": "仅在关闭强度联动时使用；设为 0 仍会保留该阶段并继续推进。",
         "default": 0,
-        "slider": { "min": -50, "max": 30, "step": 1 },
-        "condition": { "enable_advanced_cycle_strategy": true }
+        "slider": {
+          "min": -50,
+          "max": 30,
+          "step": 1
+        },
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
       },
       "advanced_cycle_pre_ovulation_days": {
         "description": "排卵前期持续天数",
         "type": "int",
         "default": 3,
-        "slider": { "min": 1, "max": 30, "step": 1 },
-        "condition": { "enable_advanced_cycle_strategy": true }
+        "slider": {
+          "min": 1,
+          "max": 30,
+          "step": 1
+        },
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
       },
       "advanced_cycle_pre_ovulation_prompt": {
         "description": "排卵前期状态描述",
         "type": "string",
         "default": "处于排卵前期，身体逐渐轻盈，精力有所上升",
-        "condition": { "enable_advanced_cycle_strategy": true }
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
       },
       "advanced_cycle_pre_ovulation_mood": {
         "description": "排卵前期情绪底色",
         "type": "string",
         "default": "期待",
-        "condition": { "enable_advanced_cycle_strategy": true }
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
       },
       "advanced_cycle_pre_ovulation_energy": {
         "description": "排卵前期精力变化",
         "type": "int",
         "hint": "仅在关闭强度联动时使用。",
         "default": 8,
-        "slider": { "min": -50, "max": 30, "step": 1 },
-        "condition": { "enable_advanced_cycle_strategy": true }
+        "slider": {
+          "min": -50,
+          "max": 30,
+          "step": 1
+        },
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
       },
       "advanced_cycle_ovulation_days": {
         "description": "排卵期持续天数",
         "type": "int",
         "default": 1,
-        "slider": { "min": 1, "max": 30, "step": 1 },
-        "condition": { "enable_advanced_cycle_strategy": true }
+        "slider": {
+          "min": 1,
+          "max": 30,
+          "step": 1
+        },
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
       },
       "advanced_cycle_ovulation_prompt": {
         "description": "排卵期状态描述",
         "type": "string",
         "default": "处于排卵期，精力较充足，社交意愿稍有增强",
-        "condition": { "enable_advanced_cycle_strategy": true }
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
       },
       "advanced_cycle_ovulation_mood": {
         "description": "排卵期情绪底色",
         "type": "string",
         "default": "明朗",
-        "condition": { "enable_advanced_cycle_strategy": true }
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
       },
       "advanced_cycle_ovulation_energy": {
         "description": "排卵期精力变化",
         "type": "int",
         "hint": "仅在关闭强度联动时使用。",
         "default": 9,
-        "slider": { "min": -50, "max": 30, "step": 1 },
-        "condition": { "enable_advanced_cycle_strategy": true }
+        "slider": {
+          "min": -50,
+          "max": 30,
+          "step": 1
+        },
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
       },
       "advanced_cycle_luteal_days": {
         "description": "黄体期持续天数",
         "type": "int",
         "default": 8,
-        "slider": { "min": 1, "max": 30, "step": 1 },
-        "condition": { "enable_advanced_cycle_strategy": true }
+        "slider": {
+          "min": 1,
+          "max": 30,
+          "step": 1
+        },
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
       },
       "advanced_cycle_luteal_prompt": {
         "description": "黄体期状态描述",
         "type": "string",
         "default": "处于黄体期，精力尚可，情绪整体平稳",
-        "condition": { "enable_advanced_cycle_strategy": true }
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
       },
       "advanced_cycle_luteal_mood": {
         "description": "黄体期情绪底色",
         "type": "string",
         "default": "平稳",
-        "condition": { "enable_advanced_cycle_strategy": true }
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
       },
       "advanced_cycle_luteal_energy": {
         "description": "黄体期精力变化",
         "type": "int",
         "hint": "仅在关闭强度联动时使用。",
         "default": 5,
-        "slider": { "min": -50, "max": 30, "step": 1 },
-        "condition": { "enable_advanced_cycle_strategy": true }
+        "slider": {
+          "min": -50,
+          "max": 30,
+          "step": 1
+        },
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
       },
       "advanced_cycle_pms_days": {
         "description": "PMS 期持续天数",
         "type": "int",
         "default": 6,
-        "slider": { "min": 1, "max": 30, "step": 1 },
-        "condition": { "enable_advanced_cycle_strategy": true }
+        "slider": {
+          "min": 1,
+          "max": 30,
+          "step": 1
+        },
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
       },
       "advanced_cycle_pms_prompt": {
         "description": "PMS 期状态描述",
         "type": "string",
         "default": "处于 PMS 期，精力有所下降，情绪波动稍明显",
-        "condition": { "enable_advanced_cycle_strategy": true }
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
       },
       "advanced_cycle_pms_mood": {
         "description": "PMS 期情绪底色",
         "type": "string",
         "default": "敏感",
-        "condition": { "enable_advanced_cycle_strategy": true }
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
       },
       "advanced_cycle_pms_energy": {
         "description": "PMS 期精力变化",
         "type": "int",
         "hint": "仅在关闭强度联动时使用。",
         "default": -8,
-        "slider": { "min": -50, "max": 30, "step": 1 },
-        "condition": { "enable_advanced_cycle_strategy": true }
+        "slider": {
+          "min": -50,
+          "max": 30,
+          "step": 1
+        },
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
       },
       "advanced_cycle_discomfort_simulation": {
         "description": "生理期不适模拟",
         "type": "bool",
         "hint": "开启后，在月经期、PMS 期等阶段按概率生成短暂的痛经、头痛等不适状态，轻度压低精力并在总览中显示。默认关闭。",
         "default": false,
-        "condition": { "enable_advanced_cycle_strategy": true }
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
       },
       "advanced_cycle_discomfort_chance": {
         "description": "不适出现概率",
         "type": "int",
         "hint": "每天生成一次不适状态的概率（0-100），0 表示从不生成；同一时间只保留一条不适状态。",
         "default": 55,
-        "slider": { "min": 0, "max": 100, "step": 1 },
-        "condition": { "enable_advanced_cycle_strategy": true }
+        "slider": {
+          "min": 0,
+          "max": 100,
+          "step": 1
+        },
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
       },
       "advanced_cycle_discomfort_types": {
         "description": "可模拟的不适类型",
         "type": "string",
         "hint": "逗号分隔。可选：痛经、头痛、腰酸、乏力、情绪低落、恶心；只会出现在与之相关的阶段（如痛经仅在月经期）。",
         "default": "痛经,头痛,腰酸,乏力",
-        "condition": { "enable_advanced_cycle_strategy": true }
+        "condition": {
+          "enable_advanced_cycle_strategy": true
+        }
       },
       "humanized_state_intensity": {
         "description": "拟人状态强度",
@@ -10678,7 +11055,12 @@
         "description": "旧版生图使用范围",
         "type": "list",
         "hint": "仅用于把旧版勾选范围迁移到四项独立每日额度；旧版未勾选任何范围会迁移为四项 0（全部不允许）。",
-        "default": ["private_owner", "private_friend", "group", "proactive"],
+        "default": [
+          "private_owner",
+          "private_friend",
+          "group",
+          "proactive"
+        ],
         "invisible": true,
         "condition": {
           "enable_photo_text_action": true
@@ -10973,8 +11355,14 @@
       "group_nsfw_image_review_mode": {
         "description": "群聊成图审核模式",
         "type": "string",
-        "options": ["single", "dual"],
-        "labels": ["单模型审核", "双模型交叉审核"],
+        "options": [
+          "single",
+          "dual"
+        ],
+        "labels": [
+          "单模型审核",
+          "双模型交叉审核"
+        ],
         "hint": "单模型按视觉 Provider 优先级取首个可信结论；双模型会调用两个不同的可用视觉 Provider，任一判定不安全即不发群。只有一个模型可用时按审核失败处理。",
         "default": "single",
         "condition": {
@@ -10985,8 +11373,16 @@
       "group_nsfw_image_review_sensitivity": {
         "description": "群聊成图审核严格度",
         "type": "string",
-        "options": ["relaxed", "balanced", "strict"],
-        "labels": ["宽松", "均衡", "严格"],
+        "options": [
+          "relaxed",
+          "balanced",
+          "strict"
+        ],
+        "labels": [
+          "宽松",
+          "均衡",
+          "严格"
+        ],
         "hint": "宽松只拦截明确成人裸露或非法内容；均衡会谨慎处理明显性化内容；严格会把内衣、强性暗示和年龄难确认的性化画面也视为不适合群发。",
         "default": "balanced",
         "condition": {
@@ -11027,8 +11423,14 @@
       "group_nsfw_image_review_failure_action": {
         "description": "审核失败处理",
         "type": "string",
-        "options": ["private", "block"],
-        "labels": ["改为私聊请求者", "阻止发送"],
+        "options": [
+          "private",
+          "block"
+        ],
+        "labels": [
+          "改为私聊请求者",
+          "阻止发送"
+        ],
         "hint": "只影响超时、模型不可用、低置信度或双模型不足等无法完成审核的情况；明确成人或违规内容仍按现有规则仅尝试私聊请求者。",
         "default": "private",
         "condition": {
@@ -11783,16 +12185,32 @@
       "hdsi_experiment_mode": {
         "description": "HDSI 试验模式",
         "type": "string",
-        "options": ["legacy", "hdsi_shadow", "hdsi_active"],
-        "labels": ["旧框架（默认）", "HDSI 影子观察", "HDSI 表达试验"],
+        "options": [
+          "legacy",
+          "hdsi_shadow",
+          "hdsi_active"
+        ],
+        "labels": [
+          "旧框架（默认）",
+          "HDSI 影子观察",
+          "HDSI 表达试验"
+        ],
         "default": "legacy",
         "hint": "此项设置下方列表的模式；聊天命令保存的窗口选择优先。可直接在目标窗口发送 HDSI 开启、HDSI 关闭或 HDSI 状态，无需手填 ID；群聊需要陪伴管理权限。"
       },
       "hdsi_experiment_continuity_scope": {
         "description": "HDSI 持续生活共享范围",
         "type": "string",
-        "options": ["session", "user", "global"],
-        "labels": ["当前会话", "同一用户", "全局共用角色"],
+        "options": [
+          "session",
+          "user",
+          "global"
+        ],
+        "labels": [
+          "当前会话",
+          "同一用户",
+          "全局共用角色"
+        ],
         "default": "global",
         "hint": "HDSI 试验中角色持续状态的归属。global 表示一个角色同时面对多个私聊和群聊窗口；user 按平台用户隔离；session 仅在当前会话内连续。"
       },
@@ -12504,8 +12922,16 @@
       "mobile_location_weather_sensitivity": {
         "description": "地点事件天气联动敏感度",
         "type": "string",
-        "options": ["quiet", "balanced", "sensitive"],
-        "labels": ["安静：仅高风险天气", "平衡：中到高风险天气", "敏感：普通降雨也联动"],
+        "options": [
+          "quiet",
+          "balanced",
+          "sensitive"
+        ],
+        "labels": [
+          "安静：仅高风险天气",
+          "平衡：中到高风险天气",
+          "敏感：普通降雨也联动"
+        ],
         "hint": "控制用户离开家/公司等已标记地点时，天气是否参与主动消息。默认平衡；敏感会保留普通降雨的关心能力，但仍受主动消息去重、冷却和每日配额约束。",
         "default": "balanced",
         "condition": {
@@ -13099,8 +13525,16 @@
       "reaction_expression_vision_verify_mode": {
         "description": "发送前视觉复核表情包",
         "type": "string",
-        "options": ["off", "embedding", "always"],
-        "labels": ["关闭", "仅向量主导选图时复核", "每次都复核"],
+        "options": [
+          "off",
+          "embedding",
+          "always"
+        ],
+        "labels": [
+          "关闭",
+          "仅向量主导选图时复核",
+          "每次都复核"
+        ],
         "hint": "发送前让视觉模型看一眼选中的表情包：embedding=仅当本次选图由向量相似度主导时复核；always=每次都复核；off=关闭。复核结果会随工具返回给聊天模型，不贴合则不发送。主动消息的低延迟路径不复核。",
         "default": "embedding",
         "condition": {
@@ -13238,21 +13672,27 @@
         "type": "bool",
         "hint": "开启后按未恢复负荷依次进入回避、明确拒绝和冷静反思；关闭后仍可扣分和恢复，但不推进表达阶段。",
         "default": true,
-        "condition": {"enable_relationship_boundary_feedback": true}
+        "condition": {
+          "enable_relationship_boundary_feedback": true
+        }
       },
       "enable_relationship_boundary_apology": {
         "description": "允许道歉修复",
         "type": "bool",
         "hint": "开启后，真诚道歉可在可恢复额度内返还部分关系分并加速自然恢复；反问和讽刺不会按道歉处理。",
         "default": true,
-        "condition": {"enable_relationship_boundary_feedback": true}
+        "condition": {
+          "enable_relationship_boundary_feedback": true
+        }
       },
       "enable_relationship_boundary_bottom_line": {
         "description": "启用底线递进处理",
         "type": "bool",
         "hint": "开启后恶意踩底线会单独累计，第三次及以后按现有关系策略降一档；关闭后同类内容只按严重越界处理。",
         "default": true,
-        "condition": {"enable_relationship_boundary_feedback": true}
+        "condition": {
+          "enable_relationship_boundary_feedback": true
+        }
       },
       "relationship_boundary_tier_adaptive": {
         "description": "按关系档位调节",
@@ -13267,249 +13707,405 @@
         "description": "轻度越界扣分",
         "type": "int",
         "hint": "行为仅比当前关系高一个档位时的基础扣分，实际值还会受档位保护和统一账本上限约束。",
-        "slider": {"min": 1, "max": 30, "step": 1},
+        "slider": {
+          "min": 1,
+          "max": 30,
+          "step": 1
+        },
         "default": 4,
-        "condition": {"enable_relationship_boundary_feedback": true}
+        "condition": {
+          "enable_relationship_boundary_feedback": true
+        }
       },
       "relationship_boundary_penalty_mid": {
         "description": "中度越界扣分",
         "type": "int",
         "hint": "行为比当前关系高两个档位时的基础扣分。",
-        "slider": {"min": 1, "max": 40, "step": 1},
+        "slider": {
+          "min": 1,
+          "max": 40,
+          "step": 1
+        },
         "default": 7,
-        "condition": {"enable_relationship_boundary_feedback": true}
+        "condition": {
+          "enable_relationship_boundary_feedback": true
+        }
       },
       "relationship_boundary_penalty_severe": {
         "description": "严重越界扣分",
         "type": "int",
         "hint": "跨越三个以上档位、明确纠缠强迫或露骨骚扰时的基础扣分。",
-        "slider": {"min": 1, "max": 60, "step": 1},
+        "slider": {
+          "min": 1,
+          "max": 60,
+          "step": 1
+        },
         "default": 12,
-        "condition": {"enable_relationship_boundary_feedback": true}
+        "condition": {
+          "enable_relationship_boundary_feedback": true
+        }
       },
       "relationship_boundary_penalty_bottom_line": {
         "description": "踩底线扣分",
         "type": "int",
         "hint": "恶意贬低角色、角色珍视之物或在意的人时的基础扣分；第三次及以后还会按现有关系策略降一档并写入账本。",
-        "slider": {"min": 1, "max": 60, "step": 1},
+        "slider": {
+          "min": 1,
+          "max": 60,
+          "step": 1
+        },
         "default": 14,
-        "condition": {"enable_relationship_boundary_feedback": true}
+        "condition": {
+          "enable_relationship_boundary_feedback": true
+        }
       },
       "relationship_boundary_stage_avoid_points": {
         "description": "开始回避的累计值",
         "type": "int",
         "hint": "未恢复的边界负荷达到该值后，角色会降低亲密度并略微回避。",
-        "slider": {"min": 1, "max": 60, "step": 1},
+        "slider": {
+          "min": 1,
+          "max": 60,
+          "step": 1
+        },
         "default": 6,
-        "condition": {"enable_relationship_boundary_feedback": true}
+        "condition": {
+          "enable_relationship_boundary_feedback": true
+        }
       },
       "relationship_boundary_stage_forbid_points": {
         "description": "明确拒绝的累计值",
         "type": "int",
         "hint": "达到该值后，角色会更明确地说明边界，避免用撒娇或玩笑冲淡拒绝。",
-        "slider": {"min": 1, "max": 90, "step": 1},
+        "slider": {
+          "min": 1,
+          "max": 90,
+          "step": 1
+        },
         "default": 12,
-        "condition": {"enable_relationship_boundary_feedback": true}
+        "condition": {
+          "enable_relationship_boundary_feedback": true
+        }
       },
       "relationship_boundary_stage_reflect_points": {
         "description": "冷静反思的累计值",
         "type": "int",
         "hint": "达到该值后进入更克制的冷静阶段，主动亲密候选会被现有情绪门延后。",
-        "slider": {"min": 1, "max": 120, "step": 1},
+        "slider": {
+          "min": 1,
+          "max": 120,
+          "step": 1
+        },
         "default": 20,
-        "condition": {"enable_relationship_boundary_feedback": true}
+        "condition": {
+          "enable_relationship_boundary_feedback": true
+        }
       },
       "relationship_boundary_cold_minutes": {
         "description": "冷静阶段最长分钟",
         "type": "int",
         "hint": "反复越界或踩底线后的最长冷静时长；自然恢复和真诚道歉可以提前缓和。",
-        "slider": {"min": 10, "max": 1440, "step": 10},
+        "slider": {
+          "min": 10,
+          "max": 1440,
+          "step": 10
+        },
         "default": 180,
-        "condition": {"enable_relationship_boundary_feedback": true}
+        "condition": {
+          "enable_relationship_boundary_feedback": true
+        }
       },
       "relationship_boundary_apology_restore_ratio": {
         "description": "道歉恢复比例",
         "type": "float",
         "hint": "真诚道歉最多恢复当前边界负荷的比例，仍受本次事件可恢复额度限制；同类再犯会追回已恢复部分。",
-        "slider": {"min": 0, "max": 1, "step": 0.05},
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.05
+        },
         "default": 0.6,
-        "condition": {"enable_relationship_boundary_feedback": true}
+        "condition": {
+          "enable_relationship_boundary_feedback": true
+        }
       },
       "relationship_boundary_apology_duplicate_limit": {
         "description": "同类道歉有效次数",
         "type": "int",
         "hint": "同一类边界事件累计接受多少次道歉后不再自动恢复，避免反复越界、反复道歉无限重置。",
-        "slider": {"min": 1, "max": 20, "step": 1},
+        "slider": {
+          "min": 1,
+          "max": 20,
+          "step": 1
+        },
         "default": 3,
-        "condition": {"enable_relationship_boundary_feedback": true}
+        "condition": {
+          "enable_relationship_boundary_feedback": true
+        }
       },
       "relationship_boundary_apology_speedup_multiplier": {
         "description": "道歉后恢复加速倍数",
         "type": "float",
         "hint": "接受真诚道歉后，自然恢复计时临时加速的倍数；只影响允许恢复的额度，不会抹掉永久扣分。",
-        "slider": {"min": 1, "max": 10, "step": 0.5},
+        "slider": {
+          "min": 1,
+          "max": 10,
+          "step": 0.5
+        },
         "default": 3.0,
-        "condition": {"enable_relationship_boundary_apology": true}
+        "condition": {
+          "enable_relationship_boundary_apology": true
+        }
       },
       "relationship_boundary_recover_ratio_light": {
         "description": "轻度事件可恢复比例",
         "type": "float",
         "hint": "轻度越界扣分中允许随时间或道歉恢复的比例，其余部分作为真实关系影响保留。",
-        "slider": {"min": 0, "max": 1, "step": 0.05},
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.05
+        },
         "default": 0.5,
-        "condition": {"enable_relationship_boundary_feedback": true}
+        "condition": {
+          "enable_relationship_boundary_feedback": true
+        }
       },
       "relationship_boundary_recover_ratio_mid": {
         "description": "中度事件可恢复比例",
         "type": "float",
         "hint": "中度越界扣分中允许恢复的比例。",
-        "slider": {"min": 0, "max": 1, "step": 0.05},
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.05
+        },
         "default": 0.33,
-        "condition": {"enable_relationship_boundary_feedback": true}
+        "condition": {
+          "enable_relationship_boundary_feedback": true
+        }
       },
       "relationship_boundary_recover_ratio_severe": {
         "description": "严重事件可恢复比例",
         "type": "float",
         "hint": "严重越界扣分中允许恢复的比例；踩底线事件会在此基础上再减半。",
-        "slider": {"min": 0, "max": 1, "step": 0.05},
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.05
+        },
         "default": 0.25,
-        "condition": {"enable_relationship_boundary_feedback": true}
+        "condition": {
+          "enable_relationship_boundary_feedback": true
+        }
       },
       "enable_relationship_boundary_vent": {
         "description": "允许向亲近对象吐槽",
         "type": "bool",
         "hint": "按严重程度低频把真实边界事件写入当天生活叙事，表现为角色向亲近对象倾诉；不会覆盖已有日程，也不会保存原消息全文。",
         "default": true,
-        "condition": {"enable_relationship_boundary_feedback": true}
+        "condition": {
+          "enable_relationship_boundary_feedback": true
+        }
       },
       "relationship_boundary_vent_targets": {
         "description": "倾诉对象",
         "type": "list",
         "hint": "可填写角色设定中可信赖的朋友、姐姐等名字；留空时使用泛称“亲近的朋友”。",
         "default": [],
-        "condition": {"enable_relationship_boundary_vent": true}
+        "condition": {
+          "enable_relationship_boundary_vent": true
+        }
       },
       "relationship_boundary_vent_scene_template": {
         "description": "倾诉场景模板",
         "type": "text",
         "hint": "可使用 {target}、{who}、{level}、{feeling}、{reason} 占位符；留空时使用自然的默认生活叙事。模板无效会自动回退，不会中断消息处理。",
         "default": "",
-        "condition": {"enable_relationship_boundary_vent": true}
+        "condition": {
+          "enable_relationship_boundary_vent": true
+        }
       },
       "relationship_boundary_vent_probability_light": {
         "description": "轻度事件倾诉概率",
         "type": "float",
-        "slider": {"min": 0, "max": 1, "step": 0.05},
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.05
+        },
         "default": 0.15,
-        "condition": {"enable_relationship_boundary_vent": true}
+        "condition": {
+          "enable_relationship_boundary_vent": true
+        }
       },
       "relationship_boundary_vent_probability_mid": {
         "description": "中度事件倾诉概率",
         "type": "float",
-        "slider": {"min": 0, "max": 1, "step": 0.05},
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.05
+        },
         "default": 0.35,
-        "condition": {"enable_relationship_boundary_vent": true}
+        "condition": {
+          "enable_relationship_boundary_vent": true
+        }
       },
       "relationship_boundary_vent_probability_severe": {
         "description": "严重事件倾诉概率",
         "type": "float",
-        "slider": {"min": 0, "max": 1, "step": 0.05},
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.05
+        },
         "default": 0.6,
-        "condition": {"enable_relationship_boundary_vent": true}
+        "condition": {
+          "enable_relationship_boundary_vent": true
+        }
       },
       "relationship_boundary_vent_probability_bottom_line": {
         "description": "底线事件倾诉概率",
         "type": "float",
-        "slider": {"min": 0, "max": 1, "step": 0.05},
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.05
+        },
         "default": 0.9,
-        "condition": {"enable_relationship_boundary_vent": true}
+        "condition": {
+          "enable_relationship_boundary_vent": true
+        }
       },
       "enable_relationship_boundary_owner_report": {
         "description": "允许向主要用户转达",
         "type": "bool",
         "hint": "次要用户越界后，按严重程度低频向主要用户自然转达。事件也会进入“边界转达”主动能力候选；已直接转达的事件不会再次主动复述。",
         "default": true,
-        "condition": {"enable_relationship_boundary_feedback": true}
+        "condition": {
+          "enable_relationship_boundary_feedback": true
+        }
       },
       "relationship_boundary_owner_report_probability_light": {
         "description": "轻度事件转达概率",
         "type": "float",
-        "slider": {"min": 0, "max": 1, "step": 0.05},
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.05
+        },
         "default": 0.12,
-        "condition": {"enable_relationship_boundary_owner_report": true}
+        "condition": {
+          "enable_relationship_boundary_owner_report": true
+        }
       },
       "relationship_boundary_owner_report_probability_mid": {
         "description": "中度事件转达概率",
         "type": "float",
-        "slider": {"min": 0, "max": 1, "step": 0.05},
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.05
+        },
         "default": 0.3,
-        "condition": {"enable_relationship_boundary_owner_report": true}
+        "condition": {
+          "enable_relationship_boundary_owner_report": true
+        }
       },
       "relationship_boundary_owner_report_probability_severe": {
         "description": "严重事件转达概率",
         "type": "float",
-        "slider": {"min": 0, "max": 1, "step": 0.05},
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.05
+        },
         "default": 0.55,
-        "condition": {"enable_relationship_boundary_owner_report": true}
+        "condition": {
+          "enable_relationship_boundary_owner_report": true
+        }
       },
       "relationship_boundary_owner_report_probability_bottom_line": {
         "description": "底线事件转达概率",
         "type": "float",
-        "slider": {"min": 0, "max": 1, "step": 0.05},
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.05
+        },
         "default": 0.85,
-        "condition": {"enable_relationship_boundary_owner_report": true}
+        "condition": {
+          "enable_relationship_boundary_owner_report": true
+        }
       },
       "relationship_boundary_bottom_line_baseline": {
         "description": "角色专属底线基线",
         "type": "text",
         "hint": "可填写角色珍视的事物、在意的人、创伤和不可接受的恶意行为，仅供模型复核参考；普通玩笑和情绪发泄仍不应判为踩底线。",
         "default": "",
-        "condition": {"enable_relationship_boundary_feedback": true}
+        "condition": {
+          "enable_relationship_boundary_feedback": true
+        }
       },
       "relationship_boundary_tone_confession": {
         "description": "收到表白时的反应",
         "type": "text",
         "hint": "只约束表达方式，不扣分。建议描述角色会害羞、迟疑、接受或说明节奏的方式。",
         "default": "把这次表达当作心意，不当作冒犯；结合当前关系自然害羞、迟疑或温和说明节奏，不必机械拒绝。",
-        "condition": {"enable_relationship_boundary_feedback": true}
+        "condition": {
+          "enable_relationship_boundary_feedback": true
+        }
       },
       "relationship_boundary_tone_light": {
         "description": "轻度越界反应",
         "type": "text",
         "default": "轻微降低亲密度，带一点迟疑或回避并自然说明节奏；不要把普通互动渲染成严重冒犯。",
-        "condition": {"enable_relationship_boundary_feedback": true}
+        "condition": {
+          "enable_relationship_boundary_feedback": true
+        }
       },
       "relationship_boundary_tone_mid": {
         "description": "中度越界反应",
         "type": "text",
         "default": "平静而明确地划清界限，减少主动贴近和暧昧回应；可以说明原因，但不要反复说教。",
-        "condition": {"enable_relationship_boundary_feedback": true}
+        "condition": {
+          "enable_relationship_boundary_feedback": true
+        }
       },
       "relationship_boundary_tone_severe": {
         "description": "严重越界反应",
         "type": "text",
         "default": "明显收住亲密表达，直接说明不舒服并拒绝继续；保持角色口吻，不使用系统式警告。",
-        "condition": {"enable_relationship_boundary_feedback": true}
+        "condition": {
+          "enable_relationship_boundary_feedback": true
+        }
       },
       "relationship_boundary_tone_bottom_line": {
         "description": "踩底线反应",
         "type": "text",
         "default": "明确表达这触碰了重要底线，受伤和距离感可以真实存在；不要功能化播报惩罚，也不要立即恢复亲密。",
-        "condition": {"enable_relationship_boundary_feedback": true}
+        "condition": {
+          "enable_relationship_boundary_feedback": true
+        }
       },
       "relationship_boundary_tone_silent": {
         "description": "低关系档位反应策略",
         "type": "text",
         "hint": "关系尚浅时的附加表达约束，默认更克制，不强行袒露大量脆弱。",
         "default": "关系尚浅时不必长篇袒露脆弱，可以安静收住互动并记住这次不舒服。",
-        "condition": {"enable_relationship_boundary_feedback": true}
+        "condition": {
+          "enable_relationship_boundary_feedback": true
+        }
       },
       "relationship_boundary_tone_communicate": {
         "description": "高关系档位反应策略",
         "type": "text",
         "hint": "关系亲密时的附加表达约束，默认更愿意沟通原因，但不会因为亲密而放弃边界。",
         "default": "关系很深时可以因为信任而说清为什么难过或生气，但亲密关系不等于放弃边界。",
-        "condition": {"enable_relationship_boundary_feedback": true}
+        "condition": {
+          "enable_relationship_boundary_feedback": true
+        }
       },
       "relationship_violation_recovery_minutes_per_point": {
         "description": "关系底线点恢复速度",
@@ -13768,8 +14364,14 @@
       "segmented_proactive_private_scope": {
         "description": "私聊分段作用范围",
         "type": "string",
-        "options": ["proactive_only", "all_llm"],
-        "labels": ["仅插件主动", "全部纯文本回复"],
+        "options": [
+          "proactive_only",
+          "all_llm"
+        ],
+        "labels": [
+          "仅插件主动",
+          "全部纯文本回复"
+        ],
         "default": "proactive_only",
         "condition": {
           "segmented_proactive_private_enabled": true,
@@ -13779,7 +14381,11 @@
       "segmented_proactive_private_threshold": {
         "description": "私聊不分段字数阈值",
         "type": "int",
-        "slider": {"min": 20, "max": 1024, "step": 2},
+        "slider": {
+          "min": 20,
+          "max": 1024,
+          "step": 2
+        },
         "default": 500,
         "condition": {
           "segmented_proactive_private_enabled": true,
@@ -13789,7 +14395,11 @@
       "segmented_proactive_private_min_segment_chars": {
         "description": "私聊短片段合并阈值",
         "type": "int",
-        "slider": {"min": 1, "max": 40, "step": 1},
+        "slider": {
+          "min": 1,
+          "max": 40,
+          "step": 1
+        },
         "default": 8,
         "condition": {
           "segmented_proactive_private_enabled": true,
@@ -13799,7 +14409,11 @@
       "segmented_proactive_private_max_segments": {
         "description": "私聊最多分段数",
         "type": "int",
-        "slider": {"min": 1, "max": 8, "step": 1},
+        "slider": {
+          "min": 1,
+          "max": 8,
+          "step": 1
+        },
         "default": 3,
         "condition": {
           "segmented_proactive_private_enabled": true,
@@ -13818,8 +14432,14 @@
       "segmented_proactive_private_interval_method": {
         "description": "私聊分段间隔方式",
         "type": "string",
-        "options": ["random", "log"],
-        "labels": ["随机", "按字数对数"],
+        "options": [
+          "random",
+          "log"
+        ],
+        "labels": [
+          "随机",
+          "按字数对数"
+        ],
         "default": "log",
         "condition": {
           "segmented_proactive_private_enabled": true,
@@ -13868,8 +14488,14 @@
       "segmented_proactive_group_scope": {
         "description": "群聊分段作用范围",
         "type": "string",
-        "options": ["proactive_only", "all_llm"],
-        "labels": ["仅插件主动", "全部纯文本回复"],
+        "options": [
+          "proactive_only",
+          "all_llm"
+        ],
+        "labels": [
+          "仅插件主动",
+          "全部纯文本回复"
+        ],
         "default": "proactive_only",
         "condition": {
           "segmented_proactive_group_enabled": true,
@@ -13879,7 +14505,11 @@
       "segmented_proactive_group_threshold": {
         "description": "群聊不分段字数阈值",
         "type": "int",
-        "slider": {"min": 20, "max": 1024, "step": 2},
+        "slider": {
+          "min": 20,
+          "max": 1024,
+          "step": 2
+        },
         "default": 500,
         "condition": {
           "segmented_proactive_group_enabled": true,
@@ -13889,7 +14519,11 @@
       "segmented_proactive_group_min_segment_chars": {
         "description": "群聊短片段合并阈值",
         "type": "int",
-        "slider": {"min": 1, "max": 40, "step": 1},
+        "slider": {
+          "min": 1,
+          "max": 40,
+          "step": 1
+        },
         "default": 8,
         "condition": {
           "segmented_proactive_group_enabled": true,
@@ -13899,7 +14533,11 @@
       "segmented_proactive_group_max_segments": {
         "description": "群聊最多分段数",
         "type": "int",
-        "slider": {"min": 1, "max": 8, "step": 1},
+        "slider": {
+          "min": 1,
+          "max": 8,
+          "step": 1
+        },
         "default": 3,
         "condition": {
           "segmented_proactive_group_enabled": true,
@@ -13918,8 +14556,14 @@
       "segmented_proactive_group_interval_method": {
         "description": "群聊分段间隔方式",
         "type": "string",
-        "options": ["random", "log"],
-        "labels": ["随机", "按字数对数"],
+        "options": [
+          "random",
+          "log"
+        ],
+        "labels": [
+          "随机",
+          "按字数对数"
+        ],
         "default": "log",
         "condition": {
           "segmented_proactive_group_enabled": true,
@@ -14011,8 +14655,18 @@
         "description": "语音组件位置",
         "type": "string",
         "hint": "控制语音与相邻正文的发送关系。默认单独发送，引用只跟随正文，不会挂到语音上。",
-        "options": ["inline", "separate", "previous", "next"],
-        "labels": ["嵌入正文", "单独发送", "跟随上段", "跟随下段"],
+        "options": [
+          "inline",
+          "separate",
+          "previous",
+          "next"
+        ],
+        "labels": [
+          "嵌入正文",
+          "单独发送",
+          "跟随上段",
+          "跟随下段"
+        ],
         "default": "separate",
         "condition": {
           "enable_segmented_proactive_reply": true
@@ -14022,8 +14676,18 @@
         "description": "图片组件位置",
         "type": "string",
         "hint": "控制普通图片与相邻正文的发送关系；表情包图片仍使用表情表达的专用位置设置。",
-        "options": ["inline", "separate", "previous", "next"],
-        "labels": ["嵌入正文", "单独发送", "跟随上段", "跟随下段"],
+        "options": [
+          "inline",
+          "separate",
+          "previous",
+          "next"
+        ],
+        "labels": [
+          "嵌入正文",
+          "单独发送",
+          "跟随上段",
+          "跟随下段"
+        ],
         "default": "separate",
         "condition": {
           "enable_segmented_proactive_reply": true
@@ -14033,8 +14697,18 @@
         "description": "@ 组件位置",
         "type": "string",
         "hint": "默认嵌入相邻正文，避免 @ 被拆成一条没有文字的消息。",
-        "options": ["inline", "separate", "previous", "next"],
-        "labels": ["嵌入正文", "单独发送", "跟随上段", "跟随下段"],
+        "options": [
+          "inline",
+          "separate",
+          "previous",
+          "next"
+        ],
+        "labels": [
+          "嵌入正文",
+          "单独发送",
+          "跟随上段",
+          "跟随下段"
+        ],
         "default": "inline",
         "condition": {
           "enable_segmented_proactive_reply": true
@@ -14044,8 +14718,18 @@
         "description": "平台表情位置",
         "type": "string",
         "hint": "控制平台原生 Face/Emoji 组件；不影响表情包素材库发送策略。",
-        "options": ["inline", "separate", "previous", "next"],
-        "labels": ["嵌入正文", "单独发送", "跟随上段", "跟随下段"],
+        "options": [
+          "inline",
+          "separate",
+          "previous",
+          "next"
+        ],
+        "labels": [
+          "嵌入正文",
+          "单独发送",
+          "跟随上段",
+          "跟随下段"
+        ],
         "default": "inline",
         "condition": {
           "enable_segmented_proactive_reply": true
@@ -14055,7 +14739,15 @@
         "description": "组件先后顺序",
         "type": "list",
         "hint": "拖动组件类型决定整体先后；组件是否和正文同条发送仍由下方位置策略决定。引用固定跟随第一段正文。",
-        "default": ["voice", "at", "text", "face", "image", "other", "reaction"],
+        "default": [
+          "voice",
+          "at",
+          "text",
+          "face",
+          "image",
+          "other",
+          "reaction"
+        ],
         "condition": {
           "enable_segmented_proactive_reply": true
         }
@@ -14064,8 +14756,18 @@
         "description": "其他附件位置",
         "type": "string",
         "hint": "文件、视频等未单列组件默认独立发送，减少适配器混合消息兼容问题。",
-        "options": ["inline", "separate", "previous", "next"],
-        "labels": ["嵌入正文", "单独发送", "跟随上段", "跟随下段"],
+        "options": [
+          "inline",
+          "separate",
+          "previous",
+          "next"
+        ],
+        "labels": [
+          "嵌入正文",
+          "单独发送",
+          "跟随上段",
+          "跟随下段"
+        ],
         "default": "separate",
         "condition": {
           "enable_segmented_proactive_reply": true
@@ -14350,8 +15052,7 @@
         "invisible": true
       }
     }
-  }
-,
+  },
   "wardrobe_config": {
     "description": "角色衣柜",
     "type": "object",
@@ -14429,8 +15130,14 @@
       "wardrobe_outfit_mode": {
         "description": "着装注入方式",
         "type": "string",
-        "options": ["inventory", "select"],
-        "labels": ["注入整份衣柜清单", "只注入当天裁决出的那一套"],
+        "options": [
+          "inventory",
+          "select"
+        ],
+        "labels": [
+          "注入整份衣柜清单",
+          "只注入当天裁决出的那一套"
+        ],
         "hint": "inventory：把整份衣柜清单注入提示词。select：每天裁决出一套只注入这一套，更省上下文，也更像真的在换衣服；内置七套预设整套，开箱即用。",
         "default": "select",
         "condition": {
@@ -14441,8 +15148,14 @@
       "wardrobe_injection_detail": {
         "description": "着装描述详略",
         "type": "string",
-        "options": ["full", "progressive"],
-        "labels": ["每轮注入完整着装", "常驻一行，问到才展开"],
+        "options": [
+          "full",
+          "progressive"
+        ],
+        "labels": [
+          "每轮注入完整着装",
+          "常驻一行，问到才展开"
+        ],
         "hint": "full：每轮都注入完整着装描述（原有行为）。progressive：常驻只注入一行「今天穿什么」，用户问到服装时才展开完整描述——省上下文，细节也更集中。",
         "default": "full",
         "condition": {
@@ -14453,8 +15166,14 @@
       "wardrobe_photo_source": {
         "description": "每日穿搭照片的衣着来源",
         "type": "string",
-        "options": ["builtin", "wardrobe"],
-        "labels": ["沿用插件自带候选表（默认）", "用衣柜裁决的那一套"],
+        "options": [
+          "builtin",
+          "wardrobe"
+        ],
+        "labels": [
+          "沿用插件自带候选表（默认）",
+          "用衣柜裁决的那一套"
+        ],
         "hint": "builtin（默认）：沿用插件原有的场景候选表，升级后行为不变；wardrobe：每日穿搭照片改穿衣柜里裁决出的那一套（含 footwear 等字段），需要主动开启。衣柜为空时自动回落。",
         "default": "builtin",
         "condition": {
