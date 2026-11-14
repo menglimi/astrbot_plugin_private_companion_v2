@@ -1266,6 +1266,78 @@ class UnifiedPersonRegistry:
                 checkpoint["last_source_operation_id"] = _text(operation_id, "operation_id", 120)
             return {"ok": True, "code": "source_event_recorded", "source_event_count": len(seen)}
 
+    def _merge_private_memory(self, source: str, target: str) -> int:
+        """Union the source person's REQ-041 memory bucket into target.
+
+        Identity merge used to move links but leave ``records[source]``
+        untouched, so the target could never answer with facts learned under
+        the source identity.  Keep all entries and delete the now-orphan
+        source bucket only after the target commit succeeds.
+        """
+        root = self._store.get("_req041_private_memory")
+        if not isinstance(root, dict) or not isinstance(root.get("records"), dict):
+            return 0
+        if source not in root["records"] or target == source:
+            return 0
+        try:
+            from authoritative_private_memory import (
+                AuthoritativePrivateMemoryStore,
+                PRIVATE_MEMORY_FIELDS,
+            )
+        except ImportError:
+            from .authoritative_private_memory import (
+                AuthoritativePrivateMemoryStore,
+                PRIVATE_MEMORY_FIELDS,
+            )
+        store = AuthoritativePrivateMemoryStore(self._store)
+        source_read = store.read(source)
+        target_read = store.read(target)
+        if source_read.get("record") is None:
+            return 0
+        source_content = source_read["record"].get("content") or {}
+        target_content = (target_read.get("record") or {}).get("content") or {}
+        merged = deepcopy(target_content)
+
+        def merge_value(old, new):
+            if old in (None, "", [], {}):
+                return deepcopy(new)
+            if isinstance(old, list) and isinstance(new, list):
+                values = list(old)
+                for item in new:
+                    if item not in values:
+                        values.append(deepcopy(item))
+                return values[-512:]
+            if isinstance(old, dict) and isinstance(new, dict):
+                result = deepcopy(old)
+                for key, value in new.items():
+                    result[key] = merge_value(result.get(key), value)
+                return result
+            if isinstance(old, str) and isinstance(new, str):
+                if not new or new in old:
+                    return old
+                return (old.rstrip() + "\n" + new.strip())[:8000]
+            # Numbers and timestamps: target is the surviving person.
+            return deepcopy(old)
+
+        entries = 0
+        for field in PRIVATE_MEMORY_FIELDS:
+            if field not in source_content:
+                continue
+            before = merged.get(field)
+            merged[field] = merge_value(before, source_content[field])
+            if merged[field] != before:
+                entries += 1
+        revision = (target_read.get("record") or {}).get("revision") or 0
+        store.commit(
+            target,
+            merged,
+            expected_revision=revision,
+            operation_id=f"merge-person-memory:{source}:{target}",
+            fields=PRIVATE_MEMORY_FIELDS,
+        )
+        root["records"].pop(source, None)
+        return entries
+
     def merge_person(
         self, source_person_id: str, target_person_id: str, *, operation_id: str = "",
         actor_id: str = "companion", **_: Any,
@@ -1332,10 +1404,17 @@ class UnifiedPersonRegistry:
             source_profile["profile_status"] = "merged"
             source_profile["merged_into"] = target
             source_profile["updated_at"] = now
+            try:
+                merged_memory_entries = self._merge_private_memory(source, target)
+            except Exception:
+                # Identity merging stays available even if one legacy memory
+                # bucket is malformed; the operator can repair and re-run.
+                merged_memory_entries = 0
             root["audit_events"].append({
                 "event_id": op, "action": "merge_person", "actor_id": actor,
                 "source_person_id": source, "target_person_id": target,
                 "moved_identity_links": moved_links, "moved_group_overlays": moved_overlays,
+                "merged_memory_entries": merged_memory_entries,
                 "at": now,
             })
             projection = build_person_projection(self._store, target)
@@ -1346,6 +1425,7 @@ class UnifiedPersonRegistry:
                 "source_person_id": source, "target_person_id": target,
                 "moved_identity_links": moved_links,
                 "moved_group_overlays": moved_overlays,
+                "merged_memory_entries": merged_memory_entries,
                 "projection": projection,
             }
 

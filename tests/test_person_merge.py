@@ -1,5 +1,6 @@
 import unittest
 
+from authoritative_private_memory import AuthoritativePrivateMemoryStore
 from unified_person_registry import UnifiedPersonRegistry
 
 
@@ -21,11 +22,21 @@ class PersonMergeTests(unittest.TestCase):
         right = registry.create_or_link(_identity("right"), operation_id="create-right")
         self.assertTrue(left["ok"] and right["ok"])
         source, target = left["person_id"], right["person_id"]
+        memory = AuthoritativePrivateMemoryStore(store)
+        memory.commit(source, {"companion_memory": "source fact"},
+                      expected_revision=0, operation_id="source-memory")
+        memory.commit(target, {"companion_memory": "target fact"},
+                      expected_revision=0, operation_id="target-memory")
 
         result = registry.merge_person(source, target, operation_id="merge-one")
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["moved_identity_links"], 1)
+        self.assertEqual(result["merged_memory_entries"], 1)
+        merged = memory.read(target)["record"]["content"]["companion_memory"]
+        self.assertIn("target fact", merged)
+        self.assertIn("source fact", merged)
+        self.assertNotIn(source, store["_req041_private_memory"]["records"])
         links = store["unified_person"]["identity_links"].values()
         self.assertTrue(all(link["person_id"] == target for link in links))
         self.assertEqual(store["unified_person"]["profiles"][source]["profile_status"], "merged")

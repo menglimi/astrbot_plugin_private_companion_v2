@@ -238,7 +238,6 @@ async def inject_humanized_state(
     if not hasattr(req, "system_prompt"):
         log_bookshelf_secret_skip("llm_request_no_system_prompt")
         return
-    self._sanitize_request_context_new_conversation_boundary(event, req)
     self._repair_incomplete_tool_context_groups(event, req)
     self._sanitize_private_companion_prompt_artifacts_in_request(event, req)
     reaction_history_neutralizer = getattr(
@@ -372,7 +371,6 @@ async def inject_humanized_state(
             )
         if mark_pending:
             pending_marker(event)
-    self._trim_passive_request_context_if_needed(event, req, is_private_chat=is_private_chat)
     await self._enrich_request_context_image_placeholders(event, req)
     if not is_private_chat:
         await self._append_group_image_understanding_to_request(event, req)

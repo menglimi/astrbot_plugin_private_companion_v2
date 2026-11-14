@@ -7064,12 +7064,6 @@
         "type": "bool",
         "hint": "开启后，普通私聊/群聊被动回复和部分主动消息会在 AstrBot 默认人格之上参考回复风格提示词、互动边界、偏好/表达习惯和简短接话策略。本层不写身份事实，不替换 AstrBot 人格。",
         "default": true
-      },
-      "enable_private_context_guard": {
-        "description": "私聊上下文轻量裁剪",
-        "type": "bool",
-        "hint": "开启后，私聊请求超过 24 条且估算达到 5 万 token / 120 条时只保留最近 24 条，并按“新会话”边界裁掉边界前的历史。默认关闭，关闭时完全保留 AstrBot 原始私聊上下文。",
-        "default": false
       }
     }
   },
